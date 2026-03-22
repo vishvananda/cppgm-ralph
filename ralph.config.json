@@ -1,0 +1,13 @@
+{
+  "workdir": "/work/cppgm",
+  "testCommand": "make test",
+  "maxTurns": 1000,
+  "stateDir": ".ralph",
+  "model": "gpt-5.3-codex",
+  "reasoningEffort": "high",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "additionalDirectories": [],
+  "outputTailChars": 20000
+}

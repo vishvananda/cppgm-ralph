@@ -1,0 +1,488 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import process from "node:process";
+
+import { Codex } from "@openai/codex-sdk";
+
+const DEFAULT_PROMPT = `Read AGENTS.md and follow it exactly. Starting from the current repository
+state, continue the PA1 through PA9 assignment sequence in order. Reuse and
+extend existing code instead of starting over. Follow the checked-in tests and
+assignment instructions, even when they differ from newer-standard behavior.
+After each completed assignment, update paN/RETRO.md, commit your changes, and
+keep going. After each completed phase, commit your intended changes so
+\`git status --short\` is empty before handing control back. Stop only when the
+repository root make test passes and \`git status --short\` is empty.`;
+
+const DEFAULT_CONFIG = {
+  workdir: "/work/cppgm",
+  testCommand: "make test",
+  maxTurns: 1000,
+  stateDir: ".ralph",
+  model: "gpt-5.3-codex",
+  reasoningEffort: "high",
+  sandboxMode: "danger-full-access",
+  approvalPolicy: "never",
+  networkAccessEnabled: true,
+  additionalDirectories: [],
+  outputTailChars: 20000,
+};
+
+const CONFIG_PATH = path.resolve(process.cwd(), process.env.RALPH_CONFIG ?? "ralph.config.json");
+
+let CONFIG = null;
+let STATE_PATH = null;
+let TEST_LOG_PATH = null;
+
+async function main() {
+  CONFIG = await loadConfig();
+  STATE_PATH = path.join(CONFIG.stateDir, "state.json");
+  TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
+
+  await fs.mkdir(CONFIG.stateDir, { recursive: true });
+  await assertDirectoryExists(CONFIG.workdir);
+  log(
+    `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
+      `workdir=${CONFIG.workdir}`,
+  );
+
+  const state = await loadState();
+  const threadOptions = {
+    workingDirectory: CONFIG.workdir,
+    sandboxMode: CONFIG.sandboxMode,
+    approvalPolicy: CONFIG.approvalPolicy,
+    networkAccessEnabled: CONFIG.networkAccessEnabled,
+    ...(CONFIG.model ? { model: CONFIG.model } : {}),
+    ...(CONFIG.reasoningEffort
+      ? { modelReasoningEffort: CONFIG.reasoningEffort }
+      : {}),
+    ...(CONFIG.additionalDirectories.length > 0
+      ? { additionalDirectories: CONFIG.additionalDirectories }
+      : {}),
+  };
+
+  let activeThreadId = process.env.RALPH_THREAD_ID ?? state.threadId ?? null;
+  let codex = null;
+  let thread = null;
+
+  for (let turnNumber = state.turnsCompleted; turnNumber < CONFIG.maxTurns; turnNumber += 1) {
+    const testRun = await runCommand(CONFIG.testCommand, CONFIG.workdir);
+    await fs.writeFile(TEST_LOG_PATH, testRun.output, "utf8");
+    log(`Latest test output: ${previewText(testRun.output)}`);
+    const gitStatus = await getGitStatus(CONFIG.workdir);
+    if (!gitStatus.clean) {
+      log(`Git status: ${previewText(gitStatus.output)}`);
+    }
+
+    if (testRun.exitCode === 0 && gitStatus.clean) {
+      if (activeThreadId || state.threadId || state.turnsCompleted > 0) {
+        await saveState({
+          threadId: activeThreadId,
+          turnsCompleted: turnNumber,
+          lastExitCode: 0,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      log("`make test` passed. Exiting.");
+      return;
+    }
+
+    if (!thread) {
+      codex = new Codex();
+      thread = activeThreadId
+        ? codex.resumeThread(activeThreadId, threadOptions)
+        : codex.startThread(threadOptions);
+      if (activeThreadId) {
+        log(`Resuming Codex thread ${activeThreadId}`);
+      } else {
+        log("Starting a new Codex thread");
+      }
+    }
+
+    log(
+      `Test run failed with exit code ${testRun.exitCode}. Handing control back to Codex ` +
+        `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
+    );
+
+    const prompt =
+      testRun.exitCode === 0 && !gitStatus.clean
+        ? buildCleanWorktreePrompt(gitStatus)
+        : turnNumber === 0 && !activeThreadId
+          ? buildInitialPrompt(testRun, gitStatus)
+          : buildContinuePrompt(testRun, gitStatus);
+
+    const { events } = await thread.runStreamed(prompt);
+    const turn = await collectStreamedTurn(events);
+    activeThreadId = thread.id ?? activeThreadId;
+
+    await saveState({
+      threadId: activeThreadId,
+      turnsCompleted: turnNumber + 1,
+      lastExitCode: testRun.exitCode,
+      updatedAt: new Date().toISOString(),
+    });
+
+    if (activeThreadId) {
+      log(`Active thread id: ${activeThreadId}`);
+    }
+    if (turn.usage) {
+      log(`Token usage: ${formatUsage(turn.usage)}`);
+    }
+    if (turn.finalResponse.trim()) {
+      log(`Codex response: ${previewText(turn.finalResponse)}`);
+    }
+  }
+
+  throw new Error(
+    `Hit the max turn limit (${CONFIG.maxTurns}) and \`${CONFIG.testCommand}\` still fails.`,
+  );
+}
+
+function buildInitialPrompt(testRun, gitStatus) {
+  return [
+    DEFAULT_PROMPT,
+    "",
+    "You are being driven by an outer Ralph loop.",
+    `After each turn, I will rerun \`${CONFIG.testCommand}\` in the repository root and send you the latest failures if it still does not pass.`,
+    "Keep the same development thread going until the full suite passes.",
+    "Do not leave a dirty worktree behind. Commit intended changes before returning control.",
+    "",
+    `Latest \`${CONFIG.testCommand}\` exit code: ${testRun.exitCode}`,
+    "",
+    "Latest test output:",
+    trimmedOutput(testRun.output),
+    "",
+    ...buildGitStatusLines(gitStatus),
+  ].join("\n");
+}
+
+function buildContinuePrompt(testRun, gitStatus) {
+  return [
+    "Continue the existing development loop in this repository.",
+    "Do not reset or restart the work. Pick up from the current tree state.",
+    `I reran \`${CONFIG.testCommand}\` from the repository root and it still fails.`,
+    `Latest exit code: ${testRun.exitCode}`,
+    gitStatus.clean
+      ? "The worktree is currently clean."
+      : "Your previous turn left a dirty worktree. Commit intended changes before returning control.",
+    "",
+    "Latest test output:",
+    trimmedOutput(testRun.output),
+    "",
+    ...buildGitStatusLines(gitStatus),
+    "",
+    "Fix the next blocking issues and keep going until the suite passes.",
+  ].join("\n");
+}
+
+function buildCleanWorktreePrompt(gitStatus) {
+  return [
+    "The tests now pass, but the worktree is not clean yet.",
+    "Commit the intended changes now so `git status --short` is empty before handing control back.",
+    "Do not discard intended work. Create the appropriate commit(s) and leave the repository clean.",
+    "",
+    ...buildGitStatusLines(gitStatus),
+  ].join("\n");
+}
+
+function buildGitStatusLines(gitStatus) {
+  return gitStatus.clean
+    ? ["Current `git status --short`: empty"]
+    : ["Current `git status --short`:", trimmedOutput(gitStatus.output)];
+}
+
+function trimmedOutput(output) {
+  if (output.length <= CONFIG.outputTailChars) {
+    return output;
+  }
+
+  return [
+    `[output truncated to last ${CONFIG.outputTailChars} characters]`,
+    output.slice(-CONFIG.outputTailChars),
+  ].join("\n");
+}
+
+async function runCommand(command, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({
+        exitCode: code ?? 1,
+        output: combineOutput(stdout, stderr),
+      });
+    });
+  });
+}
+
+async function getGitStatus(cwd) {
+  const result = await runCommand("git status --short", cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to run git status in ${cwd}`);
+  }
+  return {
+    clean: result.output.trim() === "",
+    output: result.output,
+  };
+}
+
+async function collectStreamedTurn(events) {
+  const items = [];
+  let finalResponse = "";
+  let usage = null;
+  let turnFailure = null;
+  let streamError = null;
+
+  for await (const event of events) {
+    log(`Codex event: ${summarizeEvent(event)}`);
+    if (event.type === "item.completed") {
+      items.push(event.item);
+      if (event.item.type === "agent_message") {
+        finalResponse = event.item.text;
+      }
+    } else if (event.type === "turn.completed") {
+      usage = event.usage;
+    } else if (event.type === "turn.failed") {
+      turnFailure = event.error;
+      break;
+    } else if (event.type === "error") {
+      streamError = event.message;
+      break;
+    }
+  }
+
+  if (turnFailure) {
+    throw new Error(turnFailure.message);
+  }
+  if (streamError) {
+    throw new Error(streamError);
+  }
+
+  return { items, finalResponse, usage };
+}
+
+function combineOutput(stdout, stderr) {
+  if (stdout && stderr) {
+    return `${stdout}\n${stderr}`.trim();
+  }
+  return (stdout || stderr).trim();
+}
+
+async function loadConfig() {
+  const fileConfig = await loadConfigFile();
+
+  return {
+    workdir: path.resolve(
+      process.cwd(),
+      process.env.RALPH_WORKDIR ?? fileConfig.workdir ?? DEFAULT_CONFIG.workdir,
+    ),
+    testCommand:
+      process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand,
+    maxTurns: parsePositiveInt(
+      process.env.RALPH_MAX_TURNS ?? fileConfig.maxTurns,
+      DEFAULT_CONFIG.maxTurns,
+    ),
+    stateDir: path.resolve(
+      process.cwd(),
+      process.env.RALPH_STATE_DIR ?? fileConfig.stateDir ?? DEFAULT_CONFIG.stateDir,
+    ),
+    model: process.env.RALPH_MODEL ?? fileConfig.model ?? DEFAULT_CONFIG.model,
+    reasoningEffort:
+      process.env.RALPH_REASONING_EFFORT ??
+      fileConfig.reasoningEffort ??
+      DEFAULT_CONFIG.reasoningEffort,
+    sandboxMode:
+      process.env.RALPH_SANDBOX_MODE ??
+      fileConfig.sandboxMode ??
+      DEFAULT_CONFIG.sandboxMode,
+    approvalPolicy:
+      process.env.RALPH_APPROVAL_POLICY ??
+      fileConfig.approvalPolicy ??
+      DEFAULT_CONFIG.approvalPolicy,
+    networkAccessEnabled: parseBoolean(
+      process.env.RALPH_NETWORK_ACCESS ?? fileConfig.networkAccessEnabled,
+      DEFAULT_CONFIG.networkAccessEnabled,
+    ),
+    additionalDirectories: parseAdditionalDirectories(
+      process.env.RALPH_ADDITIONAL_DIRECTORIES ?? fileConfig.additionalDirectories,
+    ),
+    outputTailChars: parsePositiveInt(
+      process.env.RALPH_OUTPUT_TAIL_CHARS ?? fileConfig.outputTailChars,
+      DEFAULT_CONFIG.outputTailChars,
+    ),
+  };
+}
+
+async function loadConfigFile() {
+  try {
+    const raw = await fs.readFile(CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+function summarizeEvent(event) {
+  if (event.type === "thread.started") {
+    return `thread.started ${event.thread_id}`;
+  }
+  if (event.type === "turn.started") {
+    return "turn.started";
+  }
+  if (event.type === "turn.completed") {
+    return `turn.completed in=${event.usage.input_tokens} out=${event.usage.output_tokens}`;
+  }
+  if (event.type === "turn.failed") {
+    return `turn.failed ${previewText(event.error.message)}`;
+  }
+  if (event.type === "error") {
+    return `error ${previewText(event.message)}`;
+  }
+  return `${event.type} ${summarizeItem(event.item)}`;
+}
+
+function summarizeItem(item) {
+  if (item.type === "agent_message") {
+    return `agent_message ${previewText(item.text)}`;
+  }
+  if (item.type === "reasoning") {
+    return `reasoning ${previewText(item.text)}`;
+  }
+  if (item.type === "command_execution") {
+    const status = item.exit_code == null ? item.status : `${item.status} exit=${item.exit_code}`;
+    const detail = item.aggregated_output ? previewText(item.aggregated_output) : item.command;
+    return `command_execution ${status} ${previewText(detail)}`;
+  }
+  if (item.type === "file_change") {
+    const changes = item.changes.map((change) => `${change.kind}:${change.path}`).join(", ");
+    return `file_change ${item.status} ${previewText(changes)}`;
+  }
+  if (item.type === "mcp_tool_call") {
+    const detail = item.error?.message ?? `${item.server}/${item.tool}`;
+    return `mcp_tool_call ${item.status} ${previewText(detail)}`;
+  }
+  if (item.type === "web_search") {
+    return `web_search ${previewText(item.query)}`;
+  }
+  if (item.type === "todo_list") {
+    const todos = item.items
+      .map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`)
+      .join("; ");
+    return `todo_list ${previewText(todos)}`;
+  }
+  if (item.type === "error") {
+    return `error ${previewText(item.message)}`;
+  }
+  return previewText(JSON.stringify(item));
+}
+
+function formatUsage(usage) {
+  return [
+    `total=${usage.input_tokens + usage.output_tokens}`,
+    `input=${usage.input_tokens}`,
+    `output=${usage.output_tokens}`,
+    `cached=${usage.cached_input_tokens}`,
+  ].join(" ");
+}
+
+function previewText(text) {
+  const firstLine = text
+    .split(/\r?\n/, 1)[0]
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!firstLine) {
+    return "[no output]";
+  }
+  if (firstLine.length <= 80) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, 80)}...`;
+}
+
+async function loadState() {
+  try {
+    const raw = await fs.readFile(STATE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
+      turnsCompleted: Number.isInteger(parsed.turnsCompleted)
+        ? parsed.turnsCompleted
+        : 0,
+    };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { threadId: null, turnsCompleted: 0 };
+    }
+    throw error;
+  }
+}
+
+async function saveState(state) {
+  await fs.writeFile(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+}
+
+async function assertDirectoryExists(directoryPath) {
+  const stat = await fs.stat(directoryPath);
+  if (!stat.isDirectory()) {
+    throw new Error(`${directoryPath} is not a directory`);
+  }
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoolean(value, fallback) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return !["0", "false", "no", "off"].includes(value.toLowerCase());
+}
+
+function parseAdditionalDirectories(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter(Boolean);
+  }
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(":")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function log(message) {
+  const timestamp = new Date().toISOString();
+  process.stdout.write(`[${timestamp}] ${message}\n`);
+}
+
+main().catch((error) => {
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  process.stderr.write(`${message}\n`);
+  process.exitCode = 1;
+});

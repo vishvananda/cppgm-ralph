@@ -1,0 +1,13 @@
+{
+  "name": "ralph-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ralph.js",
+    "ralph": "node ralph.js"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.116.0"
+  }
+}
