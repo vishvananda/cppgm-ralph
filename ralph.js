@@ -26,6 +26,7 @@ const DEFAULT_CONFIG = {
   sandboxMode: "danger-full-access",
   approvalPolicy: "never",
   networkAccessEnabled: true,
+  webSearchEnabled: false,
   additionalDirectories: [],
   outputTailChars: 20000,
 };
@@ -35,13 +36,16 @@ const CONFIG_PATH = path.resolve(process.cwd(), process.env.RALPH_CONFIG ?? "ral
 let CONFIG = null;
 let STATE_PATH = null;
 let TEST_LOG_PATH = null;
+let EVENTS_DIR_PATH = null;
 
 async function main() {
   CONFIG = await loadConfig();
   STATE_PATH = path.join(CONFIG.stateDir, "state.json");
   TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
+  EVENTS_DIR_PATH = path.join(CONFIG.stateDir, "events");
 
   await fs.mkdir(CONFIG.stateDir, { recursive: true });
+  await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
   await assertDirectoryExists(CONFIG.workdir);
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
@@ -54,6 +58,7 @@ async function main() {
     sandboxMode: CONFIG.sandboxMode,
     approvalPolicy: CONFIG.approvalPolicy,
     networkAccessEnabled: CONFIG.networkAccessEnabled,
+    webSearchEnabled: CONFIG.webSearchEnabled,
     ...(CONFIG.model ? { model: CONFIG.model } : {}),
     ...(CONFIG.reasoningEffort
       ? { modelReasoningEffort: CONFIG.reasoningEffort }
@@ -80,6 +85,7 @@ async function main() {
       if (activeThreadId || state.threadId || state.turnsCompleted > 0) {
         await saveState({
           threadId: activeThreadId,
+          eventLogPath: buildEventLogPath(activeThreadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
           updatedAt: new Date().toISOString(),
@@ -114,11 +120,15 @@ async function main() {
           : buildContinuePrompt(testRun, gitStatus);
 
     const { events } = await thread.runStreamed(prompt);
-    const turn = await collectStreamedTurn(events);
-    activeThreadId = thread.id ?? activeThreadId;
+    const turn = await collectStreamedTurn(events, {
+      threadId: thread.id ?? activeThreadId,
+      turnNumber: turnNumber + 1,
+    });
+    activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
 
     await saveState({
       threadId: activeThreadId,
+      eventLogPath: buildEventLogPath(activeThreadId),
       turnsCompleted: turnNumber + 1,
       lastExitCode: testRun.exitCode,
       updatedAt: new Date().toISOString(),
@@ -242,14 +252,34 @@ async function getGitStatus(cwd) {
   };
 }
 
-async function collectStreamedTurn(events) {
+async function collectStreamedTurn(events, options = {}) {
   const items = [];
   let finalResponse = "";
   let usage = null;
   let turnFailure = null;
   let streamError = null;
+  let threadId = options.threadId ?? null;
+  const turnNumber = options.turnNumber ?? null;
+  let eventLogPath = buildEventLogPath(threadId);
+  const pendingEventRecords = [];
 
   for await (const event of events) {
+    threadId = threadId ?? getEventThreadId(event);
+    eventLogPath = eventLogPath ?? buildEventLogPath(threadId);
+    const eventRecord = {
+      recordedAt: new Date().toISOString(),
+      threadId,
+      turnNumber,
+      eventType: event.type,
+      event,
+    };
+    if (eventLogPath) {
+      await flushEventLogBuffer(eventLogPath, pendingEventRecords);
+      await appendJsonLine(eventLogPath, eventRecord);
+    } else {
+      pendingEventRecords.push(eventRecord);
+    }
+
     log(`Codex event: ${summarizeEvent(event)}`);
     if (event.type === "item.completed") {
       items.push(event.item);
@@ -274,7 +304,9 @@ async function collectStreamedTurn(events) {
     throw new Error(streamError);
   }
 
-  return { items, finalResponse, usage };
+  await flushEventLogBuffer(eventLogPath, pendingEventRecords);
+
+  return { items, finalResponse, usage, threadId };
 }
 
 function combineOutput(stdout, stderr) {
@@ -318,6 +350,10 @@ async function loadConfig() {
     networkAccessEnabled: parseBoolean(
       process.env.RALPH_NETWORK_ACCESS ?? fileConfig.networkAccessEnabled,
       DEFAULT_CONFIG.networkAccessEnabled,
+    ),
+    webSearchEnabled: parseBoolean(
+      process.env.RALPH_WEB_SEARCH_ENABLED ?? fileConfig.webSearchEnabled,
+      DEFAULT_CONFIG.webSearchEnabled,
     ),
     additionalDirectories: parseAdditionalDirectories(
       process.env.RALPH_ADDITIONAL_DIRECTORIES ?? fileConfig.additionalDirectories,
@@ -419,19 +455,45 @@ function previewText(text) {
   return `${firstLine.slice(0, 80)}...`;
 }
 
+function getEventThreadId(event) {
+  return typeof event.thread_id === "string" ? event.thread_id : null;
+}
+
+function buildEventLogPath(threadId) {
+  if (!threadId) {
+    return null;
+  }
+  const safeThreadId = threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return path.join(EVENTS_DIR_PATH, `${safeThreadId}.jsonl`);
+}
+
+async function flushEventLogBuffer(eventLogPath, eventRecords) {
+  if (!eventLogPath || eventRecords.length === 0) {
+    return;
+  }
+  const payload = eventRecords.map((record) => JSON.stringify(record)).join("\n");
+  eventRecords.length = 0;
+  await fs.appendFile(eventLogPath, `${payload}\n`, "utf8");
+}
+
+async function appendJsonLine(filePath, record) {
+  await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+}
+
 async function loadState() {
   try {
     const raw = await fs.readFile(STATE_PATH, "utf8");
     const parsed = JSON.parse(raw);
     return {
       threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
+      eventLogPath: typeof parsed.eventLogPath === "string" ? parsed.eventLogPath : null,
       turnsCompleted: Number.isInteger(parsed.turnsCompleted)
         ? parsed.turnsCompleted
         : 0,
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return { threadId: null, turnsCompleted: 0 };
+      return { threadId: null, eventLogPath: null, turnsCompleted: 0 };
     }
     throw error;
   }

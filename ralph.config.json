@@ -1,7 +1,7 @@
 {
   "workdir": "/work/cppgm",
   "testCommand": "make test",
-  "maxTurns": 1000,
+  "maxTurns": 100,
   "stateDir": ".ralph",
   "model": "gpt-5.3-codex",
   "reasoningEffort": "high",
