@@ -1,0 +1,163 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --surface: #111827;
+  --surface-2: #172036;
+  --text: #e5edff;
+  --muted: #93a4c1;
+  --accent: #f59e0b;
+  --ok: #22c55e;
+  --border: #25314f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", "Segoe UI", sans-serif;
+  background: radial-gradient(circle at top, #18233d 0%, var(--bg) 50%, #0b1325 100%);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.card {
+  background: linear-gradient(180deg, #15213e 0%, var(--surface) 100%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+}
+
+h2 {
+  margin-top: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+button,
+input,
+select {
+  border: 1px solid var(--border);
+  background: #0d1425;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.8rem;
+}
+
+.summary div {
+  background: #0c1529;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem;
+}
+
+.summary strong {
+  display: block;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+
+.timeline {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.level {
+  border-left: 3px solid #304070;
+  padding-left: 0.8rem;
+}
+
+details {
+  background: #0c172f;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.25rem 0.5rem;
+}
+
+summary {
+  cursor: pointer;
+  padding: 0.35rem 0;
+}
+
+.event-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-left: 0.4rem;
+}
+
+.event-row > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.event-payload {
+  margin-top: 0.45rem;
+}
+
+.nested {
+  margin-top: 0.45rem;
+}
+
+.nested summary {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0a1426;
+  border: 1px solid #273555;
+  border-radius: 8px;
+  padding: 0.6rem;
+  margin: 0.4rem 0;
+}
+
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  margin-left: 0.45rem;
+  background: #152141;
+  border: 1px solid #2f4778;
+  font-size: 0.75rem;
+}
+
+.muted {
+  color: var(--muted);
+}

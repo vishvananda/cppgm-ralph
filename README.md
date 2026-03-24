@@ -24,6 +24,25 @@ npm install
 npm start
 ```
 
+### Run visualization (`ralph-viz`)
+
+```bash
+npm run ralph-viz
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4173
+```
+
+`ralph-viz` reads `.ralph/events/<thread>.jsonl` and shows:
+
+- a run summary
+- turn-level rollup view
+- event-level drill-down with full JSON payload
+- event-type filtering
+
 Default config lives in [ralph.config.json](/work/runner/ralph.config.json#L1).
 Environment variables still override file settings.
 

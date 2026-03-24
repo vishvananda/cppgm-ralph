@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node ralph.js",
-    "ralph": "node ralph.js"
+    "ralph": "node ralph.js",
+    "ralph-viz": "node ralph-viz/server.js"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.116.0"
