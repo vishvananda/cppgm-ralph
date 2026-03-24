@@ -139,6 +139,10 @@ summary {
   border-color: #37527d;
 }
 
+.event-card-message-compact {
+  padding: 0.3rem 0.55rem;
+}
+
 .event-card-command {
   border-color: #4c5d32;
 }
@@ -158,7 +162,7 @@ summary {
 
 .event-card-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.4rem;
   flex-wrap: wrap;
 }
@@ -174,6 +178,22 @@ summary {
   line-height: 1.5;
 }
 
+.message-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.message-preview {
+  color: #dfe8fb;
+  line-height: 1.45;
+}
+
+.message-body {
+  margin-left: 1.5rem;
+  margin-top: 0.25rem;
+}
+
 .event-text-muted {
   color: #c4d2ee;
 }
@@ -181,6 +201,11 @@ summary {
 .command-block {
   margin-top: 0.55rem;
   font-size: 0.88rem;
+}
+
+.command-block-inline {
+  margin: 0;
+  flex: 1 1 520px;
 }
 
 .change-list,

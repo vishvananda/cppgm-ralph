@@ -70,6 +70,15 @@ function snippetFromText(text) {
   return `${clean.slice(0, 96)}...`;
 }
 
+function firstLineSnippet(text) {
+  const clean = cleanText(text);
+  if (!clean) {
+    return "";
+  }
+  const [line] = clean.split(/\r?\n/, 1);
+  return snippetFromText(line);
+}
+
 function cleanText(text) {
   return (text ?? "").toString().trim();
 }
@@ -124,7 +133,8 @@ function appendOutput(container, label, text) {
   const details = document.createElement("details");
   details.className = "nested";
   const summary = document.createElement("summary");
-  summary.textContent = label;
+  const preview = firstLineSnippet(clean);
+  summary.textContent = preview || label;
   const pre = document.createElement("pre");
   pre.textContent = clean;
   details.append(summary, pre);
@@ -132,22 +142,23 @@ function appendOutput(container, label, text) {
 }
 
 function renderMessageCard(record, item, index) {
-  const card = document.createElement("article");
-  card.className = "event-card event-card-message";
+  const details = document.createElement("details");
+  details.className = "event-card event-card-message event-card-message-compact";
 
-  const header = document.createElement("div");
-  header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `Message #${index + 1}`;
-  header.append(title, createBadge("agent"));
+  const summary = document.createElement("summary");
+  summary.className = "message-summary";
+
+  const preview = document.createElement("span");
+  preview.className = "message-preview";
+  preview.textContent = cleanText(item.text) || "No message text";
 
   const body = document.createElement("div");
-  body.className = "event-text";
+  body.className = "event-text message-body";
   body.textContent = cleanText(item.text) || "No message text";
 
-  card.append(header, createMeta(record, "agent message"), body);
-  appendRawPayload(card, record);
-  return card;
+  summary.append(preview);
+  details.append(summary, body);
+  return details;
 }
 
 function renderCommandCard(entry, index) {
@@ -156,60 +167,23 @@ function renderCommandCard(entry, index) {
   const startItem = startRecord?.event?.item ?? null;
   const endItem = endRecord?.event?.item ?? null;
   const item = endItem ?? startItem ?? {};
-  const card = document.createElement("article");
+  const card = document.createElement("details");
   card.className = "event-card event-card-command";
 
-  const header = document.createElement("div");
+  const header = document.createElement("summary");
   header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `Command #${index + 1}`;
+  const title = document.createElement("pre");
+  title.className = "command-block command-block-inline";
+  title.textContent = unwrapCommand(item.command) || "No command captured";
   header.append(title);
-  if (startRecord) {
-    header.append(createBadge("started"));
-  }
-  if (endRecord) {
-    header.append(createBadge("completed", "pill-ok"));
-  } else {
-    header.append(createBadge("in progress"));
-  }
-  if (item.status && item.status !== "completed" && item.status !== "in_progress") {
-    header.append(createBadge(item.status));
-  }
   if (item.exit_code != null) {
     header.append(createBadge(`exit ${item.exit_code}`, item.exit_code === 0 ? "pill-ok" : "pill-bad"));
+  } else if (!endRecord) {
+    header.append(createBadge("in progress"));
   }
 
-  const metaBits = [];
-  if (startRecord?.recordedAt) {
-    metaBits.push(`started ${fmt(startRecord.recordedAt)}`);
-  }
-  if (endRecord?.recordedAt) {
-    metaBits.push(`completed ${fmt(endRecord.recordedAt)}`);
-  }
-  if (item.id) {
-    metaBits.push(item.id);
-  }
-  metaBits.push("command_execution");
-  const command = document.createElement("pre");
-  command.className = "command-block";
-  command.textContent = unwrapCommand(item.command) || "No command captured";
-
-  card.append(header, createMeta(endRecord ?? startRecord, metaBits.join(" · ")), command);
+  card.append(header);
   appendOutput(card, "output", item.aggregated_output);
-  if (startRecord && endRecord) {
-    const raw = document.createElement("details");
-    raw.className = "nested";
-    const rawSummary = document.createElement("summary");
-    rawSummary.textContent = "raw events";
-    const startPre = document.createElement("pre");
-    startPre.textContent = JSON.stringify(startRecord, null, 2);
-    const endPre = document.createElement("pre");
-    endPre.textContent = JSON.stringify(endRecord, null, 2);
-    raw.append(rawSummary, startPre, endPre);
-    card.append(raw);
-  } else {
-    appendRawPayload(card, endRecord ?? startRecord);
-  }
   return card;
 }
 
