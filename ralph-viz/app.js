@@ -5,78 +5,29 @@ const summaryEl = document.getElementById("summary");
 const timelineEl = document.getElementById("timeline");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
+const hideNoiseToggle = document.getElementById("hideNoise");
+const autoRefreshToggle = document.getElementById("autoRefresh");
 
 const state = { runs: [], selectedRun: null, events: [], raw: [] };
+
+// Noise event types that clutter the view
+const NOISE_TYPES = new Set([
+  "thread.started", "turn.started", "turn.completed", "turn.failed",
+  "item.started", "error",
+]);
 
 function fmt(time) {
   return time
     ? new Date(time).toLocaleString([], {
-        year: "numeric",
-        month: "short",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
+        month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
       })
     : "n/a";
 }
 
-function buildTypeStats(events) {
-  const stats = new Map();
-  for (const record of events) {
-    const type = record.eventType ?? "unknown";
-    stats.set(type, (stats.get(type) ?? 0) + 1);
-  }
-  return [...stats.entries()].sort((a, b) => b[1] - a[1]);
-}
-
-function eventTypeSummary(events) {
-  const map = new Map();
-  for (const event of events) {
-    const type = event.eventType ?? "unknown";
-    map.set(type, (map.get(type) ?? 0) + 1);
-  }
-  return [...map.entries()].sort((a, b) => b[1] - a[1]);
-}
-
-function buildSummary(events) {
-  const turnSet = new Set();
-  for (const record of events) {
-    if (Number.isInteger(record.turnNumber)) {
-      turnSet.add(record.turnNumber);
-    }
-  }
-  const first = events.at(0)?.recordedAt ?? null;
-  const last = events.at(-1)?.recordedAt ?? null;
-  return {
-    threadId: events.at(0)?.threadId ?? "n/a",
-    events: events.length,
-    turns: turnSet.size,
-    maxTurn: events.length ? Math.max(...Array.from(turnSet)) : "n/a",
-    first,
-    last,
-    typeStats: buildTypeStats(events),
-  };
-}
-
-function snippetFromText(text) {
-  const clean = (text ?? "").toString().replace(/\s+/g, " ").trim();
-  if (!clean) {
-    return "no text";
-  }
-  if (clean.length <= 96) {
-    return clean;
-  }
-  return `${clean.slice(0, 96)}...`;
-}
-
-function firstLineSnippet(text) {
-  const clean = cleanText(text);
-  if (!clean) {
-    return "";
-  }
-  const [line] = clean.split(/\r?\n/, 1);
-  return snippetFromText(line);
+function fmtShort(time) {
+  return time
+    ? new Date(time).toLocaleString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "";
 }
 
 function cleanText(text) {
@@ -86,297 +37,304 @@ function cleanText(text) {
 function unwrapCommand(command) {
   const text = cleanText(command);
   const prefix = "/bin/bash -lc ";
-  if (!text.startsWith(prefix)) {
-    return text;
-  }
+  if (!text.startsWith(prefix)) return text;
   const wrapped = text.slice(prefix.length).trim();
   if (wrapped.length >= 2) {
-    const first = wrapped[0];
-    const last = wrapped[wrapped.length - 1];
-    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+    const first = wrapped[0], last = wrapped[wrapped.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"'))
       return wrapped.slice(1, -1);
-    }
   }
   return wrapped;
 }
 
-function createBadge(text, className = "") {
-  const badge = document.createElement("span");
-  badge.className = `pill${className ? ` ${className}` : ""}`;
-  badge.textContent = text;
-  return badge;
+function truncate(text, max = 120) {
+  if (!text || text.length <= max) return text;
+  return text.slice(0, max) + "...";
 }
 
-function createMeta(record, label) {
-  const meta = document.createElement("div");
-  meta.className = "event-meta-line";
-  meta.textContent = `${fmt(record.recordedAt)} · ${label}`;
-  return meta;
-}
-
-function appendRawPayload(container, record) {
-  const full = document.createElement("details");
-  full.className = "nested";
-  const fullSummary = document.createElement("summary");
-  fullSummary.textContent = "raw event";
-  const fullPre = document.createElement("pre");
-  fullPre.textContent = JSON.stringify(record, null, 2);
-  full.append(fullSummary, fullPre);
-  container.append(full);
-}
-
-function appendOutput(container, label, text) {
-  const clean = cleanText(text);
-  if (!clean) {
-    return;
+function buildSummary(events) {
+  const turnSet = new Set();
+  for (const r of events) {
+    if (Number.isInteger(r.turnNumber)) turnSet.add(r.turnNumber);
   }
-  const details = document.createElement("details");
-  details.className = "nested";
-  const summary = document.createElement("summary");
-  const preview = firstLineSnippet(clean);
-  summary.textContent = preview || label;
-  const pre = document.createElement("pre");
-  pre.textContent = clean;
-  details.append(summary, pre);
-  container.append(details);
-}
+  const first = events.at(0)?.recordedAt ?? null;
+  const last = events.at(-1)?.recordedAt ?? null;
 
-function renderMessageCard(record, item, index) {
-  const details = document.createElement("details");
-  details.className = "event-card event-card-message event-card-message-compact";
-
-  const summary = document.createElement("summary");
-  summary.className = "message-summary";
-
-  const preview = document.createElement("span");
-  preview.className = "message-preview";
-  preview.textContent = cleanText(item.text) || "No message text";
-
-  const body = document.createElement("div");
-  body.className = "event-text message-body";
-  body.textContent = cleanText(item.text) || "No message text";
-
-  summary.append(preview);
-  details.append(summary, body);
-  return details;
-}
-
-function renderCommandCard(entry, index) {
-  const startRecord = entry.startRecord;
-  const endRecord = entry.endRecord;
-  const startItem = startRecord?.event?.item ?? null;
-  const endItem = endRecord?.event?.item ?? null;
-  const item = endItem ?? startItem ?? {};
-  const card = document.createElement("details");
-  card.className = "event-card event-card-command";
-
-  const header = document.createElement("summary");
-  header.className = "event-card-header";
-  const title = document.createElement("pre");
-  title.className = "command-block command-block-inline";
-  title.textContent = unwrapCommand(item.command) || "No command captured";
-  header.append(title);
-  if (item.exit_code != null) {
-    header.append(createBadge(`exit ${item.exit_code}`, item.exit_code === 0 ? "pill-ok" : "pill-bad"));
-  } else if (!endRecord) {
-    header.append(createBadge("in progress"));
+  const typeCounts = new Map();
+  for (const r of events) {
+    const t = r.eventType ?? "unknown";
+    typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
   }
 
-  card.append(header);
-  appendOutput(card, "output", item.aggregated_output);
-  return card;
-}
-
-function renderFileChangeCard(record, item, index) {
-  const card = document.createElement("article");
-  card.className = "event-card event-card-file";
-
-  const header = document.createElement("div");
-  header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `File changes #${index + 1}`;
-  header.append(title, createBadge(`${(item.changes ?? []).length} changes`));
-
-  const list = document.createElement("div");
-  list.className = "change-list";
-  for (const change of item.changes ?? []) {
-    const row = document.createElement("div");
-    row.className = "change-row";
-    row.textContent = `${change.kind}: ${change.path}`;
-    list.append(row);
-  }
-
-  card.append(header, createMeta(record, "file_change"), list);
-  appendRawPayload(card, record);
-  return card;
-}
-
-function renderTodoCard(record, item, index) {
-  const card = document.createElement("article");
-  card.className = "event-card event-card-todo";
-
-  const header = document.createElement("div");
-  header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `Todo list #${index + 1}`;
-  header.append(title, createBadge(`${(item.items ?? []).length} items`));
-
-  const list = document.createElement("div");
-  list.className = "todo-list";
-  for (const todo of item.items ?? []) {
-    const row = document.createElement("div");
-    row.className = `todo-row${todo.completed ? " todo-done" : ""}`;
-    row.textContent = `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`;
-    list.append(row);
-  }
-
-  card.append(header, createMeta(record, "todo_list"), list);
-  appendRawPayload(card, record);
-  return card;
-}
-
-function renderGenericItemCard(record, item, index) {
-  const card = document.createElement("article");
-  card.className = "event-card event-card-generic";
-
-  const header = document.createElement("div");
-  header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `${record.eventType} #${index + 1}`;
-  header.append(title, createBadge(item.type ?? "item"));
-
-  const pre = document.createElement("pre");
-  pre.textContent = JSON.stringify(item, null, 2);
-
-  card.append(header, createMeta(record, item.type ?? "item"), pre);
-  appendRawPayload(card, record);
-  return card;
-}
-
-function renderSystemCard(record, index) {
-  const card = document.createElement("article");
-  card.className = "event-card event-card-system";
-
-  const header = document.createElement("div");
-  header.className = "event-card-header";
-  const title = document.createElement("strong");
-  title.textContent = `${record.eventType} #${index + 1}`;
-  header.append(title);
-
-  const content = document.createElement("div");
-  content.className = "event-text event-text-muted";
-
-  if (record.eventType === "thread.started") {
-    content.textContent = `Thread ${record.event?.thread_id ?? record.threadId ?? "unknown"} started`;
-  } else if (record.eventType === "turn.started") {
-    content.textContent = "Turn started";
-  } else if (record.eventType === "turn.completed" && record.event?.usage) {
-    const usage = record.event.usage;
-    const total = usage.input_tokens + usage.output_tokens;
-    content.textContent = `Turn completed with ${total} tokens (${usage.input_tokens} in, ${usage.output_tokens} out)`;
-  } else if (record.eventType === "turn.failed") {
-    content.textContent = cleanText(record.event?.error?.message) || "Turn failed";
-  } else if (record.eventType === "error") {
-    content.textContent = cleanText(record.event?.message) || "Error";
-  } else {
-    content.textContent = snippetFromText(JSON.stringify(record.event ?? {}));
-  }
-
-  card.append(header, createMeta(record, record.eventType), content);
-  appendRawPayload(card, record);
-  return card;
-}
-
-function buildDisplayEntries(records) {
-  const entries = [];
-  const commandStarts = new Map();
-
-  for (const record of records) {
-    const item = record.event?.item;
-    const isCommand = item?.type === "command_execution";
-
-    if (record.eventType === "item.started" && isCommand) {
-      const entry = {
-        kind: "command",
-        startRecord: record,
-        endRecord: null,
-      };
-      entries.push(entry);
-      if (item.id) {
-        commandStarts.set(item.id, entry);
-      }
-      continue;
-    }
-
-    if (record.eventType === "item.completed" && isCommand && item.id && commandStarts.has(item.id)) {
-      commandStarts.get(item.id).endRecord = record;
-      commandStarts.delete(item.id);
-      continue;
-    }
-
-    entries.push({
-      kind: "event",
-      record,
-    });
-  }
-
-  return entries;
-}
-
-function renderEventCard(record, index) {
-  const item = record.event?.item;
-  if (record.eventType === "item.completed" && item?.type === "agent_message") {
-    return renderMessageCard(record, item, index);
-  }
-  if (record.eventType === "item.completed" && item?.type === "file_change") {
-    return renderFileChangeCard(record, item, index);
-  }
-  if (record.eventType === "item.started" && item?.type === "todo_list") {
-    return renderTodoCard(record, item, index);
-  }
-  if (item) {
-    return renderGenericItemCard(record, item, index);
-  }
-  return renderSystemCard(record, index);
-}
-
-function renderDisplayEntry(entry, index) {
-  if (entry.kind === "command") {
-    return renderCommandCard(entry, index);
-  }
-  return renderEventCard(entry.record, index);
+  return {
+    threadId: events.at(0)?.threadId ?? "n/a",
+    events: events.length,
+    turns: turnSet.size,
+    first, last,
+    typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
+  };
 }
 
 function renderSummary(events) {
-  const summary = buildSummary(events);
-  const chips = summary.typeStats
-    .slice(0, 6)
+  const s = buildSummary(events);
+  const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
 
   summaryEl.innerHTML = `
-    <div><strong>thread</strong>${summary.threadId}</div>
-    <div><strong>events</strong>${summary.events}</div>
-    <div><strong>turns</strong>${summary.turns}</div>
-    <div><strong>max turn</strong>${summary.maxTurn}</div>
-    <div><strong>first</strong>${fmt(summary.first)}</div>
-    <div><strong>last</strong>${fmt(summary.last)}</div>
-    <div style="grid-column: 1 / -1;"><strong>event mix</strong>${chips || "<span class='muted'>No events yet</span>"}</div>
+    <div><strong>thread</strong>${truncate(s.threadId, 24)}</div>
+    <div><strong>events</strong>${s.events}</div>
+    <div><strong>turns</strong>${s.turns}</div>
+    <div><strong>started</strong>${fmt(s.first)}</div>
+    <div><strong>latest</strong>${fmt(s.last)}</div>
+    <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
   `;
+}
+
+// --- Display entry building (merge command start/end) ---
+
+function buildDisplayEntries(records) {
+  const entries = [];
+  const cmdStarts = new Map();
+
+  for (const record of records) {
+    const item = record.event?.item;
+    const isCmd = item?.type === "command_execution";
+
+    if (record.eventType === "item.started" && isCmd) {
+      const entry = { kind: "command", startRecord: record, endRecord: null };
+      entries.push(entry);
+      if (item.id) cmdStarts.set(item.id, entry);
+      continue;
+    }
+    if (record.eventType === "item.completed" && isCmd && item.id && cmdStarts.has(item.id)) {
+      cmdStarts.get(item.id).endRecord = record;
+      cmdStarts.delete(item.id);
+      continue;
+    }
+    entries.push({ kind: "event", record });
+  }
+  return entries;
+}
+
+// --- Card renderers ---
+
+function renderCommandCard(entry) {
+  const startItem = entry.startRecord?.event?.item ?? {};
+  const endItem = entry.endRecord?.event?.item ?? {};
+  const item = entry.endRecord ? endItem : startItem;
+  const cmd = unwrapCommand(item.command) || "unknown command";
+  const output = cleanText(item.aggregated_output);
+  const exitCode = item.exit_code;
+  const time = fmtShort(entry.endRecord?.recordedAt ?? entry.startRecord?.recordedAt);
+
+  const card = document.createElement("details");
+  card.className = "ev ev-cmd" + (exitCode != null && exitCode !== 0 ? " ev-cmd-fail" : "");
+
+  const summary = document.createElement("summary");
+  const cmdSpan = document.createElement("code");
+  cmdSpan.className = "cmd-inline";
+  cmdSpan.textContent = truncate(cmd, 200);
+  summary.append(cmdSpan);
+
+  if (exitCode != null) {
+    const badge = document.createElement("span");
+    badge.className = exitCode === 0 ? "pill pill-ok" : "pill pill-bad";
+    badge.textContent = exitCode === 0 ? "ok" : `exit ${exitCode}`;
+    summary.append(badge);
+  } else if (!entry.endRecord) {
+    const badge = document.createElement("span");
+    badge.className = "pill pill-running";
+    badge.textContent = "running";
+    summary.append(badge);
+  }
+
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  card.append(summary);
+
+  if (output) {
+    const pre = document.createElement("pre");
+    pre.className = "cmd-output";
+    if (output.length > 2000) {
+      pre.textContent = output.slice(0, 2000);
+      const more = document.createElement("button");
+      more.className = "btn-more";
+      more.textContent = `Show all (${output.length} chars)`;
+      more.onclick = () => { pre.textContent = output; more.remove(); };
+      card.append(pre, more);
+    } else {
+      pre.textContent = output;
+      card.append(pre);
+    }
+  }
+
+  return card;
+}
+
+function renderMessageCard(record) {
+  const text = cleanText(record.event?.item?.text);
+  if (!text) return null;
+
+  const card = document.createElement("details");
+  card.className = "ev ev-msg";
+
+  const summary = document.createElement("summary");
+  const preview = document.createElement("span");
+  preview.className = "msg-preview";
+  // First meaningful line as preview
+  const firstLine = text.split(/\r?\n/).find(l => l.trim()) || text;
+  preview.textContent = truncate(firstLine, 160);
+  const time = fmtShort(record.recordedAt);
+  summary.append(preview);
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  const body = document.createElement("pre");
+  body.className = "msg-body";
+  if (text.length > 4000) {
+    body.textContent = text.slice(0, 4000);
+    const more = document.createElement("button");
+    more.className = "btn-more";
+    more.textContent = `Show all (${text.length} chars)`;
+    more.onclick = () => { body.textContent = text; more.remove(); };
+    card.append(summary, body, more);
+  } else {
+    body.textContent = text;
+    card.append(summary, body);
+  }
+  return card;
+}
+
+function renderFileChangeCard(record) {
+  const item = record.event?.item ?? {};
+  const changes = item.changes ?? [];
+  if (!changes.length) return null;
+
+  const card = document.createElement("details");
+  card.className = "ev ev-file";
+  const summary = document.createElement("summary");
+  summary.innerHTML = `<span class="pill">${changes.length} file${changes.length !== 1 ? "s" : ""}</span>`;
+  const time = fmtShort(record.recordedAt);
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  const list = document.createElement("div");
+  list.className = "file-list";
+  for (const c of changes) {
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.innerHTML = `<span class="file-kind">${c.kind}</span> <span class="file-path">${c.path}</span>`;
+    list.append(row);
+  }
+
+  card.append(summary, list);
+  return card;
+}
+
+function renderTodoCard(record) {
+  const items = record.event?.item?.items ?? [];
+  if (!items.length) return null;
+
+  const card = document.createElement("details");
+  card.className = "ev ev-todo";
+  const summary = document.createElement("summary");
+  const done = items.filter(t => t.completed).length;
+  summary.innerHTML = `<span class="pill">${done}/${items.length} tasks</span>`;
+
+  const list = document.createElement("div");
+  list.className = "todo-list";
+  for (const t of items) {
+    const row = document.createElement("div");
+    row.className = t.completed ? "todo-row todo-done" : "todo-row";
+    row.textContent = `${t.completed ? "\u2713" : "\u25CB"} ${t.text}`;
+    list.append(row);
+  }
+
+  card.append(summary, list);
+  return card;
+}
+
+function renderSystemCard(record) {
+  // Compact one-liner for system events
+  const div = document.createElement("div");
+  div.className = "ev ev-sys";
+
+  let text = record.eventType;
+  if (record.eventType === "turn.completed" && record.event?.usage) {
+    const u = record.event.usage;
+    text = `turn done \u2014 ${u.input_tokens + u.output_tokens} tok (${u.input_tokens} in, ${u.output_tokens} out)`;
+  } else if (record.eventType === "turn.failed") {
+    text = `turn failed: ${cleanText(record.event?.error?.message) || "unknown"}`;
+    div.classList.add("ev-sys-err");
+  } else if (record.eventType === "error") {
+    text = `error: ${cleanText(record.event?.message) || "unknown"}`;
+    div.classList.add("ev-sys-err");
+  }
+
+  const ts = fmtShort(record.recordedAt);
+  div.innerHTML = `<span class="sys-label">${text}</span>${ts ? `<span class="ts">${ts}</span>` : ""}`;
+  return div;
+}
+
+function renderDisplayEntry(entry) {
+  if (entry.kind === "command") return renderCommandCard(entry);
+
+  const record = entry.record;
+  const item = record.event?.item;
+
+  if (record.eventType === "item.completed" && item?.type === "agent_message")
+    return renderMessageCard(record);
+  if (record.eventType === "item.completed" && item?.type === "file_change")
+    return renderFileChangeCard(record);
+  if (record.eventType === "item.started" && item?.type === "todo_list")
+    return renderTodoCard(record);
+
+  // System / noise
+  return renderSystemCard(record);
+}
+
+// --- Filtering ---
+
+function shouldShow(record) {
+  const hideNoise = hideNoiseToggle?.checked ?? true;
+  if (hideNoise && NOISE_TYPES.has(record.eventType)) {
+    // Keep item.started only for commands (they get merged)
+    if (record.eventType === "item.started" && record.event?.item?.type === "command_execution")
+      return true;
+    return false;
+  }
+  return true;
 }
 
 function filterRecords(records) {
   const search = eventFilter.value.trim().toLowerCase();
-  if (!search) {
-    return records;
+  let filtered = records;
+  if (search) {
+    filtered = filtered.filter(r => (r.eventType ?? "").toLowerCase().includes(search));
   }
-  return records.filter((record) => (record.eventType ?? "").toLowerCase().includes(search));
+  return filtered.filter(shouldShow);
 }
+
+// --- Turn grouping + timeline ---
 
 function buildTurnMap(events) {
   const turns = new Map();
   for (const record of events) {
-    const turn = Number.isInteger(record.turnNumber) ? record.turnNumber : "unassigned";
+    const turn = Number.isInteger(record.turnNumber) ? record.turnNumber : "pre";
     const list = turns.get(turn) ?? [];
     list.push(record);
     turns.set(turn, list);
@@ -384,99 +342,99 @@ function buildTurnMap(events) {
   return turns;
 }
 
+function turnSummaryText(items) {
+  let cmds = 0, msgs = 0, files = 0, other = 0;
+  for (const r of items) {
+    const t = r.event?.item?.type;
+    if (t === "command_execution") cmds++;
+    else if (t === "agent_message") msgs++;
+    else if (t === "file_change") files++;
+    else other++;
+  }
+  const parts = [];
+  if (cmds) parts.push(`${cmds} cmd`);
+  if (msgs) parts.push(`${msgs} msg`);
+  if (files) parts.push(`${files} file`);
+  return parts.join(", ") || `${items.length} events`;
+}
+
 function renderTimeline(records) {
   timelineEl.innerHTML = "";
   const filtered = filterRecords(records);
-  eventCountEl.textContent = `${filtered.length} / ${records.length} events shown`;
+  eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
   const turnMap = buildTurnMap(filtered);
   const sortedTurns = [...turnMap.keys()].sort((a, b) => {
-    if (a === "unassigned") {
-      return Number.POSITIVE_INFINITY;
-    }
-    if (b === "unassigned") {
-      return Number.NEGATIVE_INFINITY;
-    }
+    if (a === "pre") return -1;
+    if (b === "pre") return 1;
     return a - b;
   });
+
+  const lastTurn = sortedTurns[sortedTurns.length - 1];
 
   for (const turn of sortedTurns) {
     const items = turnMap.get(turn) ?? [];
     const details = document.createElement("details");
+    details.className = "turn";
+    // Auto-open last turn
+    if (turn === lastTurn) details.open = true;
+
     const summary = document.createElement("summary");
-    details.className = "level";
-
-    const title = document.createElement("strong");
-    title.textContent = `Turn ${turn}`;
-
-    const badge = document.createElement("span");
-    badge.className = "pill";
-    badge.textContent = `${items.length} events`;
-
-    summary.append(title);
-    summary.append(badge);
+    summary.className = "turn-header";
+    const label = turn === "pre" ? "Setup" : `Turn ${turn}`;
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>`;
     details.append(summary);
 
-    const list = document.createElement("div");
-    list.className = "turn-feed";
-    const turnHeader = document.createElement("div");
-    turnHeader.className = "muted turn-feed-meta";
-    const typeCounts = eventTypeSummary(items)
-      .map(([type, count]) => `${type}:${count}`)
-      .join(" · ");
-    turnHeader.textContent = `events: ${items.length}${typeCounts ? ` · ${typeCounts}` : ""}`;
-    list.appendChild(turnHeader);
-
+    const feed = document.createElement("div");
+    feed.className = "turn-feed";
     const displayEntries = buildDisplayEntries(items);
-    for (const [index, entry] of displayEntries.entries()) {
-      list.appendChild(renderDisplayEntry(entry, index));
+    for (const entry of displayEntries) {
+      const el = renderDisplayEntry(entry);
+      if (el) feed.append(el);
     }
-    details.appendChild(list);
-    timelineEl.appendChild(details);
+    details.append(feed);
+    timelineEl.append(details);
   }
 }
 
+// --- Data loading ---
+
 async function loadRuns() {
-  const stateData = await fetch("/api/state").then((r) => r.json());
-  const data = await fetch("/api/runs").then((r) => r.json());
+  const [stateData, data] = await Promise.all([
+    fetch("/api/state").then(r => r.json()),
+    fetch("/api/runs").then(r => r.json()),
+  ]);
   state.runs = data.runs ?? [];
 
   runSelect.innerHTML = "";
-  if (state.runs.length === 0) {
-    const option = document.createElement("option");
-    option.textContent = "No run files found";
-    runSelect.appendChild(option);
-    summaryEl.innerHTML = `<div><strong>status</strong>Place a run file in <code>.ralph/events</code>.</div>`;
+  if (!state.runs.length) {
+    const opt = document.createElement("option");
+    opt.textContent = "No runs found";
+    runSelect.append(opt);
+    summaryEl.innerHTML = "";
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
     return;
   }
 
   for (const run of state.runs) {
-    const option = document.createElement("option");
-    option.value = run.id;
-    option.textContent = `${run.id} (${run.events} events)`;
-    runSelect.appendChild(option);
+    const opt = document.createElement("option");
+    opt.value = run.id;
+    opt.textContent = `${run.id.slice(0, 8)}... (${run.events} events)`;
+    runSelect.append(opt);
   }
 
   const preferred = stateData.currentThread;
-  const defaultRun = preferred && state.runs.some((run) => run.id === preferred)
-    ? preferred
-    : state.runs[0].id;
-
+  const defaultRun = preferred && state.runs.some(r => r.id === preferred) ? preferred : state.runs[0].id;
   runSelect.value = defaultRun;
   await loadRun(defaultRun);
 }
 
 async function loadRun(id) {
-  if (!id) {
-    return;
-  }
+  if (!id) return;
   state.selectedRun = id;
-  const data = await fetch(`/api/run/${encodeURIComponent(id)}`).then((r) => {
-    if (!r.ok) {
-      throw new Error(`Could not load run: ${r.status}`);
-    }
+  const data = await fetch(`/api/run/${encodeURIComponent(id)}`).then(r => {
+    if (!r.ok) throw new Error(`Load failed: ${r.status}`);
     return r.json();
   });
 
@@ -486,16 +444,17 @@ async function loadRun(id) {
   renderTimeline(state.events);
 }
 
-function bind() {
-  refreshRuns.addEventListener("click", loadRuns);
-  reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
-  runSelect.addEventListener("change", (event) => {
-    loadRun(event.target.value);
-  });
-  eventFilter.addEventListener("input", () => renderTimeline(state.events));
+// --- Bind ---
+
+refreshRuns.addEventListener("click", loadRuns);
+reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
+runSelect.addEventListener("change", e => loadRun(e.target.value));
+eventFilter.addEventListener("input", () => renderTimeline(state.events));
+hideNoiseToggle.addEventListener("change", () => renderTimeline(state.events));
+if (autoRefreshToggle) {
+  autoRefreshToggle.addEventListener("change", () => renderTimeline(state.events));
 }
 
-bind();
-loadRuns().catch((error) => {
-  summaryEl.innerHTML = `<div><strong>error</strong>${error.message}</div>`;
+loadRuns().catch(err => {
+  summaryEl.innerHTML = `<div><strong>error</strong>${err.message}</div>`;
 });

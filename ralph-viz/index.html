@@ -10,32 +10,33 @@
     <main class="page">
       <header>
         <h1>ralph-viz</h1>
-        <p>Drill through a Codex run from run-level summary down to event-level payloads.</p>
+        <p>Codex run viewer</p>
       </header>
 
-      <section class="toolbar card">
+      <section class="toolbar">
         <label for="runSelect">Run</label>
         <select id="runSelect"></select>
-        <button id="refreshRuns">Refresh runs</button>
-        <button id="reloadRun">Reload run</button>
+        <button id="refreshRuns">Refresh</button>
+        <button id="reloadRun">Reload</button>
+        <div class="toolbar-sep"></div>
+        <input id="eventFilter" placeholder="filter events..." style="width:140px" />
+        <span id="eventCount" class="muted" style="font-size:0.75rem"></span>
+        <div class="toolbar-sep"></div>
+        <label class="toggle-label"><input type="checkbox" id="hideNoise" checked /> Hide noise</label>
+        <label class="toggle-label"><input type="checkbox" id="autoRefresh" checked /> Auto-refresh</label>
       </section>
 
       <section class="card">
-        <h2>Run summary</h2>
+        <h2>Summary</h2>
         <div id="summary" class="summary"></div>
       </section>
 
       <section class="card">
-        <div class="toolbar">
-          <label for="eventFilter">Filter event type</label>
-          <input id="eventFilter" placeholder="e.g. item.completed" />
-          <span id="eventCount"></span>
-        </div>
-        <h2>Turn → Event drilldown</h2>
+        <h2>Turns</h2>
         <div id="timeline" class="timeline"></div>
       </section>
     </main>
 
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js"></script>
   </body>
 </html>
