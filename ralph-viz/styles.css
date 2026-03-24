@@ -118,15 +118,88 @@ summary {
   margin-left: 0.4rem;
 }
 
-.event-row > summary {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+.turn-feed {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
 }
 
-.event-payload {
-  margin-top: 0.45rem;
+.turn-feed-meta {
+  margin-bottom: 0.15rem;
+}
+
+.event-card {
+  border: 1px solid #2a3a61;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(14, 24, 46, 0.98), rgba(9, 16, 31, 0.98));
+  padding: 0.8rem;
+}
+
+.event-card-message {
+  border-color: #37527d;
+}
+
+.event-card-command {
+  border-color: #4c5d32;
+}
+
+.event-card-file {
+  border-color: #644f2e;
+}
+
+.event-card-todo {
+  border-color: #4e3e70;
+}
+
+.event-card-system {
+  border-color: #35405c;
+  background: rgba(12, 23, 47, 0.7);
+}
+
+.event-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.event-meta-line {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 0.35rem;
+}
+
+.event-text {
+  margin-top: 0.55rem;
+  line-height: 1.5;
+}
+
+.event-text-muted {
+  color: #c4d2ee;
+}
+
+.command-block {
+  margin-top: 0.55rem;
+  font-size: 0.88rem;
+}
+
+.change-list,
+.todo-list {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.change-row,
+.todo-row {
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(130, 156, 207, 0.18);
+}
+
+.todo-done {
+  color: #99b7a4;
 }
 
 .nested {
@@ -152,10 +225,19 @@ pre {
   display: inline-block;
   border-radius: 999px;
   padding: 0.1rem 0.45rem;
-  margin-left: 0.45rem;
   background: #152141;
   border: 1px solid #2f4778;
   font-size: 0.75rem;
+}
+
+.pill-ok {
+  border-color: #356a46;
+  background: #14311d;
+}
+
+.pill-bad {
+  border-color: #7b3941;
+  background: #351419;
 }
 
 .muted {

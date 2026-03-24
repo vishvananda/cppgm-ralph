@@ -59,29 +59,6 @@ function buildSummary(events) {
   };
 }
 
-function eventSummary(event) {
-  if (!event || !event.event) {
-    return "unknown";
-  }
-  if (event.eventType === "item.completed") {
-    const item = event.event.item ?? {};
-    if (item.type === "command_execution") {
-      return `${item.type} (${item.status})`;
-    }
-    if (item.type === "agent_message") {
-      return `${item.type}`;
-    }
-    return item.type ?? "item";
-  }
-  if (event.eventType === "turn.completed") {
-    return "turn.completed";
-  }
-  if (event.eventType === "turn.failed") {
-    return "turn.failed";
-  }
-  return event.eventType;
-}
-
 function snippetFromText(text) {
   const clean = (text ?? "").toString().replace(/\s+/g, " ").trim();
   if (!clean) {
@@ -93,58 +70,307 @@ function snippetFromText(text) {
   return `${clean.slice(0, 96)}...`;
 }
 
-function eventHeadline(record) {
+function cleanText(text) {
+  return (text ?? "").toString().trim();
+}
+
+function unwrapCommand(command) {
+  const text = cleanText(command);
+  const prefix = "/bin/bash -lc ";
+  if (!text.startsWith(prefix)) {
+    return text;
+  }
+  const wrapped = text.slice(prefix.length).trim();
+  if (wrapped.length >= 2) {
+    const first = wrapped[0];
+    const last = wrapped[wrapped.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      return wrapped.slice(1, -1);
+    }
+  }
+  return wrapped;
+}
+
+function createBadge(text, className = "") {
+  const badge = document.createElement("span");
+  badge.className = `pill${className ? ` ${className}` : ""}`;
+  badge.textContent = text;
+  return badge;
+}
+
+function createMeta(record, label) {
+  const meta = document.createElement("div");
+  meta.className = "event-meta-line";
+  meta.textContent = `${fmt(record.recordedAt)} · ${label}`;
+  return meta;
+}
+
+function appendRawPayload(container, record) {
+  const full = document.createElement("details");
+  full.className = "nested";
+  const fullSummary = document.createElement("summary");
+  fullSummary.textContent = "raw event";
+  const fullPre = document.createElement("pre");
+  fullPre.textContent = JSON.stringify(record, null, 2);
+  full.append(fullSummary, fullPre);
+  container.append(full);
+}
+
+function appendOutput(container, label, text) {
+  const clean = cleanText(text);
+  if (!clean) {
+    return;
+  }
+  const details = document.createElement("details");
+  details.className = "nested";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const pre = document.createElement("pre");
+  pre.textContent = clean;
+  details.append(summary, pre);
+  container.append(details);
+}
+
+function renderMessageCard(record, item, index) {
+  const card = document.createElement("article");
+  card.className = "event-card event-card-message";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `Message #${index + 1}`;
+  header.append(title, createBadge("agent"));
+
+  const body = document.createElement("div");
+  body.className = "event-text";
+  body.textContent = cleanText(item.text) || "No message text";
+
+  card.append(header, createMeta(record, "agent message"), body);
+  appendRawPayload(card, record);
+  return card;
+}
+
+function renderCommandCard(entry, index) {
+  const startRecord = entry.startRecord;
+  const endRecord = entry.endRecord;
+  const startItem = startRecord?.event?.item ?? null;
+  const endItem = endRecord?.event?.item ?? null;
+  const item = endItem ?? startItem ?? {};
+  const card = document.createElement("article");
+  card.className = "event-card event-card-command";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `Command #${index + 1}`;
+  header.append(title);
+  if (startRecord) {
+    header.append(createBadge("started"));
+  }
+  if (endRecord) {
+    header.append(createBadge("completed", "pill-ok"));
+  } else {
+    header.append(createBadge("in progress"));
+  }
+  if (item.status && item.status !== "completed" && item.status !== "in_progress") {
+    header.append(createBadge(item.status));
+  }
+  if (item.exit_code != null) {
+    header.append(createBadge(`exit ${item.exit_code}`, item.exit_code === 0 ? "pill-ok" : "pill-bad"));
+  }
+
+  const metaBits = [];
+  if (startRecord?.recordedAt) {
+    metaBits.push(`started ${fmt(startRecord.recordedAt)}`);
+  }
+  if (endRecord?.recordedAt) {
+    metaBits.push(`completed ${fmt(endRecord.recordedAt)}`);
+  }
+  if (item.id) {
+    metaBits.push(item.id);
+  }
+  metaBits.push("command_execution");
+  const command = document.createElement("pre");
+  command.className = "command-block";
+  command.textContent = unwrapCommand(item.command) || "No command captured";
+
+  card.append(header, createMeta(endRecord ?? startRecord, metaBits.join(" · ")), command);
+  appendOutput(card, "output", item.aggregated_output);
+  if (startRecord && endRecord) {
+    const raw = document.createElement("details");
+    raw.className = "nested";
+    const rawSummary = document.createElement("summary");
+    rawSummary.textContent = "raw events";
+    const startPre = document.createElement("pre");
+    startPre.textContent = JSON.stringify(startRecord, null, 2);
+    const endPre = document.createElement("pre");
+    endPre.textContent = JSON.stringify(endRecord, null, 2);
+    raw.append(rawSummary, startPre, endPre);
+    card.append(raw);
+  } else {
+    appendRawPayload(card, endRecord ?? startRecord);
+  }
+  return card;
+}
+
+function renderFileChangeCard(record, item, index) {
+  const card = document.createElement("article");
+  card.className = "event-card event-card-file";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `File changes #${index + 1}`;
+  header.append(title, createBadge(`${(item.changes ?? []).length} changes`));
+
+  const list = document.createElement("div");
+  list.className = "change-list";
+  for (const change of item.changes ?? []) {
+    const row = document.createElement("div");
+    row.className = "change-row";
+    row.textContent = `${change.kind}: ${change.path}`;
+    list.append(row);
+  }
+
+  card.append(header, createMeta(record, "file_change"), list);
+  appendRawPayload(card, record);
+  return card;
+}
+
+function renderTodoCard(record, item, index) {
+  const card = document.createElement("article");
+  card.className = "event-card event-card-todo";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `Todo list #${index + 1}`;
+  header.append(title, createBadge(`${(item.items ?? []).length} items`));
+
+  const list = document.createElement("div");
+  list.className = "todo-list";
+  for (const todo of item.items ?? []) {
+    const row = document.createElement("div");
+    row.className = `todo-row${todo.completed ? " todo-done" : ""}`;
+    row.textContent = `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`;
+    list.append(row);
+  }
+
+  card.append(header, createMeta(record, "todo_list"), list);
+  appendRawPayload(card, record);
+  return card;
+}
+
+function renderGenericItemCard(record, item, index) {
+  const card = document.createElement("article");
+  card.className = "event-card event-card-generic";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `${record.eventType} #${index + 1}`;
+  header.append(title, createBadge(item.type ?? "item"));
+
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(item, null, 2);
+
+  card.append(header, createMeta(record, item.type ?? "item"), pre);
+  appendRawPayload(card, record);
+  return card;
+}
+
+function renderSystemCard(record, index) {
+  const card = document.createElement("article");
+  card.className = "event-card event-card-system";
+
+  const header = document.createElement("div");
+  header.className = "event-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `${record.eventType} #${index + 1}`;
+  header.append(title);
+
+  const content = document.createElement("div");
+  content.className = "event-text event-text-muted";
+
+  if (record.eventType === "thread.started") {
+    content.textContent = `Thread ${record.event?.thread_id ?? record.threadId ?? "unknown"} started`;
+  } else if (record.eventType === "turn.started") {
+    content.textContent = "Turn started";
+  } else if (record.eventType === "turn.completed" && record.event?.usage) {
+    const usage = record.event.usage;
+    const total = usage.input_tokens + usage.output_tokens;
+    content.textContent = `Turn completed with ${total} tokens (${usage.input_tokens} in, ${usage.output_tokens} out)`;
+  } else if (record.eventType === "turn.failed") {
+    content.textContent = cleanText(record.event?.error?.message) || "Turn failed";
+  } else if (record.eventType === "error") {
+    content.textContent = cleanText(record.event?.message) || "Error";
+  } else {
+    content.textContent = snippetFromText(JSON.stringify(record.event ?? {}));
+  }
+
+  card.append(header, createMeta(record, record.eventType), content);
+  appendRawPayload(card, record);
+  return card;
+}
+
+function buildDisplayEntries(records) {
+  const entries = [];
+  const commandStarts = new Map();
+
+  for (const record of records) {
+    const item = record.event?.item;
+    const isCommand = item?.type === "command_execution";
+
+    if (record.eventType === "item.started" && isCommand) {
+      const entry = {
+        kind: "command",
+        startRecord: record,
+        endRecord: null,
+      };
+      entries.push(entry);
+      if (item.id) {
+        commandStarts.set(item.id, entry);
+      }
+      continue;
+    }
+
+    if (record.eventType === "item.completed" && isCommand && item.id && commandStarts.has(item.id)) {
+      commandStarts.get(item.id).endRecord = record;
+      commandStarts.delete(item.id);
+      continue;
+    }
+
+    entries.push({
+      kind: "event",
+      record,
+    });
+  }
+
+  return entries;
+}
+
+function renderEventCard(record, index) {
   const item = record.event?.item;
-  if (record.eventType === "item.started" && item?.type) {
-    return `${record.eventType} · ${item.type}`;
-  }
   if (record.eventType === "item.completed" && item?.type === "agent_message") {
-    return `${record.eventType} · ${item.type}: ${snippetFromText(item.text)}`;
-  }
-  if (record.eventType === "item.completed" && item?.type === "command_execution") {
-    const status = item.exit_code == null ? item.status : `${item.status} (exit=${item.exit_code})`;
-    return `${record.eventType} · command ${status}`;
+    return renderMessageCard(record, item, index);
   }
   if (record.eventType === "item.completed" && item?.type === "file_change") {
-    const changeText = (item.changes ?? [])
-      .map((change) => `${change.kind}: ${change.path}`)
-      .slice(0, 2)
-      .join(", ");
-    return `${record.eventType} · file_change (${changeText || "no changes"})`;
+    return renderFileChangeCard(record, item, index);
   }
-  if (record.eventType === "turn.completed" && record.event?.usage) {
-    const usage = record.event.usage;
-    return `${record.eventType} · tokens=${usage.input_tokens + usage.output_tokens}`;
+  if (record.eventType === "item.started" && item?.type === "todo_list") {
+    return renderTodoCard(record, item, index);
   }
-  return eventSummary(record);
-}
-
-function eventMeta(record) {
-  const type = record.eventType ?? "unknown";
-  const item = record.event?.item;
-  if (type === "item.completed" && item?.type === "command_execution" && item.command) {
-    return snippetFromText(item.command);
-  }
-  if (type === "item.completed" && item?.type === "agent_message") {
-    return "agent response";
-  }
-  if (type === "item.completed" && item?.type === "file_change") {
-    return `${(item.changes ?? []).length} file change(s)`;
-  }
-  return type;
-}
-
-function createPayloadPreview(event) {
-  const item = event.event?.item;
-  const compact = {};
   if (item) {
-    for (const key of ["type", "status", "command", "exit_code", "aggregated_output", "text"]) {
-      if (item[key] !== undefined) compact[key] = item[key];
-    }
-  } else if (event.event) {
-    if (event.event.usage) compact.usage = event.event.usage;
+    return renderGenericItemCard(record, item, index);
   }
-  return compact;
+  return renderSystemCard(record, index);
+}
+
+function renderDisplayEntry(entry, index) {
+  if (entry.kind === "command") {
+    return renderCommandCard(entry, index);
+  }
+  return renderEventCard(entry.record, index);
 }
 
 function renderSummary(events) {
@@ -218,50 +444,18 @@ function renderTimeline(records) {
     details.append(summary);
 
     const list = document.createElement("div");
-    list.style.paddingLeft = "0.65rem";
+    list.className = "turn-feed";
     const turnHeader = document.createElement("div");
-    turnHeader.className = "muted";
+    turnHeader.className = "muted turn-feed-meta";
     const typeCounts = eventTypeSummary(items)
       .map(([type, count]) => `${type}:${count}`)
       .join(" · ");
     turnHeader.textContent = `events: ${items.length}${typeCounts ? ` · ${typeCounts}` : ""}`;
     list.appendChild(turnHeader);
 
-    for (const [index, record] of items.entries()) {
-      const header = eventHeadline(record);
-      const eventNode = document.createElement("details");
-      eventNode.className = "event-row";
-      const eventSummaryNode = document.createElement("summary");
-      const short = `#${index + 1}`;
-      eventSummaryNode.textContent = `${header} ${short}`;
-
-      const meta = document.createElement("span");
-      meta.className = "event-meta";
-      const when = fmt(record.recordedAt);
-      const extra = eventMeta(record);
-      meta.textContent = `@${when} · ${extra}`;
-      eventSummaryNode.appendChild(meta);
-
-      const content = document.createElement("pre");
-      const compactPayload = createPayloadPreview(record);
-      const payloadText =
-        Object.keys(compactPayload).length > 0
-          ? JSON.stringify(compactPayload, null, 2)
-          : JSON.stringify(record.event, null, 2);
-      content.textContent = payloadText;
-      content.className = "event-payload";
-
-      const full = document.createElement("details");
-      full.className = "nested";
-      const fullSummary = document.createElement("summary");
-      fullSummary.textContent = "full payload";
-      const fullPre = document.createElement("pre");
-      fullPre.textContent = JSON.stringify(record, null, 2);
-      full.append(fullSummary, fullPre);
-
-      eventNode.append(eventSummaryNode, content);
-      eventNode.append(full);
-      list.appendChild(eventNode);
+    const displayEntries = buildDisplayEntries(items);
+    for (const [index, entry] of displayEntries.entries()) {
+      list.appendChild(renderDisplayEntry(entry, index));
     }
     details.appendChild(list);
     timelineEl.appendChild(details);
