@@ -8,8 +8,9 @@ with the latest failure output until the suite passes, the worktree is clean,
 or the max turn count is hit.
 
 Each Codex thread also gets an append-only JSONL event log in `.ralph/events/`.
-If Ralph resumes the same thread later, it appends new streamed events to the
-same file so each run can be visualized from one timeline.
+If Ralph resumes the same thread later, it appends Ralph prompt events plus new
+streamed Codex events to the same file so each run can be visualized from one
+timeline.
 
 Ralph now also enforces a clean repository handoff:
 
@@ -99,4 +100,4 @@ The script expects a working Codex CLI environment. In practice that means:
 - `.ralph/last-test.log`
   Full output from the most recent `make test`
 - `.ralph/events/<thread-id>.jsonl`
-  Append-only stream of all Codex SDK events for that thread
+  Append-only stream of Ralph prompt events plus all Codex SDK events for that thread

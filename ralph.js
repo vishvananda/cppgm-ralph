@@ -119,8 +119,10 @@ async function main() {
           ? buildInitialPrompt(testRun, gitStatus)
           : buildContinuePrompt(testRun, gitStatus);
 
+    log(`Ralph prompt: ${previewText(prompt)}`);
     const { events } = await thread.runStreamed(prompt);
     const turn = await collectStreamedTurn(events, {
+      prompt,
       threadId: thread.id ?? activeThreadId,
       turnNumber: turnNumber + 1,
     });
@@ -244,14 +246,25 @@ async function collectStreamedTurn(events, options = {}) {
   let usage = null;
   let turnFailure = null;
   let streamError = null;
+  const prompt = typeof options.prompt === "string" ? options.prompt : "";
   let threadId = options.threadId ?? null;
   const turnNumber = options.turnNumber ?? null;
   let eventLogPath = buildEventLogPath(threadId);
   const pendingEventRecords = [];
 
+  const promptEventRecord = buildRalphPromptEventRecord({
+    prompt,
+    threadId,
+    turnNumber,
+  });
+  if (promptEventRecord) {
+    pendingEventRecords.push(promptEventRecord);
+  }
+
   for await (const event of events) {
     threadId = threadId ?? getEventThreadId(event);
     eventLogPath = eventLogPath ?? buildEventLogPath(threadId);
+    applyThreadIdToPendingRecords(pendingEventRecords, threadId);
     const eventRecord = {
       recordedAt: new Date().toISOString(),
       threadId,
@@ -381,6 +394,36 @@ function summarizeEvent(event) {
     return `error ${previewText(event.message)}`;
   }
   return `${event.type} ${summarizeItem(event.item)}`;
+}
+
+function buildRalphPromptEventRecord({ prompt, threadId, turnNumber }) {
+  if (!prompt) {
+    return null;
+  }
+
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.prompt",
+    event: {
+      type: "ralph.prompt",
+      sender: "ralph",
+      prompt,
+    },
+  };
+}
+
+function applyThreadIdToPendingRecords(eventRecords, threadId) {
+  if (!threadId) {
+    return;
+  }
+
+  for (const record of eventRecords) {
+    if (!record.threadId) {
+      record.threadId = threadId;
+    }
+  }
 }
 
 function summarizeItem(item) {
