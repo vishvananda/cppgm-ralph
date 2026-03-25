@@ -100,6 +100,7 @@ button:hover { background: #252525; }
 .turn > summary:hover { color: #fff; }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
+.turn-usage { color: #555; font-size: 0.72rem; margin-left: auto; }
 
 .turn-feed {
   display: grid;

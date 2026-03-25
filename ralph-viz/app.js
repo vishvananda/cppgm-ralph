@@ -327,14 +327,30 @@ function buildTurnMap(events) {
   return turns;
 }
 
+function fmtTokens(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+  return `${n}`;
+}
+
+function buildUsageMap(records) {
+  const map = new Map();
+  for (const r of records) {
+    if (r.eventType === "turn.completed" && r.event?.usage) {
+      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      map.set(turn, r.event.usage);
+    }
+  }
+  return map;
+}
+
 function turnSummaryText(items) {
-  let cmds = 0, msgs = 0, files = 0, other = 0;
+  let cmds = 0, msgs = 0, files = 0;
   for (const r of items) {
     const t = r.event?.item?.type;
     if (t === "command_execution") cmds++;
     else if (t === "agent_message") msgs++;
     else if (t === "file_change") files++;
-    else other++;
   }
   const parts = [];
   if (cmds) parts.push(`${cmds} cmd`);
@@ -343,8 +359,21 @@ function turnSummaryText(items) {
   return parts.join(", ") || `${items.length} events`;
 }
 
+function usageText(usage) {
+  if (!usage) return "";
+  const input = usage.input_tokens ?? 0;
+  const cached = usage.cached_input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  const total = input + output;
+  const parts = [`${fmtTokens(total)} tok`, `${fmtTokens(input)} in`];
+  if (cached) parts.push(`${fmtTokens(cached)} cached`);
+  parts.push(`${fmtTokens(output)} out`);
+  return parts.join(" / ");
+}
+
 function renderTimeline(records) {
   timelineEl.innerHTML = "";
+  const usageMap = buildUsageMap(records);
   const filtered = filterRecords(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
@@ -361,13 +390,14 @@ function renderTimeline(records) {
     const items = turnMap.get(turn) ?? [];
     const details = document.createElement("details");
     details.className = "turn";
-    // Auto-open last turn
     if (turn === lastTurn) details.open = true;
 
     const summary = document.createElement("summary");
     summary.className = "turn-header";
     const label = turn === "pre" ? "Setup" : `Turn ${turn}`;
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>`;
+    const usage = usageMap.get(turn);
+    const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");

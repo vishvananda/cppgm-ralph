@@ -9,7 +9,7 @@ import { Codex } from "@openai/codex-sdk";
 
 const DEFAULT_PROMPT = `Read AGENTS.md and follow it exactly. Starting from the current repository
 state, continue the PA1 through PA9 assignment sequence in order. Reuse and
-extend existing code instead of starting over. Follow the checked-in tests and
+extend existing commited code instead of starting over. Follow the checked-in tests and
 assignment instructions, even when they differ from newer-standard behavior.
 After each completed assignment, update paN/RETRO.md, commit your changes, and
 keep going. After each completed phase, commit your intended changes so
@@ -151,21 +151,7 @@ async function main() {
 }
 
 function buildInitialPrompt(testRun, gitStatus) {
-  return [
-    DEFAULT_PROMPT,
-    "",
-    "You are being driven by an outer Ralph loop.",
-    `After each turn, I will rerun \`${CONFIG.testCommand}\` in the repository root and send you the latest failures if it still does not pass.`,
-    "Keep the same development thread going until the full suite passes.",
-    "Do not leave a dirty worktree behind. Commit intended changes before returning control.",
-    "",
-    `Latest \`${CONFIG.testCommand}\` exit code: ${testRun.exitCode}`,
-    "",
-    "Latest test output:",
-    trimmedOutput(testRun.output),
-    "",
-    ...buildGitStatusLines(gitStatus),
-  ].join("\n");
+  return DEFAULT_PROMPT;
 }
 
 function buildContinuePrompt(testRun, gitStatus) {

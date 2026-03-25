@@ -3,7 +3,7 @@
   "testCommand": "make test",
   "maxTurns": 100,
   "stateDir": ".ralph",
-  "model": "gpt-5.3-codex",
+  "model": "gpt-5.4",
   "reasoningEffort": "high",
   "sandboxMode": "danger-full-access",
   "approvalPolicy": "never",
