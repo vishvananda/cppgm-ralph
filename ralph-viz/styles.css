@@ -1,18 +1,18 @@
 :root {
   color-scheme: dark;
-  --bg: #1a1a2e;
-  --text: #e8e8f0;
-  --muted: #888899;
-  --accent: #f0c040;
-  --ok: #50d070;
-  --bad: #f06060;
-  --dim: #555566;
+  --bg: #111;
+  --text: #ddd;
+  --muted: #888;
+  --accent: #e8a832;
+  --ok: #4c4;
+  --bad: #e55;
+  --dim: #666;
 }
 
 * { box-sizing: border-box; margin: 0; }
 
 body {
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
@@ -20,15 +20,13 @@ body {
 }
 
 .page {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 1rem 1.25rem;
+  padding: 0.75rem 1.5rem;
   display: grid;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
-header h1 { font-size: 1.1rem; font-weight: 600; }
-header p { color: var(--muted); font-size: 0.8rem; }
+header h1 { font-size: 1rem; font-weight: 600; display: inline; }
+header p { color: var(--muted); font-size: 0.8rem; display: inline; margin-left: 0.5rem; }
 
 /* Toolbar */
 .toolbar {
@@ -38,11 +36,11 @@ header p { color: var(--muted); font-size: 0.8rem; }
   flex-wrap: wrap;
 }
 
-.toolbar label { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+.toolbar label { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
 
 button, input, select {
   border: 1px solid #333;
-  background: rgba(255,255,255,0.06);
+  background: #1a1a1a;
   color: var(--text);
   border-radius: 4px;
   padding: 0.3rem 0.5rem;
@@ -50,84 +48,76 @@ button, input, select {
 }
 
 button { cursor: pointer; }
-button:hover { background: rgba(255,255,255,0.12); }
+button:hover { background: #252525; }
 
 .toolbar-sep { width: 1px; height: 1rem; background: #333; }
 
 /* Card */
 .card { margin-bottom: 0.25rem; }
-.card h2 { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+.card h2 { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
 
 /* Summary */
 .summary {
   display: flex;
-  gap: 1rem;
+  gap: 1.25rem;
   flex-wrap: wrap;
   font-size: 0.82rem;
 }
-
-.summary div { }
 
 .summary strong {
   color: var(--accent);
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  margin-right: 0.4rem;
+  margin-right: 0.35rem;
 }
 
 /* Timeline */
-.timeline { display: grid; gap: 0.25rem; }
+.timeline { display: grid; gap: 0.2rem; }
 
 /* Turn accordion */
-.turn { }
-
 .turn > summary {
   cursor: pointer;
-  padding: 0.35rem 0;
+  padding: 0.3rem 0;
   list-style: none;
   display: flex;
   align-items: center;
   gap: 0.5rem;
   font-size: 0.85rem;
   user-select: none;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid #222;
 }
 
 .turn > summary::-webkit-details-marker { display: none; }
 .turn > summary::before {
   content: "\25B8";
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--dim);
   transition: transform 0.15s;
-  width: 0.8rem;
+  width: 0.7rem;
 }
 .turn[open] > summary::before { transform: rotate(90deg); }
-
 .turn > summary:hover { color: #fff; }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
 
 .turn-feed {
   display: grid;
-  gap: 2px;
-  padding: 0.3rem 0 0.5rem 1rem;
-  border-left: 2px solid rgba(255,255,255,0.08);
-  margin-left: 0.35rem;
+  gap: 1px;
+  padding: 0.2rem 0 0.4rem 1rem;
+  border-left: 2px solid #252525;
+  margin-left: 0.3rem;
 }
 
 /* --- Event cards --- */
-.ev {
-  font-size: 0.82rem;
-}
+.ev { font-size: 0.82rem; }
 
 /* Command */
-.ev-cmd { }
 .ev-cmd-fail .cmd-inline { color: var(--bad); }
 
 .ev-cmd > summary {
   cursor: pointer;
-  padding: 0.2rem 0;
+  padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -143,12 +133,12 @@ button:hover { background: rgba(255,255,255,0.12); }
 }
 
 .cmd-inline {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: "SF Mono", "Consolas", monospace;
   font-size: 0.8rem;
   background: none;
   border: none;
   padding: 0;
-  color: #a0d8a0;
+  color: #9d9;
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
@@ -156,23 +146,23 @@ button:hover { background: rgba(255,255,255,0.12); }
 }
 
 .cmd-output {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: "SF Mono", "Consolas", monospace;
   font-size: 0.75rem;
   white-space: pre-wrap;
   word-break: break-word;
-  background: rgba(0,0,0,0.3);
-  border-radius: 4px;
-  padding: 0.5rem 0.6rem;
-  margin: 0.25rem 0 0.25rem 1rem;
+  background: #0a0a0a;
+  border-radius: 3px;
+  padding: 0.4rem 0.6rem;
+  margin: 0.2rem 0 0.2rem 1rem;
   max-height: 400px;
   overflow-y: auto;
-  color: #b0b8c8;
+  color: #aaa;
   line-height: 1.4;
 }
 
 .btn-more {
   display: inline-block;
-  margin: 0.2rem 0 0.2rem 1rem;
+  margin: 0.15rem 0 0.15rem 1rem;
   font-size: 0.72rem;
   color: var(--accent);
   background: none;
@@ -183,52 +173,25 @@ button:hover { background: rgba(255,255,255,0.12); }
 }
 
 /* Message */
-.ev-msg { }
-
-.ev-msg > summary {
-  cursor: pointer;
-  padding: 0.2rem 0;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  list-style: none;
-}
-
-.ev-msg > summary::-webkit-details-marker { display: none; }
-.ev-msg > summary::before {
-  content: "\25AC";
-  color: #6688cc;
-  font-size: 0.6rem;
-}
-
-.msg-preview {
-  color: #c8d0e8;
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ev-msg {
+  padding: 0.3rem 0;
+  border-left: 3px solid #345;
+  padding-left: 0.6rem;
+  margin: 0.15rem 0;
 }
 
 .msg-body {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   white-space: pre-wrap;
   word-break: break-word;
-  background: rgba(0,0,0,0.25);
-  border-radius: 4px;
-  padding: 0.5rem 0.6rem;
-  margin: 0.25rem 0 0.25rem 1rem;
-  max-height: 500px;
-  overflow-y: auto;
   line-height: 1.55;
-  color: #dde4f0;
+  color: #ccc;
 }
 
 /* File changes */
-.ev-file { }
-
 .ev-file > summary {
   cursor: pointer;
-  padding: 0.2rem 0;
+  padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -237,26 +200,24 @@ button:hover { background: rgba(255,255,255,0.12); }
 
 .ev-file > summary::-webkit-details-marker { display: none; }
 .ev-file > summary::before {
-  content: "\25A0";
-  color: #cc9944;
-  font-size: 0.5rem;
+  content: "\25AA";
+  color: #a84;
+  font-size: 0.6rem;
 }
 
-.file-list { padding: 0.15rem 0 0.15rem 1rem; }
+.file-list { padding: 0.1rem 0 0.1rem 1rem; }
 .file-row {
   font-size: 0.78rem;
-  padding: 0.1rem 0;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  padding: 0.08rem 0;
+  font-family: "SF Mono", "Consolas", monospace;
 }
 .file-kind { color: var(--accent); margin-right: 0.3rem; font-size: 0.7rem; }
-.file-path { color: #d0c8a0; }
+.file-path { color: #ba8; }
 
 /* Todo */
-.ev-todo { }
-
 .ev-todo > summary {
   cursor: pointer;
-  padding: 0.2rem 0;
+  padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -266,21 +227,21 @@ button:hover { background: rgba(255,255,255,0.12); }
 .ev-todo > summary::-webkit-details-marker { display: none; }
 .ev-todo > summary::before {
   content: "\2610";
-  color: #9977cc;
+  color: #88a;
   font-size: 0.75rem;
 }
 
-.todo-list { padding: 0.15rem 0 0.15rem 1rem; }
-.todo-row { font-size: 0.78rem; padding: 0.1rem 0; }
-.todo-done { color: #6a8a6a; text-decoration: line-through; }
+.todo-list { padding: 0.1rem 0 0.1rem 1rem; }
+.todo-row { font-size: 0.78rem; padding: 0.08rem 0; }
+.todo-done { color: #686; text-decoration: line-through; }
 
-/* System events - ultra compact */
+/* System events */
 .ev-sys {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.1rem 0;
-  color: var(--dim);
+  padding: 0.08rem 0;
+  color: #555;
   font-size: 0.7rem;
 }
 
@@ -295,20 +256,21 @@ button:hover { background: rgba(255,255,255,0.12); }
   font-size: 0.7rem;
   white-space: nowrap;
   color: var(--muted);
-  background: rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.05);
 }
 
 .pill-ok { color: var(--ok); }
 .pill-bad { color: var(--bad); }
-.pill-running { color: #d4d460; }
+.pill-running { color: #cc2; }
 
-.ts { color: var(--dim); font-size: 0.68rem; white-space: nowrap; flex-shrink: 0; }
+.cmd-lines { color: #555; font-size: 0.7rem; white-space: nowrap; }
+
+.ts { color: #555; font-size: 0.68rem; white-space: nowrap; flex-shrink: 0; }
 
 .muted { color: var(--muted); }
 
 pre { margin: 0; }
 
-/* Checkbox toggle */
 .toggle-label {
   display: flex;
   align-items: center;

@@ -137,6 +137,21 @@ function renderCommandCard(entry) {
   cmdSpan.textContent = truncate(cmd, 200);
   summary.append(cmdSpan);
 
+  if (output) {
+    const lineCount = output.split(/\r?\n/).length;
+    const lc = document.createElement("span");
+    lc.className = "cmd-lines";
+    lc.textContent = `${lineCount} line${lineCount !== 1 ? "s" : ""}`;
+    summary.append(lc);
+  }
+
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
   if (exitCode != null) {
     const badge = document.createElement("span");
     badge.className = exitCode === 0 ? "pill pill-ok" : "pill pill-bad";
@@ -147,13 +162,6 @@ function renderCommandCard(entry) {
     badge.className = "pill pill-running";
     badge.textContent = "running";
     summary.append(badge);
-  }
-
-  if (time) {
-    const ts = document.createElement("span");
-    ts.className = "ts";
-    ts.textContent = time;
-    summary.append(ts);
   }
 
   card.append(summary);
@@ -181,37 +189,14 @@ function renderMessageCard(record) {
   const text = cleanText(record.event?.item?.text);
   if (!text) return null;
 
-  const card = document.createElement("details");
+  const card = document.createElement("div");
   card.className = "ev ev-msg";
 
-  const summary = document.createElement("summary");
-  const preview = document.createElement("span");
-  preview.className = "msg-preview";
-  // First meaningful line as preview
-  const firstLine = text.split(/\r?\n/).find(l => l.trim()) || text;
-  preview.textContent = truncate(firstLine, 160);
-  const time = fmtShort(record.recordedAt);
-  summary.append(preview);
-  if (time) {
-    const ts = document.createElement("span");
-    ts.className = "ts";
-    ts.textContent = time;
-    summary.append(ts);
-  }
-
-  const body = document.createElement("pre");
+  const body = document.createElement("div");
   body.className = "msg-body";
-  if (text.length > 4000) {
-    body.textContent = text.slice(0, 4000);
-    const more = document.createElement("button");
-    more.className = "btn-more";
-    more.textContent = `Show all (${text.length} chars)`;
-    more.onclick = () => { body.textContent = text; more.remove(); };
-    card.append(summary, body, more);
-  } else {
-    body.textContent = text;
-    card.append(summary, body);
-  }
+  body.textContent = text;
+
+  card.append(body);
   return card;
 }
 
