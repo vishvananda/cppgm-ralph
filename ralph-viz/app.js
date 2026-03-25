@@ -275,12 +275,34 @@ function renderSystemCard(record) {
   return div;
 }
 
+function renderPromptCard(record) {
+  const prompt = cleanText(record.event?.prompt);
+  if (!prompt) return null;
+
+  const sender = record.event?.sender ?? "ralph";
+  const card = document.createElement("div");
+  card.className = "ev ev-prompt";
+
+  const label = document.createElement("span");
+  label.className = "prompt-label";
+  label.textContent = sender;
+
+  const body = document.createElement("div");
+  body.className = "prompt-body";
+  body.textContent = prompt;
+
+  card.append(label, body);
+  return card;
+}
+
 function renderDisplayEntry(entry) {
   if (entry.kind === "command") return renderCommandCard(entry);
 
   const record = entry.record;
   const item = record.event?.item;
 
+  if (record.eventType === "ralph.prompt")
+    return renderPromptCard(record);
   if (record.eventType === "item.completed" && item?.type === "agent_message")
     return renderMessageCard(record);
   if (record.eventType === "item.completed" && item?.type === "file_change")
@@ -385,12 +407,21 @@ function renderTimeline(records) {
   });
 
   const lastTurn = sortedTurns[sortedTurns.length - 1];
+  const urlTurns = getUrlParams().turns;
+  const hasUrlTurns = urlTurns.length > 0;
 
   for (const turn of sortedTurns) {
     const items = turnMap.get(turn) ?? [];
     const details = document.createElement("details");
     details.className = "turn";
-    if (turn === lastTurn) details.open = true;
+    details.dataset.turn = String(turn);
+
+    // Open turns from URL, or default to last turn
+    if (hasUrlTurns ? urlTurns.includes(String(turn)) : turn === lastTurn) {
+      details.open = true;
+    }
+
+    details.addEventListener("toggle", syncOpenTurnsToUrl);
 
     const summary = document.createElement("summary");
     summary.className = "turn-header";
@@ -410,6 +441,33 @@ function renderTimeline(records) {
     details.append(feed);
     timelineEl.append(details);
   }
+}
+
+// --- URL state ---
+
+function getUrlParams() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    run: p.get("run"),
+    turns: p.get("turns")?.split(",").filter(Boolean) ?? [],
+  };
+}
+
+function setUrlParam(key, value) {
+  const p = new URLSearchParams(window.location.search);
+  if (value == null || value === "") p.delete(key);
+  else p.set(key, value);
+  const qs = p.toString();
+  history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+}
+
+function syncOpenTurnsToUrl() {
+  const open = [];
+  for (const el of timelineEl.querySelectorAll("details.turn[open]")) {
+    const t = el.dataset.turn;
+    if (t) open.push(t);
+  }
+  setUrlParam("turns", open.length ? open.join(",") : null);
 }
 
 // --- Data loading ---
@@ -435,19 +493,22 @@ async function loadRuns() {
   for (const run of state.runs) {
     const opt = document.createElement("option");
     opt.value = run.id;
-    opt.textContent = `${run.id.slice(0, 8)}... (${run.events} events)`;
+    opt.textContent = `${run.label} (${run.events} events)`;
     runSelect.append(opt);
   }
 
-  const preferred = stateData.currentThread;
-  const defaultRun = preferred && state.runs.some(r => r.id === preferred) ? preferred : state.runs[0].id;
-  runSelect.value = defaultRun;
-  await loadRun(defaultRun);
+  const urlRun = getUrlParams().run;
+  const preferred = urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
+    : stateData.currentThread && state.runs.some(r => r.id === stateData.currentThread) ? stateData.currentThread
+    : state.runs[0].id;
+  runSelect.value = preferred;
+  await loadRun(preferred);
 }
 
 async function loadRun(id) {
   if (!id) return;
   state.selectedRun = id;
+  setUrlParam("run", id);
   const data = await fetch(`/api/run/${encodeURIComponent(id)}`).then(r => {
     if (!r.ok) throw new Error(`Load failed: ${r.status}`);
     return r.json();

@@ -6,32 +6,55 @@ import { fileURLToPath } from "node:url";
 import http from "node:http";
 
 const ROOT_DIR = process.cwd();
-const EVENTS_DIR = path.join(ROOT_DIR, ".ralph", "events");
-const STATE_PATH = path.join(ROOT_DIR, ".ralph", "state.json");
+const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
 const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+// Scan .ralph/*/events/*.jsonl
 async function listFiles() {
+  const results = [];
   try {
-    const entries = await fs.readdir(EVENTS_DIR, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-      .map((entry) => path.join(EVENTS_DIR, entry.name))
-      .sort((a, b) => b.localeCompare(a));
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return [];
+    const dirs = await fs.readdir(RALPH_DIR, { withFileTypes: true });
+    for (const dir of dirs) {
+      if (!dir.isDirectory()) continue;
+      const eventsDir = path.join(RALPH_DIR, dir.name, "events");
+      let files;
+      try {
+        files = await fs.readdir(eventsDir, { withFileTypes: true });
+      } catch (e) {
+        if (e?.code === "ENOENT") continue;
+        throw e;
+      }
+      const jsonls = files.filter(f => f.isFile() && f.name.endsWith(".jsonl"));
+      for (const f of jsonls) {
+        const fileBase = path.basename(f.name, ".jsonl");
+        // id encodes both dir name and file for lookup
+        const id = `${dir.name}/${fileBase}`;
+        // display label: just (name) if single jsonl, else (name uuid4)
+        const label = jsonls.length === 1
+          ? dir.name
+          : `${dir.name} ${fileBase.slice(0, 4)}`;
+        results.push({
+          id,
+          label,
+          filePath: path.join(eventsDir, f.name),
+        });
+      }
     }
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
     throw error;
   }
+  return results.sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function safeRunId(id) {
-  if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
-    return null;
-  }
-  return `${id}.jsonl`;
+  // id is "dirName/fileBase" — validate both parts
+  const parts = id.split("/");
+  if (parts.length !== 2) return null;
+  if (!parts.every(p => /^[a-zA-Z0-9._-]+$/.test(p))) return null;
+  return path.join(RALPH_DIR, parts[0], "events", `${parts[1]}.jsonl`);
 }
 
 async function readRunFile(filePath) {
@@ -83,16 +106,22 @@ function buildSummary(events) {
 }
 
 async function currentRunId() {
+  // Look for state.json in any .ralph/*/state.json and return the matching run id
   try {
-    const raw = await fs.readFile(STATE_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    return typeof parsed.threadId === "string" ? parsed.threadId : null;
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return null;
+    const dirs = await fs.readdir(RALPH_DIR, { withFileTypes: true });
+    for (const dir of dirs) {
+      if (!dir.isDirectory()) continue;
+      const statePath = path.join(RALPH_DIR, dir.name, "state.json");
+      try {
+        const raw = await fs.readFile(statePath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.threadId === "string") {
+          return `${dir.name}/${parsed.threadId}`;
+        }
+      } catch (_) { /* no state file, skip */ }
     }
-    return null;
-  }
+  } catch (_) {}
+  return null;
 }
 
 async function sendJson(res, payload, status = 200) {
@@ -140,16 +169,15 @@ async function requestHandler(req, res) {
   }
 
   if (pathname === "/api/runs") {
-    const files = await listFiles();
+    const fileEntries = await listFiles();
     const runs = [];
-    for (const file of files) {
-      const fileBase = path.basename(file, ".jsonl");
-      const events = await readRunFile(file);
+    for (const entry of fileEntries) {
+      const events = await readRunFile(entry.filePath);
       const summary = buildSummary(events);
-      const stat = await fs.stat(file);
+      const stat = await fs.stat(entry.filePath);
       runs.push({
-        id: fileBase,
-        file: fileBase,
+        id: entry.id,
+        label: entry.label,
         size: stat.size,
         mtime: stat.mtime.toISOString(),
         events: events.length,
@@ -161,11 +189,10 @@ async function requestHandler(req, res) {
 
   if (pathname.startsWith("/api/run/")) {
     const rawId = decodeURIComponent(pathname.slice("/api/run/".length));
-    const fileName = safeRunId(rawId);
-    if (!fileName) {
+    const filePath = safeRunId(rawId);
+    if (!filePath) {
       return sendJson(res, { error: "Invalid run id" }, 400);
     }
-    const filePath = path.join(EVENTS_DIR, fileName);
     let events = [];
     try {
       events = await readRunFile(filePath);
@@ -196,7 +223,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  const runsPath = path.relative(ROOT_DIR, EVENTS_DIR);
-  console.log(`[ralph-viz] serving from ${runsPath}`);
+  const runsPath = path.relative(ROOT_DIR, RALPH_DIR);
+  console.log(`[ralph-viz] serving from ${runsPath}/*/events`);
   console.log(`[ralph-viz] open http://${HOST}:${PORT}`);
 });
