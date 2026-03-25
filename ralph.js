@@ -8,13 +8,9 @@ import process from "node:process";
 import { Codex } from "@openai/codex-sdk";
 
 const DEFAULT_PROMPT = `Read AGENTS.md and follow it exactly. Starting from the current repository
-state, continue the PA1 through PA9 assignment sequence in order. Reuse and
-extend existing commited code instead of starting over. Follow the checked-in tests and
-assignment instructions, even when they differ from newer-standard behavior.
-After each completed assignment, update paN/RETRO.md, commit your changes, and
-keep going. After each completed phase, commit your intended changes so
-\`git status --short\` is empty before handing control back. Stop only when the
-repository root make test passes and \`git status --short\` is empty.`;
+state which has stubs of the desired compiler implementation. 
+Follow the checked-in tests and assignment instructions, even when they differ from newer-standard behavior.
+Work on assignment pa1, when completed, update pa1/RETRO.md, commit your changes.`
 
 const DEFAULT_CONFIG = {
   workdir: "/work/cppgm",
@@ -157,21 +153,19 @@ function buildInitialPrompt(testRun, gitStatus) {
 }
 
 function buildContinuePrompt(testRun, gitStatus) {
+  const progress = analyzeTestProgress(testRun.output);
+  const objectiveLines = buildContinueObjectiveLines(progress, testRun);
+  const failureSummaryLines = buildFailureSummaryLines(progress, testRun);
+
   return [
-    "Continue the existing development loop in this repository.",
-    "Do not reset or restart the work. Pick up from the current tree state.",
-    `I reran \`${CONFIG.testCommand}\` from the repository root and it still fails.`,
-    `Latest exit code: ${testRun.exitCode}`,
+    ...objectiveLines,
     gitStatus.clean
       ? "The worktree is currently clean."
       : "Your previous turn left a dirty worktree. Commit intended changes before returning control.",
     "",
-    "Latest test output:",
-    trimmedOutput(testRun.output),
-    "",
     ...buildGitStatusLines(gitStatus),
     "",
-    "Fix the next blocking issues and keep going until the suite passes.",
+    ...failureSummaryLines,
   ].join("\n");
 }
 
@@ -189,6 +183,77 @@ function buildGitStatusLines(gitStatus) {
   return gitStatus.clean
     ? ["Current `git status --short`: empty"]
     : ["Current `git status --short`:", trimmedOutput(gitStatus.output)];
+}
+
+function buildContinueObjectiveLines(progress, testRun) {
+  if (progress?.passingThrough && progress?.failingStage) {
+    return [
+      `Assignments through \`${progress.passingThrough}\` already pass.`,
+      `Your task for this turn is to implement the code required to make \`make ${progress.failingStage}\` pass without causing regressions for previous assignments: \`make test-through-${progress.passingThrough}\``,
+    ];
+  }
+
+  if (progress?.failingStage) {
+    return [
+      `\`make ${progress.failingStage}\` is still failing, continue work on stage until it passes.`,
+    ];
+  }
+
+  return [
+    `I reran \`${CONFIG.testCommand}\` from the repository root and it still fails.`,
+    `Latest exit code: ${testRun.exitCode}`,
+  ];
+}
+
+function buildFailureSummaryLines(progress, testRun) {
+  const lines = [`Latest exit code: ${testRun.exitCode}`];
+
+  if (progress?.firstFailureLine) {
+    lines.push(`First reported blocker: ${progress.firstFailureLine}`);
+  }
+
+  lines.push(
+    `Full test output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
+    "After `make` passes for the current blocking assignment, keep going until the full suite passes.",
+  );
+
+  return lines;
+}
+
+function analyzeTestProgress(output) {
+  const stagePattern = /^===== (pa\d+) =====$/gm;
+  const stages = [...output.matchAll(stagePattern)].map((match) => ({
+    name: match[1],
+    index: match.index ?? 0,
+    header: match[0],
+  }));
+
+  const firstFailureLine = output
+    .split(/\r?\n/)
+    .find((line) => /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match/.test(line));
+
+  if (stages.length === 0) {
+    return { firstFailureLine: firstFailureLine ?? null };
+  }
+
+  const stageBlocks = stages.map((stage, index) => {
+    const start = stage.index;
+    const end = index + 1 < stages.length ? stages[index + 1].index : output.length;
+    return {
+      name: stage.name,
+      body: output.slice(start, end),
+    };
+  });
+
+  const failingIndex = stageBlocks.findIndex((stage) => /\bFAIL\b|ERROR:/.test(stage.body));
+  const failingStage = failingIndex >= 0 ? stageBlocks[failingIndex].name : null;
+  const passingThrough = failingIndex > 0 ? stageBlocks[failingIndex - 1].name : null;
+
+  return {
+    failingStage,
+    passingThrough,
+    firstFailureLine: firstFailureLine ?? null,
+  };
 }
 
 function trimmedOutput(output) {
