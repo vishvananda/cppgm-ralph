@@ -264,6 +264,28 @@ button:hover { background: #252525; }
   color: #da8;
 }
 
+/* Gemini thought */
+.ev-thought {
+  padding: 0.3rem 0;
+  border-left: 3px solid #649;
+  padding-left: 0.6rem;
+  margin: 0.15rem 0;
+}
+
+.thought-subject {
+  display: block;
+  font-size: 0.78rem;
+  color: #a7b;
+}
+
+.thought-body {
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  color: #888;
+}
+
 /* System events */
 .ev-sys {
   display: flex;

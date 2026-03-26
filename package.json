@@ -6,9 +6,12 @@
   "scripts": {
     "start": "node ralph.js",
     "ralph": "node ralph.js",
+    "ralph-gemini": "node ralph-gemini.js",
     "ralph-viz": "node ralph-viz/server.js"
   },
   "dependencies": {
+    "@google/gemini-cli-core": "file:vendor/google-gemini/packages/core",
+    "@google/gemini-cli-sdk": "file:vendor/google-gemini/packages/sdk",
     "@openai/codex-sdk": "^0.116.0"
   }
 }

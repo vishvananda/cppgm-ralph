@@ -14,6 +14,8 @@ const state = { runs: [], selectedRun: null, events: [], raw: [] };
 const NOISE_TYPES = new Set([
   "thread.started", "turn.started", "turn.completed", "turn.failed",
   "item.started", "error",
+  // Gemini streaming noise
+  "content", "finished", "model_info", "tool_call_response",
 ]);
 
 function fmt(time) {
@@ -96,6 +98,8 @@ function renderSummary(events) {
 function buildDisplayEntries(records) {
   const entries = [];
   const cmdStarts = new Map();
+  // Gemini: accumulate content chunks by traceId into messages
+  const contentByTrace = new Map();
 
   for (const record of records) {
     const item = record.event?.item;
@@ -112,6 +116,46 @@ function buildDisplayEntries(records) {
       cmdStarts.delete(item.id);
       continue;
     }
+
+    // Gemini: accumulate streaming content chunks into a single message entry
+    if (record.eventType === "content" && typeof record.event?.value === "string") {
+      const traceId = record.event.traceId ?? "_default";
+      if (contentByTrace.has(traceId)) {
+        contentByTrace.get(traceId).text += record.event.value;
+      } else {
+        const entry = { kind: "gemini-message", text: record.event.value, record };
+        contentByTrace.set(traceId, entry);
+        entries.push(entry);
+      }
+      continue;
+    }
+
+    // Gemini: tool call requests — merge with response by callId
+    if (record.eventType === "tool_call_request") {
+      const callId = record.event?.value?.callId;
+      const entry = { kind: "gemini-tool-call", record, responseRecord: null };
+      entries.push(entry);
+      if (callId) cmdStarts.set(`gemini:${callId}`, entry);
+      continue;
+    }
+
+    // Gemini: tool call responses — attach to matching request
+    if (record.eventType === "tool_call_response") {
+      const callId = record.event?.value?.callId;
+      const key = `gemini:${callId}`;
+      if (callId && cmdStarts.has(key)) {
+        cmdStarts.get(key).responseRecord = record;
+        cmdStarts.delete(key);
+      }
+      continue;
+    }
+
+    // Gemini: thought events
+    if (record.eventType === "thought") {
+      entries.push({ kind: "gemini-thought", record });
+      continue;
+    }
+
     entries.push({ kind: "event", record });
   }
   return entries;
@@ -262,6 +306,12 @@ function renderSystemCard(record) {
   if (record.eventType === "turn.completed" && record.event?.usage) {
     const u = record.event.usage;
     text = `turn done \u2014 ${u.input_tokens + u.output_tokens} tok (${u.input_tokens} in, ${u.output_tokens} out)`;
+  } else if (record.eventType === "finished" && record.event?.value?.usageMetadata) {
+    const u = record.event.value.usageMetadata;
+    const total = u.totalTokenCount ?? 0;
+    text = `finished \u2014 ${total} tok (${u.promptTokenCount ?? 0} in, ${u.candidatesTokenCount ?? 0} out, ${u.thoughtsTokenCount ?? 0} thought)`;
+  } else if (record.eventType === "model_info") {
+    text = `model: ${record.event?.value ?? "unknown"}`;
   } else if (record.eventType === "turn.failed") {
     text = `turn failed: ${cleanText(record.event?.error?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
@@ -295,8 +345,145 @@ function renderPromptCard(record) {
   return card;
 }
 
+function renderGeminiMessageCard(entry) {
+  const text = cleanText(entry.text);
+  if (!text) return null;
+
+  const card = document.createElement("div");
+  card.className = "ev ev-msg";
+
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.textContent = text;
+
+  card.append(body);
+  return card;
+}
+
+function renderGeminiToolCallCard(entry) {
+  const record = entry.record;
+  const responseRecord = entry.responseRecord;
+  const val = record.event?.value ?? {};
+  const respVal = responseRecord?.event?.value ?? {};
+  const toolName = val.name ?? "unknown";
+  const args = val.args ?? {};
+  const cmd = args.command ?? args.file_path ?? args.dir_path ?? "";
+  const description = args.description ?? "";
+  const output = cleanText(respVal.output);
+  const time = fmtShort(responseRecord?.recordedAt ?? record.recordedAt);
+  const durationMs = respVal.durationMs;
+
+  const card = document.createElement("details");
+  const isError = respVal.status === "error";
+  card.className = "ev ev-cmd" + (isError ? " ev-cmd-fail" : "");
+
+  const summary = document.createElement("summary");
+  const toolSpan = document.createElement("span");
+  toolSpan.className = "pill";
+  toolSpan.textContent = toolName;
+  summary.append(toolSpan);
+
+  if (cmd) {
+    const cmdSpan = document.createElement("code");
+    cmdSpan.className = "cmd-inline";
+    cmdSpan.textContent = truncate(cmd, 200);
+    summary.append(document.createTextNode(" "), cmdSpan);
+  } else if (description) {
+    const descSpan = document.createElement("span");
+    descSpan.className = "cmd-inline";
+    descSpan.textContent = truncate(description, 200);
+    summary.append(document.createTextNode(" "), descSpan);
+  }
+
+  if (output) {
+    const lineCount = output.split(/\r?\n/).length;
+    const lc = document.createElement("span");
+    lc.className = "cmd-lines";
+    lc.textContent = `${lineCount} line${lineCount !== 1 ? "s" : ""}`;
+    summary.append(lc);
+  }
+
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  if (durationMs != null) {
+    const dur = document.createElement("span");
+    dur.className = "cmd-lines";
+    dur.textContent = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+    summary.append(dur);
+  }
+
+  if (responseRecord) {
+    const badge = document.createElement("span");
+    badge.className = isError ? "pill pill-bad" : "pill pill-ok";
+    badge.textContent = isError ? "error" : "ok";
+    summary.append(badge);
+  }
+
+  card.append(summary);
+
+  if (output) {
+    const pre = document.createElement("pre");
+    pre.className = "cmd-output";
+    if (output.length > 2000) {
+      pre.textContent = output.slice(0, 2000);
+      const more = document.createElement("button");
+      more.className = "btn-more";
+      more.textContent = `Show all (${output.length} chars)`;
+      more.onclick = () => { pre.textContent = output; more.remove(); };
+      card.append(pre, more);
+    } else {
+      pre.textContent = output;
+      card.append(pre);
+    }
+  } else if (!responseRecord) {
+    // No response yet — show args as fallback
+    const argText = JSON.stringify(args, null, 2);
+    if (argText && argText !== "{}") {
+      const pre = document.createElement("pre");
+      pre.className = "cmd-output";
+      pre.textContent = argText;
+      card.append(pre);
+    }
+  }
+
+  return card;
+}
+
+function renderGeminiThoughtCard(record) {
+  const val = record.event?.value ?? {};
+  const subject = cleanText(val.subject);
+  const description = cleanText(val.description);
+  if (!subject && !description) return null;
+
+  const card = document.createElement("div");
+  card.className = "ev ev-thought";
+
+  if (subject) {
+    const subj = document.createElement("strong");
+    subj.className = "thought-subject";
+    subj.textContent = subject;
+    card.append(subj);
+  }
+  if (description) {
+    const body = document.createElement("div");
+    body.className = "thought-body";
+    body.textContent = description;
+    card.append(body);
+  }
+
+  return card;
+}
+
 function renderDisplayEntry(entry) {
   if (entry.kind === "command") return renderCommandCard(entry);
+  if (entry.kind === "gemini-message") return renderGeminiMessageCard(entry);
+  if (entry.kind === "gemini-tool-call") return renderGeminiToolCallCard(entry);
+  if (entry.kind === "gemini-thought") return renderGeminiThoughtCard(entry.record);
 
   const record = entry.record;
   const item = record.event?.item;
@@ -322,6 +509,8 @@ function shouldShow(record) {
     // Keep item.started only for commands (they get merged)
     if (record.eventType === "item.started" && record.event?.item?.type === "command_execution")
       return true;
+    // Keep gemini content/tool_call_response — they get merged by buildDisplayEntries
+    if (record.eventType === "content" || record.eventType === "tool_call_response") return true;
     return false;
   }
   return true;
@@ -358,9 +547,29 @@ function fmtTokens(n) {
 function buildUsageMap(records) {
   const map = new Map();
   for (const r of records) {
+    // Codex: turn.completed has usage
     if (r.eventType === "turn.completed" && r.event?.usage) {
       const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
       map.set(turn, r.event.usage);
+    }
+    // Gemini: finished events have usageMetadata — accumulate per turn
+    if (r.eventType === "finished" && r.event?.value?.usageMetadata) {
+      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      const gm = r.event.value.usageMetadata;
+      const prev = map.get(turn);
+      if (prev && prev._gemini) {
+        // Accumulate across multiple finished events in same turn
+        prev.input_tokens += gm.promptTokenCount ?? 0;
+        prev.output_tokens += (gm.candidatesTokenCount ?? 0) + (gm.thoughtsTokenCount ?? 0);
+        prev.cached_input_tokens += gm.cachedContentTokenCount ?? 0;
+      } else if (!prev) {
+        map.set(turn, {
+          _gemini: true,
+          input_tokens: gm.promptTokenCount ?? 0,
+          output_tokens: (gm.candidatesTokenCount ?? 0) + (gm.thoughtsTokenCount ?? 0),
+          cached_input_tokens: gm.cachedContentTokenCount ?? 0,
+        });
+      }
     }
   }
   return map;
@@ -387,17 +596,32 @@ function testStatusText(ts) {
 }
 
 function turnSummaryText(items) {
-  let cmds = 0, msgs = 0, files = 0;
+  let cmds = 0, msgs = 0, files = 0, thoughts = 0;
   for (const r of items) {
     const t = r.event?.item?.type;
+    const et = r.eventType;
+    // Codex events
     if (t === "command_execution") cmds++;
     else if (t === "agent_message") msgs++;
     else if (t === "file_change") files++;
+    // Gemini events
+    else if (et === "tool_call_request") cmds++;
+    else if (et === "thought") thoughts++;
   }
+  // Count unique gemini content traces as messages
+  const contentTraces = new Set();
+  for (const r of items) {
+    if (r.eventType === "content" && typeof r.event?.value === "string") {
+      contentTraces.add(r.event.traceId ?? "_default");
+    }
+  }
+  msgs += contentTraces.size;
+
   const parts = [];
   if (cmds) parts.push(`${cmds} cmd`);
   if (msgs) parts.push(`${msgs} msg`);
   if (files) parts.push(`${files} file`);
+  if (thoughts) parts.push(`${thoughts} thought`);
   return parts.join(", ") || `${items.length} events`;
 }
 
