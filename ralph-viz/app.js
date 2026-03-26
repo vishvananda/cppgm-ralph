@@ -366,6 +366,26 @@ function buildUsageMap(records) {
   return map;
 }
 
+function buildTestStatusMap(records) {
+  const map = new Map();
+  for (const r of records) {
+    if (r.eventType === "ralph.test-status" && r.event?.testStatus) {
+      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      map.set(turn, r.event.testStatus);
+    }
+  }
+  return map;
+}
+
+function testStatusText(ts) {
+  if (!ts) return "";
+  const parts = [`${ts.testsPassed}/${ts.testsTotal} tests`];
+  if (ts.stageCount > 0) parts.push(`${ts.stagesPassed}/${ts.stageCount} stages`);
+  if (ts.failingStage) parts.push(ts.failingStage);
+  else if (ts.allTestsPassed) parts.push("all pass");
+  return parts.join(", ");
+}
+
 function turnSummaryText(items) {
   let cmds = 0, msgs = 0, files = 0;
   for (const r of items) {
@@ -396,6 +416,7 @@ function usageText(usage) {
 function renderTimeline(records) {
   timelineEl.innerHTML = "";
   const usageMap = buildUsageMap(records);
+  const testMap = buildTestStatusMap(records);
   const filtered = filterRecords(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
@@ -427,8 +448,10 @@ function renderTimeline(records) {
     summary.className = "turn-header";
     const label = turn === "pre" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
+    const ts = testMap.get(turn);
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>${usageHtml}`;
+    const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts)}</span>` : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");

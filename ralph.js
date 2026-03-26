@@ -26,6 +26,8 @@ const DEFAULT_CONFIG = {
   additionalDirectories: [],
   outputTailChars: 20000,
 };
+const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
+const DEFAULT_BASE_BRANCH = "main";
 
 const CONFIG_PATH = path.resolve(process.cwd(), process.env.RALPH_CONFIG ?? "ralph.config.json");
 
@@ -42,13 +44,27 @@ async function main() {
 
   await fs.mkdir(CONFIG.stateDir, { recursive: true });
   await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
-  await assertDirectoryExists(CONFIG.workdir);
+  const state = await loadState();
+  const runBranchName = deriveRunBranchName(CONFIG.stateDir);
+  const startingFreshRun =
+    !state.threadId &&
+    state.turnsCompleted === 0 &&
+    state.lastExitCode == null &&
+    state.lastTestStatus == null;
+
+  if (startingFreshRun) {
+    await initializeRunRepository({
+      workdir: CONFIG.workdir,
+      branchName: runBranchName,
+    });
+  } else {
+    await assertDirectoryExists(CONFIG.workdir);
+  }
+
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
-      `workdir=${CONFIG.workdir}`,
+      `workdir=${CONFIG.workdir} branch=${runBranchName}`,
   );
-
-  const state = await loadState();
   const threadOptions = {
     workingDirectory: CONFIG.workdir,
     sandboxMode: CONFIG.sandboxMode,
@@ -71,22 +87,42 @@ async function main() {
   for (let turnNumber = state.turnsCompleted; turnNumber < CONFIG.maxTurns; turnNumber += 1) {
     const testRun = await runCommand(CONFIG.testCommand, CONFIG.workdir);
     await fs.writeFile(TEST_LOG_PATH, testRun.output, "utf8");
-    log(`Latest test output: ${previewText(testRun.output)}`);
     const gitStatus = await getGitStatus(CONFIG.workdir);
+    const testStatus = analyzeTestProgress(testRun.output, state.lastTestStatus, {
+      exitCode: testRun.exitCode,
+    });
+    log(`Latest test output: ${previewText(testRun.output)}`);
+    log(`Test status: ${formatTestStatusSummary(testStatus)}`);
+    if (testStatus.stages.length > 0) {
+      log(`Stage breakdown: ${formatStageBreakdown(testStatus)}`);
+    }
     if (!gitStatus.clean) {
       log(`Git status: ${previewText(gitStatus.output)}`);
     }
 
     if (testRun.exitCode === 0 && gitStatus.clean) {
+      const finalThreadId = activeThreadId ?? state.threadId ?? null;
+      await appendRalphEventRecord(
+        buildRalphTestStatusEventRecord({
+          testStatus,
+          threadId: finalThreadId,
+          turnNumber,
+        }),
+      );
       if (activeThreadId || state.threadId || state.turnsCompleted > 0) {
         await saveState({
-          threadId: activeThreadId,
-          eventLogPath: buildEventLogPath(activeThreadId),
+          threadId: finalThreadId,
+          eventLogPath: buildEventLogPath(finalThreadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
+          lastTestStatus: testStatus,
           updatedAt: new Date().toISOString(),
         });
       }
+      state.threadId = finalThreadId;
+      state.lastExitCode = 0;
+      state.lastTestStatus = testStatus;
+      state.turnsCompleted = turnNumber;
       log("`make test` passed. Exiting.");
       return;
     }
@@ -110,15 +146,22 @@ async function main() {
 
     const prompt =
       testRun.exitCode === 0 && !gitStatus.clean
-        ? buildCleanWorktreePrompt(gitStatus)
+        ? buildCleanWorktreePrompt(gitStatus, testStatus)
         : turnNumber === 0 && !activeThreadId
-          ? buildInitialPrompt(testRun, gitStatus)
-          : buildContinuePrompt(testRun, gitStatus);
+          ? buildInitialPrompt(testStatus, gitStatus)
+          : buildContinuePrompt(testStatus, gitStatus);
 
     log(`Ralph prompt: ${previewText(prompt)}`);
     const { events } = await thread.runStreamed(prompt);
     const turn = await collectStreamedTurn(events, {
       prompt,
+      preTurnEventRecords: [
+        buildRalphTestStatusEventRecord({
+          testStatus,
+          threadId: thread.id ?? activeThreadId,
+          turnNumber,
+        }),
+      ],
       threadId: thread.id ?? activeThreadId,
       turnNumber: turnNumber + 1,
     });
@@ -129,8 +172,14 @@ async function main() {
       eventLogPath: buildEventLogPath(activeThreadId),
       turnsCompleted: turnNumber + 1,
       lastExitCode: testRun.exitCode,
+      lastTestStatus: testStatus,
       updatedAt: new Date().toISOString(),
     });
+    state.threadId = activeThreadId;
+    state.lastExitCode = testRun.exitCode;
+    state.lastTestStatus = testStatus;
+    state.turnsCompleted = turnNumber + 1;
+    await pushCurrentBranch(CONFIG.workdir);
 
     if (activeThreadId) {
       log(`Active thread id: ${activeThreadId}`);
@@ -148,14 +197,19 @@ async function main() {
   );
 }
 
-function buildInitialPrompt(testRun, gitStatus) {
-  return DEFAULT_PROMPT;
+function buildInitialPrompt(testStatus, gitStatus) {
+  return [
+    DEFAULT_PROMPT,
+    "",
+    ...buildFailureSummaryLines(testStatus),
+    "",
+    ...buildGitStatusLines(gitStatus),
+  ].join("\n");
 }
 
-function buildContinuePrompt(testRun, gitStatus) {
-  const progress = analyzeTestProgress(testRun.output);
-  const objectiveLines = buildContinueObjectiveLines(progress, testRun);
-  const failureSummaryLines = buildFailureSummaryLines(progress, testRun);
+function buildContinuePrompt(testStatus, gitStatus) {
+  const objectiveLines = buildContinueObjectiveLines(testStatus);
+  const failureSummaryLines = buildFailureSummaryLines(testStatus);
 
   return [
     ...objectiveLines,
@@ -169,11 +223,13 @@ function buildContinuePrompt(testRun, gitStatus) {
   ].join("\n");
 }
 
-function buildCleanWorktreePrompt(gitStatus) {
+function buildCleanWorktreePrompt(gitStatus, testStatus) {
   return [
     "The tests now pass, but the worktree is not clean yet.",
     "Commit the intended changes now so `git status --short` is empty before handing control back.",
     "Do not discard intended work. Create the appropriate commit(s) and leave the repository clean.",
+    "",
+    ...buildTestStatusLines(testStatus),
     "",
     ...buildGitStatusLines(gitStatus),
   ].join("\n");
@@ -185,31 +241,51 @@ function buildGitStatusLines(gitStatus) {
     : ["Current `git status --short`:", trimmedOutput(gitStatus.output)];
 }
 
-function buildContinueObjectiveLines(progress, testRun) {
-  if (progress?.passingThrough && progress?.failingStage) {
-    return [
-      `Assignments through \`${progress.passingThrough}\` already pass.`,
-      `Your task for this turn is to implement the code required to make \`make ${progress.failingStage}\` pass without causing regressions for previous assignments: \`make test-through-${progress.passingThrough}\``,
-    ];
+function buildContinueObjectiveLines(testStatus) {
+  const lines = [];
+
+  if (testStatus.regressions.length > 0) {
+    lines.push(
+      `Latest commit(s) caused regressions in ${formatStageList(testStatus.regressions)}. ` +
+        "Address those regressions before moving forward.",
+    );
   }
 
-  if (progress?.failingStage) {
-    return [
-      `\`make ${progress.failingStage}\` is still failing, continue work on stage until it passes.`,
-    ];
+  if (testStatus?.passingThrough && testStatus?.failingStage) {
+    lines.push(
+      `Assignments through \`${testStatus.passingThrough}\` already pass.`,
+      `Your task for this turn is to implement the code required to make ` +
+        `\`make ${testStatus.failingStage}\` pass without causing regressions for previous ` +
+        `assignments: \`make test-through-${testStatus.passingThrough}\``,
+    );
+    return lines;
   }
 
-  return [
+  if (testStatus?.failingStage) {
+    lines.push(
+      `\`make ${testStatus.failingStage}\` is still failing, continue work on stage until it passes.`,
+    );
+    return lines;
+  }
+
+  lines.push(
     `I reran \`${CONFIG.testCommand}\` from the repository root and it still fails.`,
-    `Latest exit code: ${testRun.exitCode}`,
-  ];
+    `Latest exit code: ${testStatus.exitCode}`,
+  );
+  return lines;
 }
 
-function buildFailureSummaryLines(progress, testRun) {
-  const lines = [`Latest exit code: ${testRun.exitCode}`];
+function buildFailureSummaryLines(testStatus) {
+  const lines = [`Latest exit code: ${testStatus.exitCode}`];
 
-  if (progress?.firstFailureLine) {
-    lines.push(`First reported blocker: ${progress.firstFailureLine}`);
+  lines.push(...buildTestStatusLines(testStatus));
+
+  if (testStatus.regressions.length > 0) {
+    lines.push(`Regression summary: ${formatStageList(testStatus.regressions)} regressed.`);
+  }
+
+  if (testStatus?.firstFailureLine) {
+    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
   }
 
   lines.push(
@@ -220,40 +296,189 @@ function buildFailureSummaryLines(progress, testRun) {
   return lines;
 }
 
-function analyzeTestProgress(output) {
+function analyzeTestProgress(output, previousStatus = null, options = {}) {
+  const normalizedOutput = typeof output === "string" ? output : "";
   const stagePattern = /^===== (pa\d+) =====$/gm;
-  const stages = [...output.matchAll(stagePattern)].map((match) => ({
+  const stageHeaders = [...normalizedOutput.matchAll(stagePattern)].map((match) => ({
     name: match[1],
     index: match.index ?? 0,
-    header: match[0],
   }));
-
-  const firstFailureLine = output
+  const firstFailureLine = normalizedOutput
     .split(/\r?\n/)
     .find((line) => /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match/.test(line));
 
-  if (stages.length === 0) {
-    return { firstFailureLine: firstFailureLine ?? null };
-  }
-
-  const stageBlocks = stages.map((stage, index) => {
+  const stages = stageHeaders.map((stage, index) => {
     const start = stage.index;
-    const end = index + 1 < stages.length ? stages[index + 1].index : output.length;
-    return {
-      name: stage.name,
-      body: output.slice(start, end),
-    };
+    const end = index + 1 < stageHeaders.length ? stageHeaders[index + 1].index : normalizedOutput.length;
+    return parseStageStatus(stage.name, normalizedOutput.slice(start, end));
   });
 
-  const failingIndex = stageBlocks.findIndex((stage) => /\bFAIL\b|ERROR:/.test(stage.body));
-  const failingStage = failingIndex >= 0 ? stageBlocks[failingIndex].name : null;
-  const passingThrough = failingIndex > 0 ? stageBlocks[failingIndex - 1].name : null;
+  const failingIndex = stages.findIndex((stage) => stage.status === "fail");
+  const failingStage = failingIndex >= 0 ? stages[failingIndex].name : null;
+  const passingThrough =
+    failingIndex > 0
+      ? stages[failingIndex - 1].name
+      : failingIndex < 0 && stages.length > 0 && stages.every((stage) => stage.status === "pass")
+        ? stages[stages.length - 1].name
+        : null;
+
+  const previousPassingStages = new Set(
+    (previousStatus?.stages ?? [])
+      .filter((stage) => stage?.status === "pass" && typeof stage.name === "string")
+      .map((stage) => stage.name),
+  );
+  const regressions = stages
+    .filter((stage) => previousPassingStages.has(stage.name) && stage.status !== "pass")
+    .map((stage) => stage.name);
+
+  const testsPassed = stages.reduce((sum, stage) => sum + stage.passed, 0);
+  const testsTotal = stages.reduce((sum, stage) => sum + stage.total, 0);
+  const stagesPassed = stages.filter((stage) => stage.status === "pass").length;
 
   return {
+    recordedAt: new Date().toISOString(),
+    command: CONFIG.testCommand,
+    exitCode: options.exitCode ?? null,
+    allTestsPassed:
+      /===== ALL TESTS PASSED SUCCESSFULLY! =====/.test(normalizedOutput) ||
+      (stages.length > 0 &&
+        stagesPassed === stages.length &&
+        stages.every((stage) => stage.status === "pass") &&
+        (options.exitCode ?? 1) === 0),
+    stageCount: stages.length,
+    stagesPassed,
+    testsPassed,
+    testsTotal,
     failingStage,
     passingThrough,
     firstFailureLine: firstFailureLine ?? null,
+    regressions,
+    stages,
   };
+}
+
+function parseStageStatus(stageName, body) {
+  const targets = new Map();
+
+  for (const line of body.split(/\r?\n/)) {
+    let match = line.match(/^(.+?): running (\d+) tests$/);
+    if (match) {
+      const target = ensureStageTarget(targets, match[1]);
+      target.total = Number.parseInt(match[2], 10);
+      continue;
+    }
+
+    match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
+    if (match) {
+      const target = ensureStageTarget(targets, match[1]);
+      target.status = "pass";
+      target.passed = Number.parseInt(match[2], 10);
+      target.total = Number.parseInt(match[3], 10);
+      continue;
+    }
+
+    match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/);
+    if (match) {
+      const target = ensureStageTarget(targets, match[1]);
+      target.status = "fail";
+      target.passed = Number.parseInt(match[2], 10);
+      target.total = Number.parseInt(match[3], 10);
+      continue;
+    }
+
+    match = line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
+    if (match) {
+      const target = ensureStageTarget(targets, match[1]);
+      target.status = "fail";
+      target.passed = Number.parseInt(match[2], 10);
+      target.total = Number.parseInt(match[3], 10);
+    }
+  }
+
+  const stageTargets = Array.from(targets.values());
+  const hasFailureMarker = /\bFAIL\b|ERROR:/.test(body);
+  const status = stageTargets.some((target) => target.status === "fail") || hasFailureMarker
+    ? "fail"
+    : stageTargets.length > 0 && stageTargets.every((target) => target.status === "pass")
+      ? "pass"
+      : "unknown";
+  const passed = stageTargets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
+  const total = stageTargets.reduce((sum, target) => sum + (target.total ?? 0), 0);
+
+  return {
+    name: stageName,
+    status,
+    passed,
+    total,
+    targets: stageTargets,
+  };
+}
+
+function ensureStageTarget(targets, targetName) {
+  if (!targets.has(targetName)) {
+    targets.set(targetName, {
+      name: targetName,
+      status: "unknown",
+      passed: null,
+      total: null,
+    });
+  }
+  return targets.get(targetName);
+}
+
+function buildTestStatusLines(testStatus) {
+  if (!testStatus || testStatus.stages.length === 0) {
+    return [];
+  }
+
+  return [
+    `Test status: ${formatTestStatusSummary(testStatus)}`,
+    `Stage breakdown: ${formatStageBreakdown(testStatus)}`,
+  ];
+}
+
+function formatTestStatusSummary(testStatus) {
+  if (!testStatus || testStatus.stages.length === 0) {
+    return `exit ${testStatus?.exitCode ?? "unknown"}`;
+  }
+
+  const parts = [
+    `${testStatus.testsPassed}/${testStatus.testsTotal} tests passing`,
+    `${testStatus.stagesPassed}/${testStatus.stageCount} stages passing`,
+  ];
+
+  if (testStatus.failingStage) {
+    parts.push(`first failing stage: ${testStatus.failingStage}`);
+  } else if (testStatus.allTestsPassed) {
+    parts.push("all tracked stages passing");
+  }
+
+  if (testStatus.regressions.length > 0) {
+    parts.push(`regressions: ${formatStageList(testStatus.regressions)}`);
+  }
+
+  return parts.join("; ");
+}
+
+function formatStageBreakdown(testStatus) {
+  return testStatus.stages.map((stage) => formatSingleStageBreakdown(stage)).join("; ");
+}
+
+function formatSingleStageBreakdown(stage) {
+  const targetSummary = stage.targets
+    .map((target) => {
+      if (target.total == null) {
+        return `${target.name} ${target.status}`;
+      }
+      return `${target.name} ${target.passed ?? 0}/${target.total}`;
+    })
+    .join(", ");
+  const stageSummary = `${stage.name} ${stage.passed}/${stage.total} ${stage.status}`;
+  return targetSummary ? `${stageSummary} (${targetSummary})` : stageSummary;
+}
+
+function formatStageList(stageNames) {
+  return stageNames.map((stage) => `\`${stage}\``).join(", ");
 }
 
 function trimmedOutput(output) {
@@ -294,6 +519,101 @@ async function runCommand(command, cwd) {
   });
 }
 
+async function initializeRunRepository({ workdir, branchName }) {
+  await ensureRepositoryCloned(workdir);
+
+  const gitStatus = await getGitStatus(workdir);
+  if (!gitStatus.clean) {
+    throw new Error(
+      `Cannot start a fresh Ralph run because ${workdir} is dirty:\n${gitStatus.output}`,
+    );
+  }
+
+  await assertBranchDoesNotExist(workdir, branchName);
+  await runGitCommand(["checkout", DEFAULT_BASE_BRANCH], workdir);
+  await runGitCommand(["pull", "--ff-only", "origin", DEFAULT_BASE_BRANCH], workdir);
+  await runGitCommand(["branch", branchName, `origin/${DEFAULT_BASE_BRANCH}`], workdir);
+  await runGitCommand(["checkout", branchName], workdir);
+  await runGitCommand(["push", "--set-upstream", "origin", branchName], workdir);
+  log(`Initialized ${workdir} on branch ${branchName} from origin/${DEFAULT_BASE_BRANCH}`);
+}
+
+async function ensureRepositoryCloned(workdir) {
+  const gitDir = path.join(workdir, ".git");
+  if (await pathExists(gitDir)) {
+    return;
+  }
+
+  if (await pathExists(workdir)) {
+    const stat = await fs.stat(workdir);
+    if (!stat.isDirectory()) {
+      throw new Error(`${workdir} exists and is not a directory`);
+    }
+    const entries = await fs.readdir(workdir);
+    if (entries.length > 0) {
+      throw new Error(`${workdir} exists and is not an empty git checkout`);
+    }
+  } else {
+    await fs.mkdir(path.dirname(workdir), { recursive: true });
+  }
+
+  const cloneResult = await runCommand(
+    `git clone --single-branch --branch ${shellEscape(DEFAULT_BASE_BRANCH)} ` +
+      `${shellEscape(DEFAULT_REPO_URL)} ${shellEscape(workdir)}`,
+    process.cwd(),
+  );
+  if (cloneResult.exitCode !== 0) {
+    throw new Error(`Failed to clone ${DEFAULT_REPO_URL} into ${workdir}:\n${cloneResult.output}`);
+  }
+  log(`Cloned ${DEFAULT_REPO_URL} (${DEFAULT_BASE_BRANCH} only) into ${workdir}`);
+}
+
+async function assertBranchDoesNotExist(workdir, branchName) {
+  const localResult = await runCommand(
+    `git show-ref --verify --quiet refs/heads/${shellEscapeRef(branchName)}`,
+    workdir,
+  );
+  if (localResult.exitCode === 0) {
+    throw new Error(`Local branch ${branchName} already exists in ${workdir}`);
+  }
+  if (localResult.exitCode !== 1) {
+    throw new Error(`Failed to inspect local branch ${branchName} in ${workdir}`);
+  }
+
+  const remoteResult = await runCommand(
+    `git ls-remote --exit-code --heads origin ${shellEscape(branchName)}`,
+    workdir,
+  );
+  if (remoteResult.exitCode === 0) {
+    throw new Error(`Remote branch origin/${branchName} already exists`);
+  }
+  if (remoteResult.exitCode !== 2) {
+    throw new Error(`Failed to inspect remote branch origin/${branchName} in ${workdir}`);
+  }
+}
+
+async function pushCurrentBranch(workdir) {
+  const branchNameResult = await runGitCommand(["branch", "--show-current"], workdir);
+  const branchName = branchNameResult.output.trim();
+  if (!branchName) {
+    throw new Error(`No current git branch is checked out in ${workdir}`);
+  }
+  await runGitCommand(["push", "origin", branchName], workdir);
+  log(`Pushed branch ${branchName} to origin`);
+}
+
+async function runGitCommand(args, cwd) {
+  const result = await runCommand(
+    `git ${args.map((arg) => shellEscape(arg)).join(" ")}`,
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    const description = args.join(" ");
+    throw new Error(`Git command failed in ${cwd}: git ${description}\n${result.output}`);
+  }
+  return result;
+}
+
 async function getGitStatus(cwd) {
   const result = await runCommand("git status --short", cwd);
   if (result.exitCode !== 0) {
@@ -315,7 +635,9 @@ async function collectStreamedTurn(events, options = {}) {
   let threadId = options.threadId ?? null;
   const turnNumber = options.turnNumber ?? null;
   let eventLogPath = buildEventLogPath(threadId);
-  const pendingEventRecords = [];
+  const pendingEventRecords = Array.isArray(options.preTurnEventRecords)
+    ? options.preTurnEventRecords.filter(Boolean)
+    : [];
 
   const promptEventRecord = buildRalphPromptEventRecord({
     prompt,
@@ -479,6 +801,24 @@ function buildRalphPromptEventRecord({ prompt, threadId, turnNumber }) {
   };
 }
 
+function buildRalphTestStatusEventRecord({ testStatus, threadId, turnNumber }) {
+  if (!testStatus) {
+    return null;
+  }
+
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.test-status",
+    event: {
+      type: "ralph.test-status",
+      sender: "ralph",
+      testStatus,
+    },
+  };
+}
+
 function applyThreadIdToPendingRecords(eventRecords, threadId) {
   if (!threadId) {
     return;
@@ -574,6 +914,14 @@ async function appendJsonLine(filePath, record) {
   await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
 }
 
+async function appendRalphEventRecord(record) {
+  if (!record?.threadId) {
+    return;
+  }
+
+  await appendJsonLine(buildEventLogPath(record.threadId), record);
+}
+
 async function loadState() {
   try {
     const raw = await fs.readFile(STATE_PATH, "utf8");
@@ -584,10 +932,21 @@ async function loadState() {
       turnsCompleted: Number.isInteger(parsed.turnsCompleted)
         ? parsed.turnsCompleted
         : 0,
+      lastExitCode: Number.isInteger(parsed.lastExitCode) ? parsed.lastExitCode : null,
+      lastTestStatus:
+        parsed.lastTestStatus && typeof parsed.lastTestStatus === "object"
+          ? parsed.lastTestStatus
+          : null,
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return { threadId: null, eventLogPath: null, turnsCompleted: 0 };
+      return {
+        threadId: null,
+        eventLogPath: null,
+        turnsCompleted: 0,
+        lastExitCode: null,
+        lastTestStatus: null,
+      };
     }
     throw error;
   }
@@ -602,6 +961,36 @@ async function assertDirectoryExists(directoryPath) {
   if (!stat.isDirectory()) {
     throw new Error(`${directoryPath} is not a directory`);
   }
+}
+
+function deriveRunBranchName(stateDir) {
+  const branchName = path.basename(stateDir);
+  if (!branchName || branchName === ".ralph") {
+    throw new Error(
+      `Cannot derive a run branch name from stateDir ${stateDir}. Use a per-run directory like .ralph/<branch-name>.`,
+    );
+  }
+  return branchName;
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function shellEscapeRef(value) {
+  return String(value).replace(/[^A-Za-z0-9._/-]/g, "_");
 }
 
 function parsePositiveInt(value, fallback) {
