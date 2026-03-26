@@ -13,10 +13,11 @@ Follow the checked-in tests and assignment instructions, even when they differ f
 Work on assignment pa1, when completed, update pa1/RETRO.md, commit your changes.`
 
 const DEFAULT_CONFIG = {
-  workdir: "/work/cppgm",
+  baseDir: "/work",
+  name: "cppgm",
   testCommand: "make test",
   maxTurns: 1000,
-  stateDir: ".ralph",
+  stateBaseDir: ".ralph",
   model: "gpt-5.3-codex",
   reasoningEffort: "high",
   sandboxMode: "danger-full-access",
@@ -45,7 +46,6 @@ async function main() {
   await fs.mkdir(CONFIG.stateDir, { recursive: true });
   await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
   const state = await loadState();
-  const runBranchName = deriveRunBranchName(CONFIG.stateDir);
   const startingFreshRun =
     !state.threadId &&
     state.turnsCompleted === 0 &&
@@ -55,7 +55,7 @@ async function main() {
   if (startingFreshRun) {
     await initializeRunRepository({
       workdir: CONFIG.workdir,
-      branchName: runBranchName,
+      branchName: CONFIG.runName,
     });
   } else {
     await assertDirectoryExists(CONFIG.workdir);
@@ -63,7 +63,7 @@ async function main() {
 
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
-      `workdir=${CONFIG.workdir} branch=${runBranchName}`,
+      `workdir=${CONFIG.workdir} branch=${CONFIG.runName}`,
   );
   const threadOptions = {
     workingDirectory: CONFIG.workdir,
@@ -520,16 +520,9 @@ async function runCommand(command, cwd) {
 }
 
 async function initializeRunRepository({ workdir, branchName }) {
-  await ensureRepositoryCloned(workdir);
-
-  const gitStatus = await getGitStatus(workdir);
-  if (!gitStatus.clean) {
-    throw new Error(
-      `Cannot start a fresh Ralph run because ${workdir} is dirty:\n${gitStatus.output}`,
-    );
-  }
-
-  await assertBranchDoesNotExist(workdir, branchName);
+  await assertPathDoesNotExist(workdir);
+  await assertRemoteBranchDoesNotExist(branchName);
+  await cloneRunRepository(workdir);
   await runGitCommand(["checkout", DEFAULT_BASE_BRANCH], workdir);
   await runGitCommand(["pull", "--ff-only", "origin", DEFAULT_BASE_BRANCH], workdir);
   await runGitCommand(["branch", branchName, `origin/${DEFAULT_BASE_BRANCH}`], workdir);
@@ -538,20 +531,17 @@ async function initializeRunRepository({ workdir, branchName }) {
   log(`Initialized ${workdir} on branch ${branchName} from origin/${DEFAULT_BASE_BRANCH}`);
 }
 
-async function ensureRepositoryCloned(workdir) {
-  const gitDir = path.join(workdir, ".git");
-  if (await pathExists(gitDir)) {
-    return;
+async function assertPathDoesNotExist(targetPath) {
+  if (await pathExists(targetPath)) {
+    throw new Error(`${targetPath} already exists`);
   }
+}
 
+async function cloneRunRepository(workdir) {
   if (await pathExists(workdir)) {
     const stat = await fs.stat(workdir);
     if (!stat.isDirectory()) {
-      throw new Error(`${workdir} exists and is not a directory`);
-    }
-    const entries = await fs.readdir(workdir);
-    if (entries.length > 0) {
-      throw new Error(`${workdir} exists and is not an empty git checkout`);
+      throw new Error(`${workdir} already exists`);
     }
   } else {
     await fs.mkdir(path.dirname(workdir), { recursive: true });
@@ -568,27 +558,16 @@ async function ensureRepositoryCloned(workdir) {
   log(`Cloned ${DEFAULT_REPO_URL} (${DEFAULT_BASE_BRANCH} only) into ${workdir}`);
 }
 
-async function assertBranchDoesNotExist(workdir, branchName) {
-  const localResult = await runCommand(
-    `git show-ref --verify --quiet refs/heads/${shellEscapeRef(branchName)}`,
-    workdir,
-  );
-  if (localResult.exitCode === 0) {
-    throw new Error(`Local branch ${branchName} already exists in ${workdir}`);
-  }
-  if (localResult.exitCode !== 1) {
-    throw new Error(`Failed to inspect local branch ${branchName} in ${workdir}`);
-  }
-
+async function assertRemoteBranchDoesNotExist(branchName) {
   const remoteResult = await runCommand(
-    `git ls-remote --exit-code --heads origin ${shellEscape(branchName)}`,
-    workdir,
+    `git ls-remote --exit-code --heads ${shellEscape(DEFAULT_REPO_URL)} ${shellEscape(branchName)}`,
+    process.cwd(),
   );
   if (remoteResult.exitCode === 0) {
     throw new Error(`Remote branch origin/${branchName} already exists`);
   }
   if (remoteResult.exitCode !== 2) {
-    throw new Error(`Failed to inspect remote branch origin/${branchName} in ${workdir}`);
+    throw new Error(`Failed to inspect remote branch origin/${branchName}`);
   }
 }
 
@@ -704,27 +683,53 @@ function combineOutput(stdout, stderr) {
 
 async function loadConfig() {
   const fileConfig = await loadConfigFile();
+  const model = process.env.RALPH_MODEL ?? fileConfig.model ?? DEFAULT_CONFIG.model;
+  const reasoningEffort =
+    process.env.RALPH_REASONING_EFFORT ??
+    fileConfig.reasoningEffort ??
+    DEFAULT_CONFIG.reasoningEffort;
+  const name =
+    process.env.RALPH_NAME ??
+    fileConfig.name ??
+    deriveLegacyName(fileConfig.workdir) ??
+    DEFAULT_CONFIG.name;
+  const runName = buildRunName({ name, model, reasoningEffort });
+  const explicitWorkdir = process.env.RALPH_WORKDIR;
+  const explicitStateDir = process.env.RALPH_STATE_DIR;
+  const baseDir = path.resolve(
+    process.cwd(),
+    process.env.RALPH_BASE_DIR ??
+      fileConfig.baseDir ??
+      deriveLegacyBaseDir(fileConfig.workdir) ??
+      DEFAULT_CONFIG.baseDir,
+  );
+  const stateBaseDir = path.resolve(
+    process.cwd(),
+    process.env.RALPH_STATE_BASE_DIR ??
+      fileConfig.stateBaseDir ??
+      deriveLegacyStateBaseDir(fileConfig.stateDir) ??
+      DEFAULT_CONFIG.stateBaseDir,
+  );
 
   return {
-    workdir: path.resolve(
-      process.cwd(),
-      process.env.RALPH_WORKDIR ?? fileConfig.workdir ?? DEFAULT_CONFIG.workdir,
-    ),
+    baseDir,
+    name,
+    runName,
+    workdir: explicitWorkdir
+      ? path.resolve(process.cwd(), explicitWorkdir)
+      : path.join(baseDir, runName),
     testCommand:
       process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand,
     maxTurns: parsePositiveInt(
       process.env.RALPH_MAX_TURNS ?? fileConfig.maxTurns,
       DEFAULT_CONFIG.maxTurns,
     ),
-    stateDir: path.resolve(
-      process.cwd(),
-      process.env.RALPH_STATE_DIR ?? fileConfig.stateDir ?? DEFAULT_CONFIG.stateDir,
-    ),
-    model: process.env.RALPH_MODEL ?? fileConfig.model ?? DEFAULT_CONFIG.model,
-    reasoningEffort:
-      process.env.RALPH_REASONING_EFFORT ??
-      fileConfig.reasoningEffort ??
-      DEFAULT_CONFIG.reasoningEffort,
+    stateBaseDir,
+    stateDir: explicitStateDir
+      ? path.resolve(process.cwd(), explicitStateDir)
+      : path.join(stateBaseDir, runName),
+    model,
+    reasoningEffort,
     sandboxMode:
       process.env.RALPH_SANDBOX_MODE ??
       fileConfig.sandboxMode ??
@@ -963,14 +968,48 @@ async function assertDirectoryExists(directoryPath) {
   }
 }
 
-function deriveRunBranchName(stateDir) {
-  const branchName = path.basename(stateDir);
-  if (!branchName || branchName === ".ralph") {
-    throw new Error(
-      `Cannot derive a run branch name from stateDir ${stateDir}. Use a per-run directory like .ralph/<branch-name>.`,
-    );
+function buildRunName({ name, model, reasoningEffort }) {
+  const parts = [
+    sanitizeRunNamePart(name, "name"),
+    sanitizeRunNamePart(model, "model"),
+    sanitizeRunNamePart(reasoningEffort, "reasoningEffort"),
+  ];
+  return parts.join("-");
+}
+
+function sanitizeRunNamePart(value, label) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    throw new Error(`Config ${label} must be set`);
   }
-  return branchName;
+  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!sanitized) {
+    throw new Error(`Config ${label} must contain at least one valid branch/directory character`);
+  }
+  return sanitized;
+}
+
+function deriveLegacyName(workdir) {
+  if (!workdir) {
+    return null;
+  }
+  return path.basename(path.resolve(process.cwd(), String(workdir)));
+}
+
+function deriveLegacyBaseDir(workdir) {
+  if (!workdir) {
+    return null;
+  }
+  return path.dirname(path.resolve(process.cwd(), String(workdir)));
+}
+
+function deriveLegacyStateBaseDir(stateDir) {
+  if (!stateDir) {
+    return null;
+  }
+  const resolved = path.resolve(process.cwd(), String(stateDir));
+  const leaf = path.basename(resolved);
+  return leaf.startsWith(".") ? resolved : path.dirname(resolved);
 }
 
 async function pathExists(targetPath) {
@@ -987,10 +1026,6 @@ async function pathExists(targetPath) {
 
 function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
-function shellEscapeRef(value) {
-  return String(value).replace(/[^A-Za-z0-9._/-]/g, "_");
 }
 
 function parsePositiveInt(value, fallback) {

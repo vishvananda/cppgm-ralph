@@ -1,13 +1,14 @@
 # Ralph Runner
 
-A small outer loop around the Codex SDK for `/work/cppgm`.
+A small outer loop around the Codex SDK for per-run checkouts under `/work`.
 
-It persists a Codex thread id in `.ralph/state.json`, runs `make test` in
-`/work/cppgm`, and if the suite still fails it resumes the same Codex thread
+It persists a Codex thread id in `.ralph/<run-name>/state.json`, runs `make test` in
+`/work/<run-name>`, and if the suite still fails it resumes the same Codex thread
 with the latest failure output until the suite passes, the worktree is clean,
 or the max turn count is hit.
 
-Each Codex thread also gets an append-only JSONL event log in `.ralph/events/`.
+Each Codex thread also gets an append-only JSONL event log in
+`.ralph/<run-name>/events/`.
 If Ralph resumes the same thread later, it appends Ralph prompt events plus new
 streamed Codex events to the same file so each run can be visualized from one
 timeline.
@@ -37,7 +38,7 @@ Then open:
 http://127.0.0.1:4173
 ```
 
-`ralph-viz` reads `.ralph/events/<thread>.jsonl` and shows:
+`ralph-viz` reads `.ralph/<run-name>/events/<thread>.jsonl` and shows:
 
 - a run summary
 - turn-level rollup view
@@ -56,28 +57,42 @@ The script expects a working Codex CLI environment. In practice that means:
 ## Config
 
 - `model`
-  Default: `gpt-5.4-mini`
+  Default: `gpt-5.3-codex`
 - `reasoningEffort`
   Default: `high`
-- `workdir`
-  Default: `/work/cppgm`
+- `name`
+  Default: `cppgm`
+- `baseDir`
+  Default: `/work`
+- `stateBaseDir`
+  Default: `.ralph`
 - `testCommand`
   Default: `make test`
 - `maxTurns`
   Default: `1000`
 
+Ralph builds a per-run name as `<name>-<model>-<reasoningEffort>`. That value is
+used for the git branch, checkout directory under `baseDir`, and state directory
+under `stateBaseDir`.
+
 ## Environment overrides
 
 - `RALPH_CONFIG`
   Default: `ralph.config.json`
+- `RALPH_BASE_DIR`
+  Override `baseDir`
+- `RALPH_NAME`
+  Override `name`
 - `RALPH_WORKDIR`
-  Override `workdir`
+  Override the full checkout directory directly
 - `RALPH_TEST_COMMAND`
   Override `testCommand`
 - `RALPH_MAX_TURNS`
   Override `maxTurns`
+- `RALPH_STATE_BASE_DIR`
+  Override `stateBaseDir`
 - `RALPH_STATE_DIR`
-  Override `stateDir`
+  Override the full state directory directly
 - `RALPH_THREAD_ID`
   Optional explicit thread id override
 - `RALPH_MODEL`
@@ -95,9 +110,9 @@ The script expects a working Codex CLI environment. In practice that means:
 
 ## State files
 
-- `.ralph/state.json`
+- `.ralph/<run-name>/state.json`
   Saved thread metadata, including the current event log path
-- `.ralph/last-test.log`
+- `.ralph/<run-name>/last-test.log`
   Full output from the most recent `make test`
-- `.ralph/events/<thread-id>.jsonl`
+- `.ralph/<run-name>/events/<thread-id>.jsonl`
   Append-only stream of Ralph prompt events plus all Codex SDK events for that thread
