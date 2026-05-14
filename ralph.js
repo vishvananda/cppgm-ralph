@@ -291,7 +291,11 @@ async function main() {
     state.activeStage = getStateActiveStageAfterTest(testStatus);
     turnNumber += 1;
     state.turnsCompleted = turnNumber;
-    await pushCurrentBranch(CONFIG.workdir);
+    try {
+      await pushCurrentBranch(CONFIG.workdir);
+    } catch (error) {
+      log(`Failed to push branch after turn ${turnNumber}: ${formatErrorMessage(error)}`);
+    }
 
     if (activeThreadId) {
       log(`Active thread id: ${activeThreadId}`);
