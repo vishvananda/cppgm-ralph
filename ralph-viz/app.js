@@ -823,6 +823,8 @@ function usageText(usage) {
 }
 
 function renderTimeline(records) {
+  const options = renderTimeline.pendingOptions ?? {};
+  renderTimeline.pendingOptions = {};
   rememberOpenEntryKeys();
   timelineEl.innerHTML = "";
   const usageMap = buildUsageMap(records);
@@ -844,6 +846,10 @@ function renderTimeline(records) {
 
   const lastTurn = sortedTurns[sortedTurns.length - 1];
   const urlTurns = getUrlParams().turns;
+  if (options.openLatestTurn && lastTurn != null && !urlTurns.includes(String(lastTurn))) {
+    urlTurns.push(String(lastTurn));
+    setUrlParam("turns", urlTurns.join(","));
+  }
   const hasUrlTurns = urlTurns.length > 0;
 
   for (const turn of sortedTurns) {
@@ -974,6 +980,7 @@ async function loadRun(id, options = {}) {
   state.events = data.events ?? [];
   state.raw = state.events.slice();
   renderSummary(state.events);
+  renderTimeline.pendingOptions = { openLatestTurn: options.stickToBottom };
   renderTimeline(state.events);
   if (options.stickToBottom) {
     scrollToBottom();

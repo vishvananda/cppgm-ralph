@@ -302,7 +302,13 @@ function buildSessionTurnResolver(events) {
 async function readCodexSessionEvents(threadId, resolveTurnNumber) {
   const files = await findCodexSessionFiles(threadId);
   const events = [];
-  const context = { threadId, resolveTurnNumber, commandsByCallId: new Map() };
+  const context = {
+    threadId,
+    resolveTurnNumber,
+    commandsByCallId: new Map(),
+    functionCallsByCallId: new Map(),
+    commandsBySessionId: new Map(),
+  };
   for (const filePath of files) {
     const raw = await fs.readFile(filePath, "utf8");
     const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -361,6 +367,8 @@ function convertCodexSessionRecord(record, context) {
     threadId: context.threadId,
     turnNumber: context.resolveTurnNumber(record.timestamp),
     commandsByCallId: context.commandsByCallId,
+    functionCallsByCallId: context.functionCallsByCallId,
+    commandsBySessionId: context.commandsBySessionId,
   };
 
   if (record.type === "event_msg") {
@@ -393,9 +401,15 @@ function convertCodexResponseItem(payload, context) {
     return null;
   }
   if (payload.type === "function_call") {
-    const command = formatFunctionCall(payload);
+    const args = parseFunctionCallArgs(payload);
+    const command = formatFunctionCall(payload, args, context);
     if (payload.call_id) {
       context.commandsByCallId?.set(payload.call_id, command);
+      context.functionCallsByCallId?.set(payload.call_id, {
+        name: payload.name,
+        args,
+        command,
+      });
     }
     return buildVizRecord(context, "item.started", {
       type: "item.started",
@@ -409,7 +423,17 @@ function convertCodexResponseItem(payload, context) {
     });
   }
   if (payload.type === "function_call_output") {
-    const command = context.commandsByCallId?.get(payload.call_id) ?? "";
+    const call = context.functionCallsByCallId?.get(payload.call_id) ?? null;
+    if (call?.name === "exec_command") {
+      const sessionId = parseRunningSessionId(payload.output);
+      if (sessionId && call.command) {
+        context.commandsBySessionId?.set(sessionId, call.command);
+      }
+    }
+    const command =
+      call?.name === "write_stdin"
+        ? formatWriteStdinCommand(call.args, context)
+        : context.commandsByCallId?.get(payload.call_id) ?? "";
     return buildVizRecord(context, "item.completed", {
       type: "item.completed",
       item: {
@@ -418,6 +442,8 @@ function convertCodexResponseItem(payload, context) {
         status: "completed",
         exit_code: parseFunctionOutputExitCode(payload.output),
         command,
+        session_id: call?.args?.session_id ?? null,
+        stdin: call?.name === "write_stdin" ? call.args?.chars ?? "" : null,
         aggregated_output: payload.output ?? "",
         raw: payload,
       },
@@ -466,11 +492,16 @@ function buildVizRecord(context, eventType, event) {
   };
 }
 
-function formatFunctionCall(payload) {
-  let args = {};
+function parseFunctionCallArgs(payload) {
   try {
-    args = payload.arguments ? JSON.parse(payload.arguments) : {};
+    return payload.arguments ? JSON.parse(payload.arguments) : {};
   } catch (_) {
+    return null;
+  }
+}
+
+function formatFunctionCall(payload, args, context) {
+  if (!args || typeof args !== "object") {
     return `${payload.name} ${payload.arguments ?? ""}`.trim();
   }
 
@@ -478,12 +509,47 @@ function formatFunctionCall(payload) {
     return args.cmd;
   }
   if (payload.name === "write_stdin") {
-    return `write_stdin session=${args.session_id ?? "unknown"}`;
+    return formatWriteStdinCommand(args, context);
   }
   if (payload.name === "apply_patch") {
     return "apply_patch";
   }
   return `${payload.name} ${JSON.stringify(args)}`;
+}
+
+function formatWriteStdinCommand(args, context) {
+  const sessionId = normalizeSessionId(args?.session_id);
+  const originalCommand = sessionId ? context.commandsBySessionId?.get(sessionId) : null;
+  const stdin = typeof args?.chars === "string" ? args.chars : "";
+  const suffix = sessionId ? `session ${sessionId}` : "unknown session";
+  const base = originalCommand
+    ? `${originalCommand} (continued ${suffix})`
+    : `write_stdin ${suffix}`;
+  if (!stdin) {
+    return base;
+  }
+  return `${base} stdin=${JSON.stringify(truncateMiddle(stdin, 160))}`;
+}
+
+function parseRunningSessionId(output) {
+  const match = String(output ?? "").match(/Process running with session ID (\d+)/);
+  return match ? match[1] : null;
+}
+
+function normalizeSessionId(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  return String(value);
+}
+
+function truncateMiddle(value, maxLength) {
+  const text = String(value ?? "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+  const keep = Math.max(1, Math.floor((maxLength - 3) / 2));
+  return `${text.slice(0, keep)}...${text.slice(-keep)}`;
 }
 
 function parseFunctionOutputExitCode(output) {
