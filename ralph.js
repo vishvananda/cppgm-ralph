@@ -2,15 +2,31 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 
-import { Codex } from "@openai/codex-sdk";
+const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
+const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
+const PARTIAL_TEMPLATE_KINDS = {
+  defaultPrompt: {
+    fileSuffix: "default",
+    defaultFileName: "default.md",
+  },
+};
 
-const DEFAULT_PROMPT = `Read AGENTS.md and follow it exactly. Starting from the current repository
-state which has stubs of the desired compiler implementation. 
+const DEFAULT_PROMPT = `Read AGENTS.md and follow it exactly. Starting from the current repository state which has stubs of the desired compiler implementation.
 Follow the checked-in tests and assignment instructions, even when they differ from newer-standard behavior.
-Work on assignment pa1, when completed, update pa1/RETRO.md, commit your changes.`
+
+Ralph is using \`{{testCommand}}\` as the test command for this loop. The configured command template is \`{{testCommandTemplate}}\`.
+For assignment-specific work, get \`{{testCommand}}\` to fully pass before returning.
+
+Make the implementation efficient. Minimize duplicated code. Put shared code in \`dev/src/\` and reuse it as much as practical.
+
+Commit cohesive progress as you go rather than waiting for a single end-of-assignment commit. Before handing control back, ensure intended work is committed and \`git status --short\` is empty.`;
 
 const DEFAULT_CONFIG = {
   baseDir: "/work",
@@ -26,6 +42,10 @@ const DEFAULT_CONFIG = {
   webSearchEnabled: false,
   additionalDirectories: [],
   outputTailChars: 20000,
+  codexPath: "codex",
+  loopGoalsEnabled: true,
+  goalTokenBudget: null,
+  useExistingWorkdir: false,
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
 const DEFAULT_BASE_BRANCH = "main";
@@ -36,9 +56,12 @@ let CONFIG = null;
 let STATE_PATH = null;
 let TEST_LOG_PATH = null;
 let EVENTS_DIR_PATH = null;
+let PROMPT_PARTIALS = {};
+let TEST_STAGE_NAMES = [];
 
 async function main() {
   CONFIG = await loadConfig();
+  PROMPT_PARTIALS = await loadPromptPartials();
   STATE_PATH = path.join(CONFIG.stateDir, "state.json");
   TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
   EVENTS_DIR_PATH = path.join(CONFIG.stateDir, "events");
@@ -53,17 +76,27 @@ async function main() {
     state.lastTestStatus == null;
 
   if (startingFreshRun) {
-    await initializeRunRepository({
-      workdir: CONFIG.workdir,
-      branchName: CONFIG.runName,
-    });
+    if (CONFIG.useExistingWorkdir) {
+      await assertDirectoryExists(CONFIG.workdir);
+      log(`Using existing repository at ${CONFIG.workdir}`);
+    } else {
+      await initializeRunRepository({
+        workdir: CONFIG.workdir,
+        branchName: CONFIG.runName,
+      });
+    }
   } else {
     await assertDirectoryExists(CONFIG.workdir);
+  }
+  TEST_STAGE_NAMES = await discoverStageNames(CONFIG.workdir);
+  if (TEST_STAGE_NAMES.length > 0) {
+    log(`Discovered test stages: ${TEST_STAGE_NAMES.join(", ")}`);
   }
 
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
-      `workdir=${CONFIG.workdir} branch=${CONFIG.runName}`,
+      `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
+      `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"}`,
   );
   const threadOptions = {
     workingDirectory: CONFIG.workdir,
@@ -84,12 +117,20 @@ async function main() {
   let codex = null;
   let thread = null;
 
-  for (let turnNumber = state.turnsCompleted; turnNumber < CONFIG.maxTurns; turnNumber += 1) {
-    const testRun = await runCommand(CONFIG.testCommand, CONFIG.workdir);
+  let turnNumber = state.turnsCompleted;
+  while (turnNumber < CONFIG.maxTurns) {
+    const hadExistingThread = Boolean(activeThreadId);
+    const testCommandContext = buildTestCommandContext(state);
+    log(`Running test command: ${testCommandContext.command}`);
+    const testRun = await runCommand(testCommandContext.command, CONFIG.workdir);
     await fs.writeFile(TEST_LOG_PATH, testRun.output, "utf8");
     const gitStatus = await getGitStatus(CONFIG.workdir);
     const testStatus = analyzeTestProgress(testRun.output, state.lastTestStatus, {
+      command: testCommandContext.command,
+      commandTemplate: testCommandContext.template,
       exitCode: testRun.exitCode,
+      targetStage: testCommandContext.stage,
+      usesStageTemplate: testCommandContext.usesStageTemplate,
     });
     log(`Latest test output: ${previewText(testRun.output)}`);
     log(`Test status: ${formatTestStatusSummary(testStatus)}`);
@@ -98,6 +139,34 @@ async function main() {
     }
     if (!gitStatus.clean) {
       log(`Git status: ${previewText(gitStatus.output)}`);
+    }
+
+    const nextStage = getNextStageAfterPassingCommand(testStatus, gitStatus);
+    if (nextStage) {
+      const threadId = activeThreadId ?? state.threadId ?? null;
+      await appendRalphEventRecord(
+        buildRalphTestStatusEventRecord({
+          testStatus,
+          threadId,
+          turnNumber,
+        }),
+      );
+      await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
+      await saveState({
+        threadId,
+        eventLogPath: buildEventLogPath(threadId),
+        turnsCompleted: turnNumber,
+        lastExitCode: 0,
+        lastTestStatus: testStatus,
+        activeStage: nextStage,
+        updatedAt: new Date().toISOString(),
+      });
+      state.threadId = threadId;
+      state.lastExitCode = 0;
+      state.lastTestStatus = testStatus;
+      state.activeStage = nextStage;
+      log(`\`${testStatus.command}\` passed. Advancing to ${nextStage}.`);
+      continue;
     }
 
     if (testRun.exitCode === 0 && gitStatus.clean) {
@@ -109,26 +178,77 @@ async function main() {
           turnNumber,
         }),
       );
-      if (activeThreadId || state.threadId || state.turnsCompleted > 0) {
+      await completeLoopGoalIfPresent(finalThreadId, testStatus, turnNumber);
+      if (
+        activeThreadId ||
+        state.threadId ||
+        state.turnsCompleted > 0 ||
+        state.activeStage ||
+        state.lastTestStatus
+      ) {
         await saveState({
           threadId: finalThreadId,
           eventLogPath: buildEventLogPath(finalThreadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
           lastTestStatus: testStatus,
+          activeStage: null,
           updatedAt: new Date().toISOString(),
         });
       }
       state.threadId = finalThreadId;
       state.lastExitCode = 0;
       state.lastTestStatus = testStatus;
+      state.activeStage = null;
       state.turnsCompleted = turnNumber;
-      log("`make test` passed. Exiting.");
+      log(`\`${testStatus.command}\` passed. Exiting.`);
       return;
     }
 
+    log(
+      `Test run failed with exit code ${testRun.exitCode}. Handing control back to Codex ` +
+        `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
+    );
+
+    PROMPT_PARTIALS = await loadPromptPartials();
+    const prompt =
+      testRun.exitCode === 0 && !gitStatus.clean
+        ? buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber + 1)
+        : turnNumber === 0 && !hadExistingThread
+          ? buildInitialPrompt(testStatus, gitStatus, turnNumber + 1)
+          : buildContinuePrompt(testStatus, gitStatus, turnNumber + 1);
+
+    let loopGoalEventRecord = null;
+    if (CONFIG.loopGoalsEnabled) {
+      const preparedGoal = await prepareLoopGoalForTurn({
+        threadId: activeThreadId,
+        testStatus,
+        gitStatus,
+        turnNumber: turnNumber + 1,
+      });
+      activeThreadId = preparedGoal.threadId;
+      state.threadId = activeThreadId;
+      loopGoalEventRecord = buildRalphGoalEventRecord({
+        action: "set",
+        goal: preparedGoal.goal,
+        threadId: activeThreadId,
+        turnNumber: turnNumber + 1,
+      });
+      if (preparedGoal.startedThread) {
+        await saveState({
+          threadId: activeThreadId,
+          eventLogPath: buildEventLogPath(activeThreadId),
+          turnsCompleted: turnNumber,
+          lastExitCode: testRun.exitCode,
+          lastTestStatus: testStatus,
+          activeStage: getStateActiveStageAfterTest(testStatus),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
     if (!thread) {
-      codex = new Codex();
+      codex = new Codex(buildCodexOptions());
       thread = activeThreadId
         ? codex.resumeThread(activeThreadId, threadOptions)
         : codex.startThread(threadOptions);
@@ -138,18 +258,6 @@ async function main() {
         log("Starting a new Codex thread");
       }
     }
-
-    log(
-      `Test run failed with exit code ${testRun.exitCode}. Handing control back to Codex ` +
-        `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
-    );
-
-    const prompt =
-      testRun.exitCode === 0 && !gitStatus.clean
-        ? buildCleanWorktreePrompt(gitStatus, testStatus)
-        : turnNumber === 0 && !activeThreadId
-          ? buildInitialPrompt(testStatus, gitStatus)
-          : buildContinuePrompt(testStatus, gitStatus);
 
     log(`Ralph prompt: ${previewText(prompt)}`);
     const { events } = await thread.runStreamed(prompt);
@@ -161,6 +269,7 @@ async function main() {
           threadId: thread.id ?? activeThreadId,
           turnNumber,
         }),
+        loopGoalEventRecord,
       ],
       threadId: thread.id ?? activeThreadId,
       turnNumber: turnNumber + 1,
@@ -173,12 +282,15 @@ async function main() {
       turnsCompleted: turnNumber + 1,
       lastExitCode: testRun.exitCode,
       lastTestStatus: testStatus,
+      activeStage: getStateActiveStageAfterTest(testStatus),
       updatedAt: new Date().toISOString(),
     });
     state.threadId = activeThreadId;
     state.lastExitCode = testRun.exitCode;
     state.lastTestStatus = testStatus;
-    state.turnsCompleted = turnNumber + 1;
+    state.activeStage = getStateActiveStageAfterTest(testStatus);
+    turnNumber += 1;
+    state.turnsCompleted = turnNumber;
     await pushCurrentBranch(CONFIG.workdir);
 
     if (activeThreadId) {
@@ -197,9 +309,9 @@ async function main() {
   );
 }
 
-function buildInitialPrompt(testStatus, gitStatus) {
+function buildInitialPrompt(testStatus, gitStatus, turnNumber = null) {
   return [
-    DEFAULT_PROMPT,
+    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
     "",
     ...buildFailureSummaryLines(testStatus),
     "",
@@ -207,11 +319,13 @@ function buildInitialPrompt(testStatus, gitStatus) {
   ].join("\n");
 }
 
-function buildContinuePrompt(testStatus, gitStatus) {
+function buildContinuePrompt(testStatus, gitStatus, turnNumber = null) {
   const objectiveLines = buildContinueObjectiveLines(testStatus);
   const failureSummaryLines = buildFailureSummaryLines(testStatus);
 
   return [
+    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
+    "",
     ...objectiveLines,
     gitStatus.clean
       ? "The worktree is currently clean."
@@ -223,8 +337,10 @@ function buildContinuePrompt(testStatus, gitStatus) {
   ].join("\n");
 }
 
-function buildCleanWorktreePrompt(gitStatus, testStatus) {
+function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null) {
   return [
+    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
+    "",
     "The tests now pass, but the worktree is not clean yet.",
     "Commit the intended changes now so `git status --short` is empty before handing control back.",
     "Do not discard intended work. Create the appropriate commit(s) and leave the repository clean.",
@@ -252,24 +368,26 @@ function buildContinueObjectiveLines(testStatus) {
   }
 
   if (testStatus?.passingThrough && testStatus?.failingStage) {
+    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
     lines.push(
       `Assignments through \`${testStatus.passingThrough}\` already pass.`,
       `Your task for this turn is to implement the code required to make ` +
-        `\`make ${testStatus.failingStage}\` pass without causing regressions for previous ` +
-        `assignments: \`make test-through-${testStatus.passingThrough}\``,
+        `\`${reportTarget}\` fully pass before returning, without causing regressions for previous ` +
+        "assignments.",
     );
     return lines;
   }
 
   if (testStatus?.failingStage) {
+    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
     lines.push(
-      `\`make ${testStatus.failingStage}\` is still failing, continue work on stage until it passes.`,
+      `\`${reportTarget}\` is still failing, continue work on that stage until it fully passes.`,
     );
     return lines;
   }
 
   lines.push(
-    `I reran \`${CONFIG.testCommand}\` from the repository root and it still fails.`,
+    `I reran \`${getTestStatusCommand(testStatus)}\` from the repository root and it still fails.`,
     `Latest exit code: ${testStatus.exitCode}`,
   );
   return lines;
@@ -290,10 +408,77 @@ function buildFailureSummaryLines(testStatus) {
 
   lines.push(
     `Full test output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
-    "After `make` passes for the current blocking assignment, keep going until the full suite passes.",
+    "After the current blocking assignment command passes, keep going until Ralph's configured success condition passes.",
   );
 
   return lines;
+}
+
+function buildDefaultPrompt({ testStatus, gitStatus, turnNumber = null }) {
+  const template = PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
+  return renderTemplateContent(
+    template,
+    buildTemplateContext({ testStatus, gitStatus, turnNumber }),
+  );
+}
+
+function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
+  const testStatusLines = buildTestStatusLines(testStatus);
+  const gitStatusLines = buildGitStatusLines(gitStatus);
+  const continueObjectiveLines = buildContinueObjectiveLines(testStatus);
+  const failureSummaryLines = buildFailureSummaryLines(testStatus);
+  const goalTaskLines = buildLoopGoalTaskLines({ testStatus, gitStatus });
+
+  return {
+    defaultPrompt: DEFAULT_PROMPT,
+    runName: CONFIG.runName,
+    name: CONFIG.name,
+    workdir: CONFIG.workdir,
+    stateDir: CONFIG.stateDir,
+    testCommand: getTestStatusCommand(testStatus),
+    testCommandTemplate: CONFIG.testCommand,
+    testStage: testStatus?.targetStage ?? "",
+    turnNumber: turnNumber == null ? "" : String(turnNumber),
+    exitCode: String(testStatus?.exitCode ?? ""),
+    failingStage: testStatus?.failingStage ?? "",
+    passingThrough: testStatus?.passingThrough ?? "",
+    firstFailureLine: testStatus?.firstFailureLine ?? "",
+    regressions: formatStageList(testStatus?.regressions ?? []),
+    testStatusSummary: formatTestStatusSummary(testStatus),
+    stageBreakdown: testStatus?.stages?.length ? formatStageBreakdown(testStatus) : "",
+    testStatusBlock: testStatusLines.join("\n"),
+    testStatusJson: JSON.stringify(testStatus, null, 2),
+    gitStatus: gitStatusLines.join("\n"),
+    gitStatusBlock: gitStatusLines.join("\n"),
+    gitStatusOutput: gitStatus.clean ? "empty" : trimmedOutput(gitStatus.output),
+    worktreeHandoff: gitStatus.clean
+      ? "The worktree is currently clean."
+      : "Your previous turn left a dirty worktree. Commit intended changes before returning control.",
+    continueObjective: continueObjectiveLines.join("\n"),
+    failureSummary: failureSummaryLines.join("\n"),
+    lastTestLogPath: path.join(CONFIG.stateDir, "last-test.log"),
+    goalTask: goalTaskLines.join("\n"),
+    goalHandoffRequirement:
+      testStatus?.exitCode === 0 && !gitStatus.clean
+        ? ""
+        : "Commit cohesive progress as you go; before handing control back, ensure all intended work is committed and `git status --short` is empty.",
+  };
+}
+
+function renderTemplateContent(template, context) {
+  return normalizeRenderedPrompt(
+    template.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_match, key) =>
+      context[key] == null ? "" : String(context[key]),
+    ),
+  );
+}
+
+function normalizeRenderedPrompt(value) {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function analyzeTestProgress(output, previousStatus = null, options = {}) {
@@ -312,6 +497,8 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     const end = index + 1 < stageHeaders.length ? stageHeaders[index + 1].index : normalizedOutput.length;
     return parseStageStatus(stage.name, normalizedOutput.slice(start, end));
   });
+  const reportSummary = parseReportSummary(normalizedOutput);
+  applyReportSummaryToStages(stages, previousStatus, reportSummary);
 
   const failingIndex = stages.findIndex((stage) => stage.status === "fail");
   const failingStage = failingIndex >= 0 ? stages[failingIndex].name : null;
@@ -331,16 +518,19 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     .filter((stage) => previousPassingStages.has(stage.name) && stage.status !== "pass")
     .map((stage) => stage.name);
 
-  const testsPassed = stages.reduce((sum, stage) => sum + stage.passed, 0);
-  const testsTotal = stages.reduce((sum, stage) => sum + stage.total, 0);
+  const testsPassed = reportSummary?.passed ?? stages.reduce((sum, stage) => sum + stage.passed, 0);
+  const testsTotal = reportSummary?.total ?? stages.reduce((sum, stage) => sum + stage.total, 0);
   const stagesPassed = stages.filter((stage) => stage.status === "pass").length;
 
   return {
     recordedAt: new Date().toISOString(),
-    command: CONFIG.testCommand,
+    command: options.command ?? CONFIG.testCommand,
+    commandTemplate: options.commandTemplate ?? CONFIG.testCommand,
+    targetStage: options.targetStage ?? null,
+    usesStageTemplate: Boolean(options.usesStageTemplate),
     exitCode: options.exitCode ?? null,
     allTestsPassed:
-      /===== ALL TESTS PASSED SUCCESSFULLY! =====/.test(normalizedOutput) ||
+      reportSummary?.allPassed ||
       (stages.length > 0 &&
         stagesPassed === stages.length &&
         stages.every((stage) => stage.status === "pass") &&
@@ -357,10 +547,144 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   };
 }
 
+function parseReportSummary(output) {
+  const allPassedMatch = output.match(
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \((\d+)\s*\/\s*(\d+)\))? =====$/m,
+  );
+  if (allPassedMatch) {
+    return {
+      allPassed: true,
+      passed: parseOptionalCount(allPassedMatch[1]),
+      total: parseOptionalCount(allPassedMatch[2]),
+    };
+  }
+
+  const summaryMatch = output.match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
+  if (summaryMatch) {
+    return {
+      allPassed: false,
+      passed: Number.parseInt(summaryMatch[1], 10),
+      total: Number.parseInt(summaryMatch[2], 10),
+    };
+  }
+
+  return null;
+}
+
+function parseOptionalCount(value) {
+  if (value == null) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
+  if (!reportSummary || stages.length === 0) {
+    return;
+  }
+
+  const previousStages = new Map(
+    (previousStatus?.stages ?? [])
+      .filter((stage) => stage?.name)
+      .map((stage) => [stage.name, stage]),
+  );
+  for (const stage of stages) {
+    const previous = previousStages.get(stage.name);
+    if (stage.status === "unknown" && previous?.status === "pass" && hasStageCounts(previous)) {
+      setStageStatus(stage, "pass", previous.passed, previous.total);
+    }
+  }
+
+  if (reportSummary.allPassed) {
+    inferAllStagesPassed(stages, reportSummary);
+    return;
+  }
+
+  const failingIndex = stages.findIndex((stage) => stage.status === "fail");
+  if (failingIndex < 0) {
+    return;
+  }
+
+  inferPreviousStagesPassed(stages.slice(0, failingIndex), reportSummary.passed);
+
+  const canAllocateFailingCounts =
+    failingIndex === 0 || stages.slice(0, failingIndex).every((stage) => hasStageCounts(stage));
+  if (!canAllocateFailingCounts) {
+    setStageStatus(stages[failingIndex], "fail", stages[failingIndex].passed, stages[failingIndex].total);
+    return;
+  }
+
+  const passedBefore = stages
+    .slice(0, failingIndex)
+    .reduce((sum, stage) => sum + (stage.passed ?? 0), 0);
+  const totalBefore = stages
+    .slice(0, failingIndex)
+    .reduce((sum, stage) => sum + (stage.total ?? 0), 0);
+  const failingStage = stages[failingIndex];
+  const failingPassed =
+    reportSummary.passed == null
+      ? failingStage.passed
+      : Math.max(0, reportSummary.passed - passedBefore);
+  const failingTotal =
+    reportSummary.total == null
+      ? Math.max(failingStage.total, failingPassed)
+      : Math.max(failingPassed, reportSummary.total - totalBefore);
+  setStageStatus(failingStage, "fail", failingPassed, failingTotal);
+}
+
+function inferAllStagesPassed(stages, reportSummary) {
+  const unresolved = stages.filter((stage) => stage.status !== "pass" || !hasStageCounts(stage));
+  const knownTotal = stages
+    .filter((stage) => !unresolved.includes(stage))
+    .reduce((sum, stage) => sum + (stage.total ?? 0), 0);
+  const remaining =
+    reportSummary.total == null ? null : Math.max(0, reportSummary.total - knownTotal);
+
+  for (const stage of unresolved) {
+    if (unresolved.length === 1 && remaining != null) {
+      setStageStatus(stage, "pass", remaining, remaining);
+    } else {
+      setStageStatus(stage, "pass", stage.passed, stage.total);
+    }
+  }
+}
+
+function inferPreviousStagesPassed(stages, passedCount) {
+  const unresolved = stages.filter((stage) => stage.status !== "pass" || !hasStageCounts(stage));
+  const knownTotal = stages
+    .filter((stage) => !unresolved.includes(stage))
+    .reduce((sum, stage) => sum + (stage.total ?? 0), 0);
+  const remaining = passedCount == null ? null : Math.max(0, passedCount - knownTotal);
+
+  for (const stage of unresolved) {
+    if (unresolved.length === 1 && remaining != null) {
+      setStageStatus(stage, "pass", remaining, remaining);
+    } else {
+      setStageStatus(stage, "pass", stage.passed, stage.total);
+    }
+  }
+}
+
+function hasStageCounts(stage) {
+  return Number.isFinite(stage?.passed) && Number.isFinite(stage?.total) && stage.total > 0;
+}
+
+function setStageStatus(stage, status, passed, total) {
+  stage.status = status;
+  stage.passed = Number.isFinite(passed) ? passed : 0;
+  stage.total = Number.isFinite(total) ? total : 0;
+}
+
 function parseStageStatus(stageName, body) {
   const targets = new Map();
+  const failureLines = [];
 
   for (const line of body.split(/\r?\n/)) {
+    if (isTestFailureLine(line)) {
+      failureLines.push(line);
+    }
+
     let match = line.match(/^(.+?): running (\d+) tests$/);
     if (match) {
       const target = ensureStageTarget(targets, match[1]);
@@ -396,7 +720,14 @@ function parseStageStatus(stageName, body) {
   }
 
   const stageTargets = Array.from(targets.values());
-  const hasFailureMarker = /\bFAIL\b|ERROR:/.test(body);
+  const targetFailureCount = stageTargets.reduce((sum, target) => {
+    if (target.status !== "fail" || !Number.isFinite(target.total) || !Number.isFinite(target.passed)) {
+      return sum;
+    }
+    return sum + Math.max(0, target.total - target.passed);
+  }, 0);
+  const failed = Math.max(failureLines.length, targetFailureCount);
+  const hasFailureMarker = failed > 0 || /\bFAIL\b|ERROR:/.test(body);
   const status = stageTargets.some((target) => target.status === "fail") || hasFailureMarker
     ? "fail"
     : stageTargets.length > 0 && stageTargets.every((target) => target.status === "pass")
@@ -410,8 +741,13 @@ function parseStageStatus(stageName, body) {
     status,
     passed,
     total,
+    failed,
     targets: stageTargets,
   };
+}
+
+function isTestFailureLine(line) {
+  return /^(?:pa\d+\/|pa\d+\/\.\.\/).+?: (?:ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match)/.test(line);
 }
 
 function ensureStageTarget(targets, targetName) {
@@ -467,14 +803,20 @@ function formatStageBreakdown(testStatus) {
 function formatSingleStageBreakdown(stage) {
   const targetSummary = stage.targets
     .map((target) => {
-      if (target.total == null) {
+      if (!Number.isFinite(target.total) || target.total <= 0) {
         return `${target.name} ${target.status}`;
       }
       return `${target.name} ${target.passed ?? 0}/${target.total}`;
     })
     .join(", ");
-  const stageSummary = `${stage.name} ${stage.passed}/${stage.total} ${stage.status}`;
-  return targetSummary ? `${stageSummary} (${targetSummary})` : stageSummary;
+  const stageSummary = hasStageCounts(stage)
+    ? `${stage.name} ${stage.passed}/${stage.total} ${stage.status}`
+    : `${stage.name} ${stage.status}`;
+  const failureSummary = Number.isFinite(stage.failed) && stage.failed > 0
+    ? `${stage.failed} failing`
+    : "";
+  const details = [failureSummary, targetSummary].filter(Boolean).join(", ");
+  return details ? `${stageSummary} (${details})` : stageSummary;
 }
 
 function formatStageList(stageNames) {
@@ -604,6 +946,681 @@ async function getGitStatus(cwd) {
   };
 }
 
+async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber }) {
+  return withCodexAppServer(async (client) => {
+    let activeThreadId = threadId;
+    let startedThread = false;
+
+    if (!activeThreadId) {
+      const response = await client.request("thread/start", buildAppServerThreadStartParams());
+      activeThreadId = response?.thread?.id ?? null;
+      if (!activeThreadId) {
+        throw new Error(`thread/start did not return a thread id: ${JSON.stringify(response)}`);
+      }
+      startedThread = true;
+      log(`Pre-created Codex thread ${activeThreadId} for loop goals`);
+    }
+
+    await client.request("thread/goal/clear", { threadId: activeThreadId });
+
+    const params = {
+      threadId: activeThreadId,
+      objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }),
+      status: "active",
+    };
+    if (CONFIG.goalTokenBudget != null) {
+      params.tokenBudget = CONFIG.goalTokenBudget;
+    }
+
+    const response = await client.request("thread/goal/set", params);
+    if (!response?.goal) {
+      throw new Error(`thread/goal/set did not return a goal: ${JSON.stringify(response)}`);
+    }
+    log(`Set Codex loop goal: ${previewText(response.goal.objective)}`);
+    return { threadId: activeThreadId, goal: response.goal, startedThread };
+  });
+}
+
+async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
+  if (!CONFIG.loopGoalsEnabled || !threadId) {
+    return;
+  }
+
+  try {
+    await withCodexAppServer(async (client) => {
+      const current = await client.request("thread/goal/get", { threadId });
+      if (!current?.goal || current.goal.status === "complete") {
+        return;
+      }
+
+      const response = await client.request("thread/goal/set", {
+        threadId,
+        status: "complete",
+      });
+      const record = buildRalphGoalEventRecord({
+        action: "complete",
+        goal: response.goal,
+        threadId,
+        turnNumber,
+        testStatus,
+      });
+      await appendRalphEventRecord(record);
+      log(`Marked Codex loop goal complete: ${previewText(response.goal.objective)}`);
+    });
+  } catch (error) {
+    log(`Failed to mark Codex loop goal complete: ${formatErrorMessage(error)}`);
+  }
+}
+
+function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
+  const lines = [
+    `Ralph loop ${turnNumber}: make progress on ${CONFIG.runName}.`,
+    "Follow AGENTS.md and the checked-in assignment instructions.",
+  ];
+
+  lines.push(...buildLoopGoalTaskLines({ testStatus, gitStatus }));
+  if (!(testStatus.exitCode === 0 && !gitStatus.clean)) {
+    lines.push(
+      "Commit cohesive progress as you go; do not wait for one end-of-assignment commit.",
+      "Before handing control back, ensure all intended work is committed and `git status --short` is empty.",
+    );
+  }
+
+  return truncateGoalObjective(lines.join("\n"));
+}
+
+function buildLoopGoalTaskLines({ testStatus, gitStatus }) {
+  const lines = [];
+
+  if (testStatus.exitCode === 0 && !gitStatus.clean) {
+    lines.push(
+      `The command \`${getTestStatusCommand(testStatus)}\` now passes, but the worktree is dirty.`,
+      "Commit intended changes now as cohesive progress commits and leave `git status --short` empty before handing control back.",
+    );
+    return lines;
+  }
+
+  if (testStatus.regressions.length > 0) {
+    lines.push(`Fix regressions in ${formatStageList(testStatus.regressions)} before moving on.`);
+  }
+
+  if (testStatus.passingThrough && testStatus.failingStage) {
+    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
+    lines.push(
+      `Assignments through \`${testStatus.passingThrough}\` pass.`,
+      `Make \`${reportTarget}\` fully pass before returning, without regressing previous assignments.`,
+    );
+  } else if (testStatus.failingStage) {
+    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
+    lines.push(`Make \`${reportTarget}\` fully pass before returning and continue toward the full suite.`);
+  } else {
+    lines.push(
+      `Fix the current \`${getTestStatusCommand(testStatus)}\` failure.`,
+      `Latest exit code: ${testStatus.exitCode}`,
+    );
+  }
+
+  if (testStatus.firstFailureLine) {
+    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
+  }
+
+  return lines;
+}
+
+function getTestStatusCommand(testStatus) {
+  return testStatus?.command ?? CONFIG.testCommand;
+}
+
+function buildTestCommandForStage(stageName) {
+  const normalizedStage = normalizeStageName(stageName);
+  if (normalizedStage && hasTestCommandStagePlaceholder(CONFIG.testCommand)) {
+    return renderTestCommandTemplate(CONFIG.testCommand, normalizedStage);
+  }
+  return CONFIG.testCommand;
+}
+
+function buildTestCommandContext(state) {
+  const usesStageTemplate = hasTestCommandStagePlaceholder(CONFIG.testCommand);
+  const stage = usesStageTemplate ? resolveActiveTestStage(state) : null;
+  return {
+    template: CONFIG.testCommand,
+    command: usesStageTemplate
+      ? renderTestCommandTemplate(CONFIG.testCommand, stage)
+      : CONFIG.testCommand,
+    stage,
+    usesStageTemplate,
+  };
+}
+
+function hasTestCommandStagePlaceholder(command) {
+  return /\bpaX\b/.test(command) ||
+    /\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/.test(command) ||
+    /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command);
+}
+
+function renderTestCommandTemplate(command, stageName) {
+  const normalizedStage = normalizeStageName(stageName);
+  if (!normalizedStage) {
+    throw new Error(`Cannot render test command template without a pa stage: ${command}`);
+  }
+
+  return command
+    .replace(/\bpaX\b/g, normalizedStage)
+    .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage)
+    .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage);
+}
+
+function resolveActiveTestStage(state) {
+  const savedStage = normalizeStageName(state?.activeStage);
+  if (savedStage) {
+    return savedStage;
+  }
+  const failingStage = normalizeStageName(state?.lastTestStatus?.failingStage);
+  if (failingStage) {
+    return failingStage;
+  }
+  const lastPassingStage = normalizeStageName(state?.lastTestStatus?.passingThrough);
+  if (state?.lastExitCode === 0 && lastPassingStage && !getNextStageName(lastPassingStage)) {
+    return lastPassingStage;
+  }
+  const nextStage = getNextStageName(state?.lastTestStatus?.passingThrough);
+  if (nextStage) {
+    return nextStage;
+  }
+  return getFirstStageName();
+}
+
+function getNextStageAfterPassingCommand(testStatus, gitStatus) {
+  if (!testStatus?.usesStageTemplate || testStatus.exitCode !== 0 || !gitStatus.clean) {
+    return null;
+  }
+  const completedStage =
+    normalizeStageName(testStatus.passingThrough) ?? normalizeStageName(testStatus.targetStage);
+  return getNextStageName(completedStage);
+}
+
+function getStateActiveStageAfterTest(testStatus) {
+  if (!testStatus?.usesStageTemplate) {
+    return null;
+  }
+  return (
+    normalizeStageName(testStatus.failingStage) ??
+    normalizeStageName(testStatus.targetStage) ??
+    getNextStageName(testStatus.passingThrough)
+  );
+}
+
+function getFirstStageName() {
+  return TEST_STAGE_NAMES[0] ?? "pa1";
+}
+
+function getNextStageName(stageName) {
+  const normalizedStage = normalizeStageName(stageName);
+  if (!normalizedStage || TEST_STAGE_NAMES.length === 0) {
+    return null;
+  }
+  const index = TEST_STAGE_NAMES.indexOf(normalizedStage);
+  return index >= 0 && index + 1 < TEST_STAGE_NAMES.length
+    ? TEST_STAGE_NAMES[index + 1]
+    : null;
+}
+
+function normalizeStageName(stageName) {
+  return typeof stageName === "string" && /^pa\d+$/.test(stageName) ? stageName : null;
+}
+
+function truncateGoalObjective(objective) {
+  const maxChars = 4000;
+  const chars = Array.from(objective.trim());
+  if (chars.length <= maxChars) {
+    return objective.trim();
+  }
+  return `${chars.slice(0, maxChars - 80).join("")}\n[goal objective truncated by Ralph]`;
+}
+
+function buildAppServerThreadStartParams() {
+  const config = {
+    features: { goals: true },
+  };
+
+  if (CONFIG.reasoningEffort) {
+    config.model_reasoning_effort = CONFIG.reasoningEffort;
+  }
+  if (CONFIG.networkAccessEnabled != null) {
+    config.sandbox_workspace_write = { network_access: CONFIG.networkAccessEnabled };
+  }
+  if (CONFIG.webSearchEnabled != null) {
+    config.web_search = CONFIG.webSearchEnabled ? "live" : "disabled";
+  }
+
+  return {
+    ...(CONFIG.model ? { model: CONFIG.model } : {}),
+    cwd: CONFIG.workdir,
+    approvalPolicy: CONFIG.approvalPolicy,
+    sandbox: CONFIG.sandboxMode,
+    config,
+    serviceName: "ralph",
+    threadSource: "user",
+    experimentalRawEvents: false,
+    persistExtendedHistory: false,
+  };
+}
+
+function buildCodexOptions() {
+  return {
+    ...(CONFIG.codexPath ? { codexPathOverride: CONFIG.codexPath } : {}),
+    ...(CONFIG.loopGoalsEnabled ? { config: { features: { goals: true } } } : {}),
+  };
+}
+
+class Codex {
+  constructor(options = {}) {
+    this.options = options;
+    this.exec = new CodexExec({
+      codexPath: options.codexPathOverride,
+      configOverrides: options.config,
+      env: options.env,
+    });
+  }
+
+  startThread(options = {}) {
+    return new CodexThread(this.exec, this.options, options);
+  }
+
+  resumeThread(id, options = {}) {
+    return new CodexThread(this.exec, this.options, options, id);
+  }
+}
+
+class CodexThread {
+  constructor(exec, codexOptions, threadOptions, id = null) {
+    this.exec = exec;
+    this.codexOptions = codexOptions;
+    this.threadOptions = threadOptions;
+    this._id = id;
+  }
+
+  get id() {
+    return this._id;
+  }
+
+  async runStreamed(input, turnOptions = {}) {
+    return { events: this.runStreamedInternal(input, turnOptions) };
+  }
+
+  async *runStreamedInternal(input, turnOptions = {}) {
+    const { prompt, images } = normalizeCodexInput(input);
+    const events = this.exec.run({
+      input: prompt,
+      baseUrl: this.codexOptions.baseUrl,
+      apiKey: this.codexOptions.apiKey,
+      threadId: this._id,
+      images,
+      model: this.threadOptions.model,
+      sandboxMode: this.threadOptions.sandboxMode,
+      workingDirectory: this.threadOptions.workingDirectory,
+      skipGitRepoCheck: this.threadOptions.skipGitRepoCheck,
+      modelReasoningEffort: this.threadOptions.modelReasoningEffort,
+      networkAccessEnabled: this.threadOptions.networkAccessEnabled,
+      webSearchMode: this.threadOptions.webSearchMode,
+      webSearchEnabled: this.threadOptions.webSearchEnabled,
+      approvalPolicy: this.threadOptions.approvalPolicy,
+      additionalDirectories: this.threadOptions.additionalDirectories,
+      signal: turnOptions.signal,
+    });
+
+    for await (const line of events) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Failed to parse Codex JSON event: ${line}`, { cause: error });
+      }
+      if (event.type === "thread.started") {
+        this._id = event.thread_id;
+      }
+      yield event;
+    }
+  }
+}
+
+class CodexExec {
+  constructor({ codexPath, configOverrides, env }) {
+    this.codexPath = codexPath || "codex";
+    this.configOverrides = configOverrides;
+    this.envOverride = env;
+  }
+
+  async *run(args) {
+    const commandArgs = ["exec", "--json"];
+    appendSerializedConfigOverrides(commandArgs, this.configOverrides);
+    if (args.baseUrl) {
+      commandArgs.push("--config", `openai_base_url=${toTomlValue(args.baseUrl, "openai_base_url")}`);
+    }
+    if (args.model) {
+      commandArgs.push("--model", args.model);
+    }
+    if (args.sandboxMode) {
+      commandArgs.push("--sandbox", args.sandboxMode);
+    }
+    if (args.workingDirectory) {
+      commandArgs.push("--cd", args.workingDirectory);
+    }
+    if (args.additionalDirectories?.length) {
+      for (const directory of args.additionalDirectories) {
+        commandArgs.push("--add-dir", directory);
+      }
+    }
+    if (args.skipGitRepoCheck) {
+      commandArgs.push("--skip-git-repo-check");
+    }
+    if (args.modelReasoningEffort) {
+      commandArgs.push(
+        "--config",
+        `model_reasoning_effort=${toTomlValue(args.modelReasoningEffort, "model_reasoning_effort")}`,
+      );
+    }
+    if (args.networkAccessEnabled !== undefined) {
+      commandArgs.push(
+        "--config",
+        `sandbox_workspace_write.network_access=${toTomlValue(
+          args.networkAccessEnabled,
+          "sandbox_workspace_write.network_access",
+        )}`,
+      );
+    }
+    if (args.webSearchMode) {
+      commandArgs.push("--config", `web_search=${toTomlValue(args.webSearchMode, "web_search")}`);
+    } else if (args.webSearchEnabled === true) {
+      commandArgs.push("--config", `web_search=${toTomlValue("live", "web_search")}`);
+    } else if (args.webSearchEnabled === false) {
+      commandArgs.push("--config", `web_search=${toTomlValue("disabled", "web_search")}`);
+    }
+    if (args.approvalPolicy) {
+      commandArgs.push(
+        "--config",
+        `approval_policy=${toTomlValue(args.approvalPolicy, "approval_policy")}`,
+      );
+    }
+    if (args.threadId) {
+      commandArgs.push("resume", args.threadId);
+    }
+    if (args.images?.length) {
+      for (const image of args.images) {
+        commandArgs.push("--image", image);
+      }
+    }
+
+    const env = buildCodexExecEnv(this.envOverride, args.apiKey);
+    const child = spawn(this.codexPath, commandArgs, {
+      env,
+      signal: args.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const startedAtMs = Date.now();
+    let expectedTaskCompleteTermination = false;
+    const stopTaskCompleteWatcher = args.threadId
+      ? watchCodexSessionTaskComplete(args.threadId, startedAtMs, () => {
+          expectedTaskCompleteTermination = true;
+          if (!child.killed) {
+            child.kill("SIGTERM");
+          }
+        })
+      : null;
+    let spawnError = null;
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    if (!child.stdin || !child.stdout) {
+      child.kill();
+      throw new Error("Codex exec did not expose stdio pipes");
+    }
+
+    const stderrChunks = [];
+    child.stderr?.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      if (stderrChunks.length > 40) {
+        stderrChunks.splice(0, stderrChunks.length - 40);
+      }
+    });
+
+    const exitPromise = new Promise((resolve) => {
+      child.once("exit", (code, signal) => {
+        resolve({ code, signal });
+      });
+    });
+    const rl = readline.createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+    });
+
+    child.stdin.write(args.input ?? "");
+    child.stdin.end();
+
+    try {
+      for await (const line of rl) {
+        if (line.trim()) {
+          yield line;
+        }
+      }
+      if (spawnError) {
+        throw spawnError;
+      }
+      const { code, signal } = await exitPromise;
+      if ((code !== 0 || signal) && !expectedTaskCompleteTermination) {
+        const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+        throw new Error(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+      }
+    } finally {
+      stopTaskCompleteWatcher?.();
+      rl.close();
+      child.removeAllListeners();
+      if (!child.killed) {
+        child.kill();
+      }
+    }
+  }
+}
+
+function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
+  let stopped = false;
+  let polling = false;
+
+  const poll = async () => {
+    if (stopped || polling) {
+      return;
+    }
+    polling = true;
+    try {
+      if (await hasCodexSessionTaskComplete(threadId, startedAtMs)) {
+        stopped = true;
+        clearInterval(timer);
+        onComplete();
+      }
+    } catch (_) {
+      // Session files are best-effort; stdout remains the primary stream.
+    } finally {
+      polling = false;
+    }
+  };
+
+  const timer = setInterval(poll, 1000);
+  timer.unref?.();
+  poll();
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
+  const files = await findCodexSessionFiles(threadId);
+  for (const filePath of files) {
+    const raw = await fs.readFile(filePath, "utf8");
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (const line of lines) {
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_) {
+        continue;
+      }
+      if (record?.type !== "event_msg" || record.payload?.type !== "task_complete") {
+        continue;
+      }
+      const timestampMs = Date.parse(record.timestamp ?? "");
+      if (!Number.isFinite(timestampMs) || timestampMs >= startedAtMs - 5000) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function findCodexSessionFiles(threadId) {
+  const sessionsDir = path.join(CODEX_DIR, "sessions");
+  const matches = [];
+  await walkCodexSessionFiles(sessionsDir, matches, threadId, 0);
+  return matches.sort();
+}
+
+async function walkCodexSessionFiles(directory, matches, threadId, depth) {
+  if (depth > 5) {
+    return;
+  }
+  let entries;
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkCodexSessionFiles(entryPath, matches, threadId, depth + 1);
+    } else if (entry.isFile() && entry.name.endsWith(`${threadId}.jsonl`)) {
+      matches.push(entryPath);
+    }
+  }
+}
+
+function normalizeCodexInput(input) {
+  if (typeof input === "string") {
+    return { prompt: input, images: [] };
+  }
+
+  const promptParts = [];
+  const images = [];
+  for (const item of input ?? []) {
+    if (item?.type === "text") {
+      promptParts.push(item.text ?? "");
+    } else if (item?.type === "local_image") {
+      images.push(item.path);
+    }
+  }
+  return { prompt: promptParts.join("\n\n"), images };
+}
+
+function buildCodexExecEnv(envOverride, apiKey) {
+  const env = {};
+  if (envOverride) {
+    Object.assign(env, envOverride);
+  } else {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) {
+        env[key] = value;
+      }
+    }
+  }
+  if (!env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE) {
+    env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = "ralph";
+  }
+  if (apiKey) {
+    env.CODEX_API_KEY = apiKey;
+  }
+  return env;
+}
+
+function appendSerializedConfigOverrides(args, configOverrides) {
+  for (const override of serializeConfigOverrides(configOverrides)) {
+    args.push("--config", override);
+  }
+}
+
+function serializeConfigOverrides(configOverrides) {
+  const overrides = [];
+  flattenConfigOverrides(configOverrides, "", overrides);
+  return overrides;
+}
+
+function flattenConfigOverrides(value, prefix, overrides) {
+  if (!isPlainObject(value)) {
+    if (!prefix) {
+      return;
+    }
+    overrides.push(`${prefix}=${toTomlValue(value, prefix)}`);
+    return;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (child === undefined) {
+      continue;
+    }
+    const pathKey = prefix ? `${prefix}.${key}` : key;
+    if (isPlainObject(child)) {
+      flattenConfigOverrides(child, pathKey, overrides);
+    } else {
+      overrides.push(`${pathKey}=${toTomlValue(child, pathKey)}`);
+    }
+  }
+}
+
+function toTomlValue(value, valuePath) {
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item, index) => toTomlValue(item, `${valuePath}[${index}]`)).join(", ")}]`;
+  }
+  if (isPlainObject(value)) {
+    return `{${Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .map(([key, child]) => `${formatTomlKey(key)} = ${toTomlValue(child, `${valuePath}.${key}`)}`)
+      .join(", ")}}`;
+  }
+  throw new Error(`Unsupported Codex config override value at ${valuePath}`);
+}
+
+function formatTomlKey(key) {
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(key);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function withCodexAppServer(callback) {
+  const client = new CodexAppServerClient({
+    codexPath: CONFIG.codexPath,
+  });
+  try {
+    await client.initialize();
+    return await callback(client);
+  } finally {
+    await client.close();
+  }
+}
+
 async function collectStreamedTurn(events, options = {}) {
   const items = [];
   let finalResponse = "";
@@ -694,7 +1711,7 @@ async function loadConfig() {
     deriveLegacyName(fileConfig.workdir) ??
     DEFAULT_CONFIG.name;
   const runName = buildRunName({ name, model, reasoningEffort });
-  const explicitWorkdir = process.env.RALPH_WORKDIR;
+  const explicitWorkdir = process.env.RALPH_WORKDIR ?? fileConfig.workdir;
   const explicitStateDir = process.env.RALPH_STATE_DIR;
   const baseDir = path.resolve(
     process.cwd(),
@@ -753,6 +1770,19 @@ async function loadConfig() {
       process.env.RALPH_OUTPUT_TAIL_CHARS ?? fileConfig.outputTailChars,
       DEFAULT_CONFIG.outputTailChars,
     ),
+    codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
+    loopGoalsEnabled: parseBoolean(
+      process.env.RALPH_LOOP_GOALS ?? fileConfig.loopGoalsEnabled,
+      DEFAULT_CONFIG.loopGoalsEnabled,
+    ),
+    goalTokenBudget: parseOptionalPositiveInt(
+      process.env.RALPH_GOAL_TOKEN_BUDGET ?? fileConfig.goalTokenBudget,
+      DEFAULT_CONFIG.goalTokenBudget,
+    ),
+    useExistingWorkdir: parseBoolean(
+      process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
+      DEFAULT_CONFIG.useExistingWorkdir,
+    ),
   };
 }
 
@@ -767,6 +1797,234 @@ async function loadConfigFile() {
     }
     throw error;
   }
+}
+
+async function loadPromptPartials() {
+  const partials = {};
+  const sidecarBasePath = buildSidecarTemplateBasePath(CONFIG_PATH);
+
+  for (const [kind, definition] of Object.entries(PARTIAL_TEMPLATE_KINDS)) {
+    const candidates = [
+      `${sidecarBasePath}.${definition.fileSuffix}.md`,
+      path.join(DEFAULT_TEMPLATE_DIR, definition.defaultFileName),
+    ];
+    const loaded = await readFirstExistingFile(candidates);
+    if (loaded) {
+      partials[kind] = loaded;
+    }
+  }
+
+  return partials;
+}
+
+function buildSidecarTemplateBasePath(configPath) {
+  const directory = path.dirname(configPath);
+  const basename = path.basename(configPath);
+  const stem = basename.endsWith(".config.json")
+    ? basename.slice(0, -".config.json".length)
+    : basename.endsWith(".json")
+      ? basename.slice(0, -".json".length)
+      : basename;
+  return path.join(directory, stem);
+}
+
+async function readFirstExistingFile(filePaths) {
+  for (const filePath of filePaths) {
+    try {
+      return {
+        path: filePath,
+        content: await fs.readFile(filePath, "utf8"),
+      };
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
+class CodexAppServerClient {
+  constructor({ codexPath }) {
+    this.codexPath = codexPath || "codex";
+    this.child = null;
+    this.readline = null;
+    this.nextRequestId = 1;
+    this.pending = new Map();
+    this.stderrChunks = [];
+    this.closing = false;
+  }
+
+  async initialize() {
+    this.start();
+    await this.request("initialize", {
+      clientInfo: {
+        name: "ralph",
+        title: "Ralph Runner",
+        version: "0.1.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+    this.notify("initialized", {});
+  }
+
+  start() {
+    if (this.child) {
+      return;
+    }
+
+    const child = spawn(this.codexPath, ["app-server", "--listen", "stdio://"], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child = child;
+
+    child.stderr.on("data", (chunk) => {
+      this.stderrChunks.push(chunk.toString());
+      if (this.stderrChunks.length > 40) {
+        this.stderrChunks.splice(0, this.stderrChunks.length - 40);
+      }
+    });
+    child.on("error", (error) => this.rejectAll(error));
+    child.on("exit", (code, signal) => {
+      if (!this.closing) {
+        const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+        this.rejectAll(new Error(`codex app-server exited with ${detail}: ${this.stderrTail()}`));
+      }
+    });
+
+    this.readline = readline.createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+    });
+    this.readLoop();
+  }
+
+  readLoop() {
+    (async () => {
+      for await (const line of this.readline) {
+        if (!line.trim()) {
+          continue;
+        }
+        this.handleMessage(JSON.parse(line));
+      }
+    })().catch((error) => this.rejectAll(error));
+  }
+
+  handleMessage(message) {
+    if (!message || typeof message !== "object" || message.id == null) {
+      return;
+    }
+
+    const key = String(message.id);
+    const pending = this.pending.get(key);
+    if (!pending) {
+      return;
+    }
+    this.pending.delete(key);
+
+    if (message.error) {
+      pending.reject(new Error(formatJsonRpcError(pending.method, message.error)));
+      return;
+    }
+    pending.resolve(message.result ?? {});
+  }
+
+  request(method, params = {}) {
+    const id = this.nextRequestId;
+    this.nextRequestId += 1;
+    const key = String(id);
+
+    const promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(key);
+        reject(new Error(`${method} timed out waiting for codex app-server`));
+      }, 60000);
+      this.pending.set(key, {
+        method,
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+    });
+
+    try {
+      this.writeMessage({ id, method, params });
+    } catch (error) {
+      const pending = this.pending.get(key);
+      this.pending.delete(key);
+      pending?.reject(error);
+    }
+
+    return promise;
+  }
+
+  notify(method, params = {}) {
+    this.writeMessage({ method, params });
+  }
+
+  writeMessage(message) {
+    if (!this.child?.stdin?.writable) {
+      throw new Error(`codex app-server stdin is not writable: ${this.stderrTail()}`);
+    }
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  async close() {
+    const child = this.child;
+    if (!child) {
+      return;
+    }
+
+    this.closing = true;
+    this.child = null;
+    this.readline?.close();
+    if (child.stdin?.writable) {
+      child.stdin.end();
+    }
+    child.kill();
+
+    await new Promise((resolve) => {
+      if (child.exitCode != null || child.signalCode != null) {
+        resolve();
+        return;
+      }
+      const timeout = setTimeout(resolve, 1000);
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  }
+
+  rejectAll(error) {
+    for (const [key, pending] of this.pending.entries()) {
+      this.pending.delete(key);
+      pending.reject(error);
+    }
+  }
+
+  stderrTail() {
+    return this.stderrChunks.join("").trim();
+  }
+}
+
+function formatJsonRpcError(method, error) {
+  if (!error || typeof error !== "object") {
+    return `${method} failed: ${String(error)}`;
+  }
+  const code = error.code == null ? "unknown" : error.code;
+  const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
+  return `${method} failed (${code}): ${message}`;
 }
 
 function summarizeEvent(event) {
@@ -820,6 +2078,26 @@ function buildRalphTestStatusEventRecord({ testStatus, threadId, turnNumber }) {
       type: "ralph.test-status",
       sender: "ralph",
       testStatus,
+    },
+  };
+}
+
+function buildRalphGoalEventRecord({ action, goal, threadId, turnNumber, testStatus = null }) {
+  if (!goal || !threadId) {
+    return null;
+  }
+
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.goal",
+    event: {
+      type: "ralph.goal",
+      sender: "ralph",
+      action,
+      goal,
+      ...(testStatus ? { testStatus } : {}),
     },
   };
 }
@@ -942,6 +2220,7 @@ async function loadState() {
         parsed.lastTestStatus && typeof parsed.lastTestStatus === "object"
           ? parsed.lastTestStatus
           : null,
+      activeStage: normalizeStageName(parsed.activeStage),
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
@@ -951,6 +2230,7 @@ async function loadState() {
         turnsCompleted: 0,
         lastExitCode: null,
         lastTestStatus: null,
+        activeStage: null,
       };
     }
     throw error;
@@ -966,6 +2246,37 @@ async function assertDirectoryExists(directoryPath) {
   if (!stat.isDirectory()) {
     throw new Error(`${directoryPath} is not a directory`);
   }
+}
+
+async function discoverStageNames(workdir) {
+  const entries = await fs.readdir(workdir, { withFileTypes: true });
+  const stages = entries
+    .filter((entry) => entry.isDirectory() && /^pa\d+$/.test(entry.name))
+    .map((entry) => entry.name);
+  const experimentalStages = await readExperimentalStageNames(workdir);
+  return stages
+    .filter((stage) => !experimentalStages.has(stage))
+    .sort(compareStageNames);
+}
+
+async function readExperimentalStageNames(workdir) {
+  try {
+    const makefile = await fs.readFile(path.join(workdir, "Makefile"), "utf8");
+    const match = makefile.match(/^EXPERIMENTAL_PAS\s*\?=\s*(.+)$/m);
+    if (!match) {
+      return new Set();
+    }
+    return new Set(match[1].split(/\s+/).map((entry) => entry.trim()).filter(Boolean));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return new Set();
+    }
+    throw error;
+  }
+}
+
+function compareStageNames(left, right) {
+  return Number.parseInt(left.slice(2), 10) - Number.parseInt(right.slice(2), 10);
 }
 
 function buildRunName({ name, model, reasoningEffort }) {
@@ -1033,6 +2344,14 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseOptionalPositiveInt(value, fallback = null) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function parseBoolean(value, fallback) {
   if (value == null || value === "") {
     return fallback;
@@ -1059,6 +2378,10 @@ function parseAdditionalDirectories(value) {
 function log(message) {
   const timestamp = new Date().toISOString();
   process.stdout.write(`[${timestamp}] ${message}\n`);
+}
+
+function formatErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 main().catch((error) => {

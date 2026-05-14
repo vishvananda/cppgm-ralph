@@ -4,11 +4,15 @@
   "testCommand": "make test",
   "maxTurns": 30,
   "stateBaseDir": ".ralph",
-  "model": "gemini-3.1-pro-preview",
-  "reasoningEffort": "medium",
+  "model": "gpt-5.3-codex",
+  "reasoningEffort": "high",
   "sandboxMode": "danger-full-access",
   "approvalPolicy": "never",
   "networkAccessEnabled": true,
   "additionalDirectories": [],
-  "outputTailChars": 20000
+  "outputTailChars": 20000,
+  "codexPath": "codex",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "useExistingWorkdir": false
 }

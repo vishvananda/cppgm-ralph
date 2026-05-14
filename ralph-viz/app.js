@@ -8,12 +8,24 @@ const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
 
-const state = { runs: [], selectedRun: null, events: [], raw: [] };
+const AUTO_REFRESH_MS = 2500;
+const BOTTOM_STICKY_PX = 160;
+
+const state = {
+  runs: [],
+  selectedRun: null,
+  currentRun: null,
+  events: [],
+  raw: [],
+  autoRefreshTimer: null,
+  refreshInFlight: false,
+  openEntryKeys: new Set(),
+};
 
 // Noise event types that clutter the view
 const NOISE_TYPES = new Set([
   "thread.started", "turn.started", "turn.completed", "turn.failed",
-  "item.started", "error",
+  "item.started", "error", "codex.session.token_count", "ralph.test-status",
   // Gemini streaming noise
   "content", "finished", "model_info", "tool_call_response",
 ]);
@@ -57,7 +69,8 @@ function truncate(text, max = 120) {
 function buildSummary(events) {
   const turnSet = new Set();
   for (const r of events) {
-    if (Number.isInteger(r.turnNumber)) turnSet.add(r.turnNumber);
+    const turn = displayTurnForRecord(r);
+    if (Number.isInteger(turn)) turnSet.add(turn);
   }
   const first = events.at(0)?.recordedAt ?? null;
   const last = events.at(-1)?.recordedAt ?? null;
@@ -75,6 +88,13 @@ function buildSummary(events) {
     first, last,
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
+}
+
+function displayTurnForRecord(record) {
+  if (Number.isInteger(record.turnNumber) && record.turnNumber > 0) {
+    return record.turnNumber;
+  }
+  return "setup";
 }
 
 function renderSummary(events) {
@@ -167,13 +187,14 @@ function renderCommandCard(entry) {
   const startItem = entry.startRecord?.event?.item ?? {};
   const endItem = entry.endRecord?.event?.item ?? {};
   const item = entry.endRecord ? endItem : startItem;
-  const cmd = unwrapCommand(item.command) || "unknown command";
+  const cmd = unwrapCommand(item.command || startItem.command) || "unknown command";
   const output = cleanText(item.aggregated_output);
   const exitCode = item.exit_code;
   const time = fmtShort(entry.endRecord?.recordedAt ?? entry.startRecord?.recordedAt);
 
   const card = document.createElement("details");
   card.className = "ev ev-cmd" + (exitCode != null && exitCode !== 0 ? " ev-cmd-fail" : "");
+  restoreExpandableState(card, commandEntryKey(entry));
 
   const summary = document.createElement("summary");
   const cmdSpan = document.createElement("code");
@@ -227,6 +248,35 @@ function renderCommandCard(entry) {
   }
 
   return card;
+}
+
+function commandEntryKey(entry) {
+  const startItem = entry.startRecord?.event?.item ?? {};
+  const endItem = entry.endRecord?.event?.item ?? {};
+  const id = startItem.id ?? endItem.id;
+  const threadId = entry.startRecord?.threadId ?? entry.endRecord?.threadId ?? "thread";
+  const turn = entry.startRecord?.turnNumber ?? entry.endRecord?.turnNumber ?? "setup";
+  if (id) {
+    return `command:${threadId}:${turn}:${id}`;
+  }
+  const recordedAt = entry.startRecord?.recordedAt ?? entry.endRecord?.recordedAt ?? "";
+  const command = unwrapCommand(startItem.command || endItem.command || "");
+  return `command:${threadId}:${turn}:${recordedAt}:${command}`;
+}
+
+function restoreExpandableState(details, key) {
+  if (!key) {
+    return;
+  }
+  details.dataset.entryKey = key;
+  details.open = state.openEntryKeys.has(key);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      state.openEntryKeys.add(key);
+    } else {
+      state.openEntryKeys.delete(key);
+    }
+  });
 }
 
 function renderMessageCard(record) {
@@ -376,6 +426,7 @@ function renderGeminiToolCallCard(entry) {
   const card = document.createElement("details");
   const isError = respVal.status === "error";
   card.className = "ev ev-cmd" + (isError ? " ev-cmd-fail" : "");
+  restoreExpandableState(card, geminiToolEntryKey(entry));
 
   const summary = document.createElement("summary");
   const toolSpan = document.createElement("span");
@@ -454,6 +505,15 @@ function renderGeminiToolCallCard(entry) {
   return card;
 }
 
+function geminiToolEntryKey(entry) {
+  const record = entry.record;
+  const callId = record.event?.value?.callId;
+  const traceId = record.event?.traceId;
+  const threadId = record.threadId ?? "thread";
+  const turn = record.turnNumber ?? "setup";
+  return `gemini-tool:${threadId}:${turn}:${callId ?? traceId ?? record.recordedAt ?? ""}`;
+}
+
 function renderGeminiThoughtCard(record) {
   const val = record.event?.value ?? {};
   const subject = cleanText(val.subject);
@@ -530,7 +590,7 @@ function filterRecords(records) {
 function buildTurnMap(events) {
   const turns = new Map();
   for (const record of events) {
-    const turn = Number.isInteger(record.turnNumber) ? record.turnNumber : "pre";
+    const turn = displayTurnForRecord(record);
     const list = turns.get(turn) ?? [];
     list.push(record);
     turns.set(turn, list);
@@ -549,12 +609,12 @@ function buildUsageMap(records) {
   for (const r of records) {
     // Codex: turn.completed has usage
     if (r.eventType === "turn.completed" && r.event?.usage) {
-      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      const turn = displayTurnForRecord(r);
       map.set(turn, r.event.usage);
     }
     // Gemini: finished events have usageMetadata — accumulate per turn
     if (r.eventType === "finished" && r.event?.value?.usageMetadata) {
-      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      const turn = displayTurnForRecord(r);
       const gm = r.event.value.usageMetadata;
       const prev = map.get(turn);
       if (prev && prev._gemini) {
@@ -579,11 +639,136 @@ function buildTestStatusMap(records) {
   const map = new Map();
   for (const r of records) {
     if (r.eventType === "ralph.test-status" && r.event?.testStatus) {
-      const turn = Number.isInteger(r.turnNumber) ? r.turnNumber : "pre";
+      const turn = displayTurnForRecord(r);
       map.set(turn, r.event.testStatus);
     }
   }
+  for (const r of records) {
+    const item = r.event?.item;
+    if (r.eventType !== "item.completed" || item?.type !== "command_execution") {
+      continue;
+    }
+    const derived = deriveTestStatusFromCommand(r);
+    if (!derived) {
+      continue;
+    }
+    const turn = displayTurnForRecord(r);
+    map.set(turn, mergeTestStatus(map.get(turn), derived));
+  }
   return map;
+}
+
+function mergeTestStatus(existing, derived) {
+  if (!existing) return derived;
+  if ((existing.testsTotal ?? 0) === 0 && (derived.testsTotal ?? 0) > 0) {
+    return { ...existing, ...derived };
+  }
+  if (derived.allTestsPassed && !existing.allTestsPassed) {
+    return { ...existing, ...derived };
+  }
+  if ((derived.testsTotal ?? 0) >= (existing.testsTotal ?? 0)) {
+    return { ...existing, ...derived };
+  }
+  return existing;
+}
+
+function deriveTestStatusFromCommand(record) {
+  const item = record.event?.item ?? {};
+  const command = unwrapCommand(item.command ?? "");
+  const output = cleanText(item.aggregated_output);
+  if (!output || !/test-report/.test(command + output)) {
+    return null;
+  }
+
+  const summary = parseTestReportSummary(output);
+  if (!summary) {
+    return null;
+  }
+
+  const stageSections = parseStageSections(output);
+  const stageNames = stageSections.map(stage => stage.name);
+  const firstFailureLine = output
+    .split(/\r?\n/)
+    .find(line => /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match/.test(line)) ?? null;
+  const failingStage = firstFailureLine?.match(/^(pa\d+)\//)?.[1] ?? null;
+  const failingIndex = failingStage ? stageNames.indexOf(failingStage) : -1;
+  const stageCount = stageNames.length;
+  const stages = stageSections.map((stage, index) => {
+    const failed = countStageFailureLines(stage.body);
+    return {
+      name: stage.name,
+      status: summary.allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown",
+      passed: 0,
+      total: 0,
+      failed,
+      targets: [],
+    };
+  });
+  const stagesPassed = stages.filter(stage => stage.status === "pass").length;
+
+  return {
+    recordedAt: record.recordedAt,
+    command,
+    exitCode: item.exit_code ?? null,
+    allTestsPassed: summary.allTestsPassed,
+    testsPassed: summary.testsPassed,
+    testsTotal: summary.testsTotal,
+    stageCount,
+    stagesPassed,
+    failingStage,
+    firstFailureLine,
+    stages,
+  };
+}
+
+function parseStageSections(output) {
+  const headers = [...output.matchAll(/^===== (pa\d+) =====$/gm)].map(match => ({
+    name: match[1],
+    index: match.index ?? 0,
+  }));
+  return headers.map((header, index) => ({
+    name: header.name,
+    body: output.slice(header.index, index + 1 < headers.length ? headers[index + 1].index : output.length),
+  }));
+}
+
+function countStageFailureLines(body) {
+  return body
+    .split(/\r?\n/)
+    .filter(line =>
+      /^(?:pa\d+\/|pa\d+\/\.\.\/).+?: (?:ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match)/.test(line),
+    ).length;
+}
+
+function parseTestReportSummary(output) {
+  const allPassed = output.match(
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \((\d+)\s*\/\s*(\d+)\))? =====$/m,
+  );
+  if (allPassed) {
+    const testsPassed = parseOptionalInt(allPassed[1]);
+    const testsTotal = parseOptionalInt(allPassed[2]);
+    return {
+      allTestsPassed: true,
+      testsPassed: testsPassed ?? testsTotal ?? 0,
+      testsTotal: testsTotal ?? testsPassed ?? 0,
+    };
+  }
+
+  const summary = output.match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
+  if (!summary) {
+    return null;
+  }
+  return {
+    allTestsPassed: false,
+    testsPassed: Number.parseInt(summary[1], 10),
+    testsTotal: Number.parseInt(summary[2], 10),
+  };
+}
+
+function parseOptionalInt(value) {
+  if (value == null) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function testStatusText(ts) {
@@ -638,6 +823,7 @@ function usageText(usage) {
 }
 
 function renderTimeline(records) {
+  rememberOpenEntryKeys();
   timelineEl.innerHTML = "";
   const usageMap = buildUsageMap(records);
   const testMap = buildTestStatusMap(records);
@@ -645,9 +831,14 @@ function renderTimeline(records) {
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
   const turnMap = buildTurnMap(filtered);
+  for (const turn of testMap.keys()) {
+    if (!turnMap.has(turn)) {
+      turnMap.set(turn, []);
+    }
+  }
   const sortedTurns = [...turnMap.keys()].sort((a, b) => {
-    if (a === "pre") return -1;
-    if (b === "pre") return 1;
+    if (a === "setup") return -1;
+    if (b === "setup") return 1;
     return a - b;
   });
 
@@ -670,12 +861,13 @@ function renderTimeline(records) {
 
     const summary = document.createElement("summary");
     summary.className = "turn-header";
-    const label = turn === "pre" ? "Setup" : `Turn ${turn}`;
+    const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
+    const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts)}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${turnSummaryText(items)}</span>${tsHtml}${usageHtml}`;
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");
@@ -687,6 +879,20 @@ function renderTimeline(records) {
     }
     details.append(feed);
     timelineEl.append(details);
+  }
+}
+
+function rememberOpenEntryKeys() {
+  for (const details of timelineEl.querySelectorAll("details[data-entry-key]")) {
+    const key = details.dataset.entryKey;
+    if (!key) {
+      continue;
+    }
+    if (details.open) {
+      state.openEntryKeys.add(key);
+    } else {
+      state.openEntryKeys.delete(key);
+    }
   }
 }
 
@@ -719,11 +925,12 @@ function syncOpenTurnsToUrl() {
 
 // --- Data loading ---
 
-async function loadRuns() {
+async function loadRuns(options = {}) {
   const [stateData, data] = await Promise.all([
     fetch("/api/state").then(r => r.json()),
     fetch("/api/runs").then(r => r.json()),
   ]);
+  state.currentRun = stateData.currentThread ?? null;
   state.runs = data.runs ?? [];
 
   runSelect.innerHTML = "";
@@ -744,15 +951,18 @@ async function loadRuns() {
     runSelect.append(opt);
   }
 
-  const urlRun = getUrlParams().run;
-  const preferred = urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
-    : stateData.currentThread && state.runs.some(r => r.id === stateData.currentThread) ? stateData.currentThread
+  const urlRun = options.ignoreUrl ? null : getUrlParams().run;
+  const selectedRun = options.preserveSelection ? state.selectedRun : null;
+  const preferred = options.preferredRun && state.runs.some(r => r.id === options.preferredRun) ? options.preferredRun
+    : selectedRun && state.runs.some(r => r.id === selectedRun) ? selectedRun
+    : urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
+    : state.currentRun && state.runs.some(r => r.id === state.currentRun) ? state.currentRun
     : state.runs[0].id;
   runSelect.value = preferred;
-  await loadRun(preferred);
+  await loadRun(preferred, { stickToBottom: options.stickToBottom });
 }
 
-async function loadRun(id) {
+async function loadRun(id, options = {}) {
   if (!id) return;
   state.selectedRun = id;
   setUrlParam("run", id);
@@ -765,19 +975,86 @@ async function loadRun(id) {
   state.raw = state.events.slice();
   renderSummary(state.events);
   renderTimeline(state.events);
+  if (options.stickToBottom) {
+    scrollToBottom();
+  }
+}
+
+function isAutoRefreshEnabled() {
+  return autoRefreshToggle?.checked ?? false;
+}
+
+function isNearBottom() {
+  const doc = document.documentElement;
+  return window.innerHeight + window.scrollY >= doc.scrollHeight - BOTTOM_STICKY_PX;
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
+  });
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (!isAutoRefreshEnabled()) {
+    return;
+  }
+  state.autoRefreshTimer = window.setInterval(refreshActiveRun, AUTO_REFRESH_MS);
+}
+
+function stopAutoRefresh() {
+  if (state.autoRefreshTimer) {
+    window.clearInterval(state.autoRefreshTimer);
+    state.autoRefreshTimer = null;
+  }
+}
+
+async function refreshActiveRun() {
+  if (!isAutoRefreshEnabled() || state.refreshInFlight) {
+    return;
+  }
+  state.refreshInFlight = true;
+  try {
+    const stickToBottom = isNearBottom();
+    const stateData = await fetch("/api/state").then(r => r.json());
+    const currentRun = stateData.currentThread ?? null;
+    state.currentRun = currentRun;
+    if (currentRun && currentRun !== state.selectedRun) {
+      await loadRuns({ preferredRun: currentRun, ignoreUrl: true, stickToBottom });
+    } else if (state.selectedRun) {
+      await loadRun(state.selectedRun, { stickToBottom });
+    } else {
+      await loadRuns({ stickToBottom });
+    }
+  } catch (error) {
+    console.error("auto-refresh failed", error);
+  } finally {
+    state.refreshInFlight = false;
+  }
 }
 
 // --- Bind ---
 
-refreshRuns.addEventListener("click", loadRuns);
+refreshRuns.addEventListener("click", () => loadRuns({ preserveSelection: true }));
 reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
 runSelect.addEventListener("change", e => loadRun(e.target.value));
 eventFilter.addEventListener("input", () => renderTimeline(state.events));
 hideNoiseToggle.addEventListener("change", () => renderTimeline(state.events));
 if (autoRefreshToggle) {
-  autoRefreshToggle.addEventListener("change", () => renderTimeline(state.events));
+  autoRefreshToggle.addEventListener("change", () => {
+    renderTimeline(state.events);
+    if (autoRefreshToggle.checked) {
+      startAutoRefresh();
+      refreshActiveRun();
+    } else {
+      stopAutoRefresh();
+    }
+  });
 }
 
 loadRuns().catch(err => {
   summaryEl.innerHTML = `<div><strong>error</strong>${err.message}</div>`;
+}).finally(() => {
+  startAutoRefresh();
 });
