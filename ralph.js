@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -382,16 +383,19 @@ function buildGitStatusLines(gitStatus) {
 
 function buildContinueObjectiveLines(testStatus) {
   const lines = [];
+  const targetStage = getObjectiveTargetStage(testStatus);
+  const reportTarget = targetStage
+    ? buildTestCommandForStage(targetStage)
+    : getTestStatusCommand(testStatus);
 
   if (testStatus.regressions.length > 0) {
     lines.push(
       `Latest commit(s) caused regressions in ${formatStageList(testStatus.regressions)}. ` +
-        "Address those regressions before moving forward.",
+        `Fix them as blockers for the current target \`${reportTarget}\`.`,
     );
   }
 
   if (testStatus?.passingThrough && testStatus?.failingStage) {
-    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
     lines.push(
       `Assignments through \`${testStatus.passingThrough}\` already pass.`,
       `Your task for this turn is to implement the code required to make ` +
@@ -402,7 +406,6 @@ function buildContinueObjectiveLines(testStatus) {
   }
 
   if (testStatus?.failingStage) {
-    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
     lines.push(
       `\`${reportTarget}\` is still failing, continue work on that stage until it fully passes.`,
     );
@@ -431,7 +434,7 @@ function buildFailureSummaryLines(testStatus) {
 
   lines.push(
     `Full test output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
-    "After the current blocking assignment command passes, keep going until Ralph's configured success condition passes.",
+    "After the current blocker is fixed, rerun the required command and keep going until Ralph's configured success condition passes.",
   );
 
   return lines;
@@ -1127,7 +1130,7 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
 }
 
 function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
-  const stage = testStatus?.failingStage ?? testStatus?.targetStage ?? "";
+  const stage = getObjectiveTargetStage(testStatus) ?? "";
   const command = stage ? buildTestCommandForStage(stage) : getTestStatusCommand(testStatus);
   const lines = [
     `Ralph loop ${turnNumber} for ${CONFIG.runName}.`,
@@ -1171,15 +1174,23 @@ function buildLoopGoalTaskLines({ testStatus, gitStatus }) {
   }
 
   if (testStatus.regressions.length > 0) {
-    lines.push(`Fix regressions in ${formatStageList(testStatus.regressions)} before moving on.`);
+    lines.push(
+      `Regressions found in ${formatStageList(testStatus.regressions)}; fix them as blockers while keeping the current target.`,
+    );
   }
 
   if (testStatus.passingThrough && testStatus.failingStage) {
-    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
+    const targetStage = getObjectiveTargetStage(testStatus);
+    const reportTarget = targetStage
+      ? buildTestCommandForStage(targetStage)
+      : getTestStatusCommand(testStatus);
     lines.push(
       `Assignments through \`${testStatus.passingThrough}\` pass.`,
       `Make \`${reportTarget}\` fully pass before returning, without regressing previous assignments.`,
     );
+    if (testStatus.regressions.length > 0 && testStatus.failingStage !== targetStage) {
+      lines.push(`The first blocking regression is in \`${testStatus.failingStage}\`.`);
+    }
   } else if (testStatus.failingStage) {
     const reportTarget = buildTestCommandForStage(testStatus.failingStage);
     lines.push(`Make \`${reportTarget}\` fully pass before returning and continue toward the full suite.`);
@@ -1274,9 +1285,17 @@ function getStateActiveStageAfterTest(testStatus) {
     return null;
   }
   return (
-    normalizeStageName(testStatus.failingStage) ??
     normalizeStageName(testStatus.targetStage) ??
+    normalizeStageName(testStatus.failingStage) ??
     getNextStageName(testStatus.passingThrough)
+  );
+}
+
+function getObjectiveTargetStage(testStatus) {
+  return (
+    normalizeStageName(testStatus?.targetStage) ??
+    normalizeStageName(testStatus?.failingStage) ??
+    getNextStageName(testStatus?.passingThrough)
   );
 }
 
@@ -1586,6 +1605,7 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
 
 async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
   const files = await findCodexSessionFiles(threadId);
+  let latestLifecycleEvent = null;
   for (const filePath of files) {
     const raw = await fs.readFile(filePath, "utf8");
     const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -1596,19 +1616,33 @@ async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
       } catch (_) {
         continue;
       }
-      if (record?.type !== "event_msg" || record.payload?.type !== "task_complete") {
-        continue;
-      }
-      if (!hasFinalAgentMessage(record.payload)) {
+      const eventType = record?.payload?.type;
+      if (
+        record?.type !== "event_msg" ||
+        (eventType !== "task_complete" && eventType !== "task_started")
+      ) {
         continue;
       }
       const timestampMs = Date.parse(record.timestamp ?? "");
       if (!Number.isFinite(timestampMs) || timestampMs >= startedAtMs - 5000) {
-        return true;
+        latestLifecycleEvent = {
+          type: eventType,
+          timestampMs,
+        };
       }
     }
   }
-  return false;
+
+  if (latestLifecycleEvent?.type !== "task_complete") {
+    return false;
+  }
+  if (
+    Number.isFinite(latestLifecycleEvent.timestampMs) &&
+    Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
+  ) {
+    return false;
+  }
+  return true;
 }
 
 async function findCodexSessionFiles(threadId) {
@@ -1616,11 +1650,6 @@ async function findCodexSessionFiles(threadId) {
   const matches = [];
   await walkCodexSessionFiles(sessionsDir, matches, threadId, 0);
   return matches.sort();
-}
-
-function hasFinalAgentMessage(payload) {
-  const message = payload?.last_agent_message;
-  return typeof message === "string" && message.trim().length > 0;
 }
 
 async function walkCodexSessionFiles(directory, matches, threadId, depth) {

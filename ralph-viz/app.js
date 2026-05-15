@@ -447,17 +447,40 @@ function renderPromptCard(record) {
   const prompt = cleanText(record.event?.prompt);
   if (!prompt) return null;
 
-  const sender = record.event?.sender ?? "ralph";
   const card = document.createElement("div");
   card.className = "ev ev-prompt";
 
   const label = document.createElement("span");
   label.className = "prompt-label";
-  label.textContent = sender;
+  label.textContent = "Turn prompt";
 
   const body = document.createElement("div");
   body.className = "prompt-body";
   body.textContent = prompt;
+
+  card.append(label, body);
+  return card;
+}
+
+function renderGoalCard(record) {
+  const goal = record.event?.goal;
+  const objective = cleanText(goal?.objective);
+  if (!objective) return null;
+
+  const parts = ["Goal objective"];
+  if (record.event?.action) parts.push(record.event.action);
+  if (goal?.status) parts.push(goal.status);
+
+  const card = document.createElement("div");
+  card.className = "ev ev-goal";
+
+  const label = document.createElement("span");
+  label.className = "goal-label";
+  label.textContent = parts.join(" / ");
+
+  const body = document.createElement("div");
+  body.className = "goal-body";
+  body.textContent = objective;
 
   card.append(label, body);
   return card;
@@ -616,6 +639,8 @@ function renderDisplayEntry(entry) {
   const record = entry.record;
   const item = record.event?.item;
 
+  if (record.eventType === "ralph.goal")
+    return renderGoalCard(record);
   if (record.eventType === "ralph.prompt")
     return renderPromptCard(record);
   if (record.eventType === "item.completed" && item?.type === "agent_message")

@@ -305,6 +305,32 @@ button:hover { background: #252525; }
   color: #da8;
 }
 
+/* Goal (ralph.goal) */
+.ev-goal {
+  padding: 0.3rem 0;
+  border-left: 3px solid #8a6;
+  padding-left: 0.6rem;
+  margin: 0.15rem 0;
+}
+
+.goal-label {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8a6;
+  margin-bottom: 0.15rem;
+}
+
+.goal-body {
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  color: #cfc;
+}
+
 /* Gemini thought */
 .ev-thought {
   padding: 0.3rem 0;
