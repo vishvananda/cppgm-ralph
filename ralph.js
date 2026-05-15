@@ -706,6 +706,7 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
       .filter((stage) => stage?.name)
       .map((stage) => [stage.name, stage]),
   );
+  applyPreviousStageCounts(stages, previousStages, reportSummary);
   for (const stage of stages) {
     const previous = previousStages.get(stage.name);
     if (stage.status === "unknown" && previous?.status === "pass" && hasStageCounts(previous)) {
@@ -720,6 +721,10 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
 
   const failingIndex = stages.findIndex((stage) => stage.status === "fail");
   if (failingIndex < 0) {
+    return;
+  }
+
+  if (stageCountsMatchReportSummary(stages, reportSummary)) {
     return;
   }
 
@@ -748,6 +753,54 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
       ? Math.max(failingStage.total, failingPassed)
       : Math.max(failingPassed, reportSummary.total - totalBefore);
   setStageStatus(failingStage, "fail", failingPassed, failingTotal);
+}
+
+function applyPreviousStageCounts(stages, previousStages, reportSummary) {
+  const snapshots = stages.map((stage) => ({
+    stage,
+    status: stage.status,
+    passed: stage.passed,
+    total: stage.total,
+  }));
+
+  for (const stage of stages) {
+    const previous = previousStages.get(stage.name);
+    if (hasStageCounts(stage) || !hasStageCounts(previous)) {
+      continue;
+    }
+
+    if (stage.status === "fail") {
+      const failed = Number.isFinite(stage.failed) ? stage.failed : 0;
+      setStageStatus(stage, "fail", Math.max(0, previous.total - failed), previous.total);
+    } else if (stage.status === "unknown") {
+      setStageStatus(stage, "pass", previous.total, previous.total);
+    }
+  }
+
+  if (reportSummary?.passed == null || reportSummary?.total == null) {
+    return;
+  }
+  if (stageCountsMatchReportSummary(stages, reportSummary)) {
+    return;
+  }
+
+  for (const snapshot of snapshots) {
+    snapshot.stage.status = snapshot.status;
+    snapshot.stage.passed = snapshot.passed;
+    snapshot.stage.total = snapshot.total;
+  }
+}
+
+function stageCountsMatchReportSummary(stages, reportSummary) {
+  if (reportSummary?.passed == null || reportSummary?.total == null) {
+    return false;
+  }
+  if (!stages.every((stage) => hasStageCounts(stage))) {
+    return false;
+  }
+  const passed = stages.reduce((sum, stage) => sum + stage.passed, 0);
+  const total = stages.reduce((sum, stage) => sum + stage.total, 0);
+  return passed === reportSummary.passed && total === reportSummary.total;
 }
 
 function inferAllStagesPassed(stages, reportSummary) {
