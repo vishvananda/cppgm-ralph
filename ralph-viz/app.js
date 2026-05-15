@@ -1103,13 +1103,34 @@ function seedAgentTestProgressTracker(tracker, record) {
   if (record.eventType !== "ralph.test-status") {
     return;
   }
-  const stages = record.event?.testStatus?.stages;
+  const testStatus = record.event?.testStatus;
+  const stages = testStatus?.stages;
   if (!Array.isArray(stages)) {
+    return;
+  }
+  if (!hasTrustworthyStageTotals(testStatus)) {
     return;
   }
   for (const stage of stages) {
     updateKnownStageTotal(tracker, stage?.name, stage?.total);
   }
+}
+
+function hasTrustworthyStageTotals(testStatus) {
+  const stages = testStatus?.stages;
+  if (!Array.isArray(stages) || stages.length === 0) {
+    return false;
+  }
+  const positiveStages = stages.filter((stage) => Number.isFinite(stage?.total) && stage.total > 0);
+  if (positiveStages.length === 0) {
+    return false;
+  }
+  if (stages.length > 1 && positiveStages.length < stages.length) {
+    return false;
+  }
+  const positiveTotal = positiveStages.reduce((sum, stage) => sum + stage.total, 0);
+  const testsTotal = testStatus?.testsTotal;
+  return !Number.isFinite(testsTotal) || testsTotal <= 0 || positiveTotal <= testsTotal;
 }
 
 function parseAgentTestCommand(command) {
