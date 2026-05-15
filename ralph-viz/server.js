@@ -393,6 +393,23 @@ function convertCodexEventMessage(payload, context) {
       raw: payload,
     });
   }
+  if (payload.type === "patch_apply_end" && payload.changes) {
+    return buildVizRecord(context, "item.completed", {
+      type: "item.completed",
+      item: {
+        id: payload.call_id ?? `patch-${context.recordedAt}`,
+        type: "file_change",
+        status: payload.status ?? (payload.success ? "completed" : "failed"),
+        changes: Object.entries(payload.changes).map(([filePath, change]) => ({
+          kind: change?.type ?? "update",
+          path: filePath,
+          diff: change?.unified_diff ?? "",
+          movePath: change?.move_path ?? null,
+        })),
+        raw: payload,
+      },
+    });
+  }
   return null;
 }
 

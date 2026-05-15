@@ -11,6 +11,12 @@ const autoRefreshToggle = document.getElementById("autoRefresh");
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 160;
 
+const API_PRICE_RATES = new Map([
+  ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
+  ["gpt-5.4-mini", { input: 0.75, cachedInput: 0.075, output: 4.50 }],
+  ["gpt-5.4", { input: 2.50, cachedInput: 0.25, output: 15.00 }],
+]);
+
 const state = {
   runs: [],
   selectedRun: null,
@@ -86,6 +92,8 @@ function buildSummary(events) {
     events: events.length,
     turns: turnSet.size,
     first, last,
+    tokenUsage: latestCumulativeUsage(events),
+    priceModel: inferPriceModel(),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
@@ -102,6 +110,12 @@ function renderSummary(events) {
   const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
+  const tokenText = s.tokenUsage
+    ? fullUsageText(s.tokenUsage)
+    : '<span class="muted">n/a</span>';
+  const costText = s.tokenUsage
+    ? costEstimateText(s.tokenUsage, s.priceModel, { includeModel: true })
+    : '<span class="muted">n/a</span>';
 
   summaryEl.innerHTML = `
     <div><strong>thread</strong>${truncate(s.threadId, 24)}</div>
@@ -109,6 +123,8 @@ function renderSummary(events) {
     <div><strong>turns</strong>${s.turns}</div>
     <div><strong>started</strong>${fmt(s.first)}</div>
     <div><strong>latest</strong>${fmt(s.last)}</div>
+    <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
+    <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
   `;
 }
@@ -301,8 +317,13 @@ function renderFileChangeCard(record) {
 
   const card = document.createElement("details");
   card.className = "ev ev-file";
+  restoreExpandableState(card, fileChangeEntryKey(record));
   const summary = document.createElement("summary");
-  summary.innerHTML = `<span class="pill">${changes.length} file${changes.length !== 1 ? "s" : ""}</span>`;
+  if (changes.length === 1) {
+    summary.append(fileChangeLabel(changes[0]));
+  } else {
+    summary.innerHTML = `<span class="pill">${changes.length} files</span>`;
+  }
   const time = fmtShort(record.recordedAt);
   if (time) {
     const ts = document.createElement("span");
@@ -316,12 +337,51 @@ function renderFileChangeCard(record) {
   for (const c of changes) {
     const row = document.createElement("div");
     row.className = "file-row";
-    row.innerHTML = `<span class="file-kind">${c.kind}</span> <span class="file-path">${c.path}</span>`;
+    const path = c.movePath ? `${c.path} -> ${c.movePath}` : c.path;
+    row.innerHTML = `<span class="file-kind">${c.kind}</span> <span class="file-path">${path}</span>`;
     list.append(row);
+    if (c.diff) {
+      const pre = document.createElement("pre");
+      pre.className = "file-diff";
+      pre.textContent = c.diff;
+      list.append(pre);
+    }
   }
 
   card.append(summary, list);
   return card;
+}
+
+function fileChangePathText(change) {
+  const path = change?.movePath ? `${change.path} -> ${change.movePath}` : change?.path;
+  return path || "file";
+}
+
+function fileChangeLabel(change) {
+  const label = document.createElement("span");
+  label.className = "file-title";
+
+  const kind = document.createElement("span");
+  kind.className = "file-kind";
+  kind.textContent = change?.kind ?? "update";
+
+  const path = document.createElement("span");
+  path.className = "file-path";
+  path.textContent = fileChangePathText(change);
+
+  label.append(kind, " ", path);
+  return label;
+}
+
+function fileChangeEntryKey(record) {
+  const item = record.event?.item ?? {};
+  const threadId = record.threadId ?? "thread";
+  const turn = record.turnNumber ?? "setup";
+  if (item.id) {
+    return `file:${threadId}:${turn}:${item.id}`;
+  }
+  const paths = (item.changes ?? []).map(fileChangePathText).join(",");
+  return `file:${threadId}:${turn}:${record.recordedAt ?? ""}:${paths}`;
 }
 
 function renderTodoCard(record) {
@@ -598,36 +658,219 @@ function buildTurnMap(events) {
   return turns;
 }
 
-function fmtTokens(n) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
-  return `${n}`;
+function buildTurnDurationMap(records) {
+  const map = new Map();
+  for (const record of records) {
+    const turn = displayTurnForRecord(record);
+    const time = Date.parse(record.recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const span = map.get(turn) ?? { first: time, last: time };
+    span.first = Math.min(span.first, time);
+    span.last = Math.max(span.last, time);
+    map.set(turn, span);
+  }
+  return map;
+}
+
+function durationText(span) {
+  if (!span) return "";
+  const seconds = Math.max(0, Math.round((span.last - span.first) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m`;
+}
+
+function fmtInt(n) {
+  return Math.round(Number(n) || 0).toLocaleString();
+}
+
+function fmtUsd(value) {
+  if (!Number.isFinite(value)) return "n/a";
+  if (value > 0 && value < 0.01) return `$${value.toFixed(4)}`;
+  if (value < 1) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function inferPriceModel() {
+  const text = `${state.selectedRun ?? ""} ${runSelect.selectedOptions?.[0]?.textContent ?? ""}`.toLowerCase();
+  return [...API_PRICE_RATES.keys()]
+    .sort((a, b) => b.length - a.length)
+    .find((model) => text.includes(model)) ?? null;
+}
+
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const input = usage.input_tokens ?? usage.promptTokenCount ?? 0;
+  const cached = usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? 0;
+  const output =
+    usage.output_tokens ??
+    ((usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0));
+  const reasoning =
+    usage.reasoning_output_tokens ??
+    usage.thinking_output_tokens ??
+    usage.thoughtsTokenCount ??
+    0;
+  const total = usage.total_tokens ?? usage.totalTokenCount ?? input + output;
+  return {
+    input_tokens: Math.max(0, input),
+    cached_input_tokens: Math.max(0, cached),
+    output_tokens: Math.max(0, output),
+    reasoning_output_tokens: Math.max(0, reasoning),
+    total_tokens: Math.max(0, total),
+  };
+}
+
+function emptyUsage() {
+  return {
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: 0,
+  };
+}
+
+function hasTokenUsage(usage) {
+  return Boolean(
+    usage &&
+      (usage.input_tokens ||
+        usage.cached_input_tokens ||
+        usage.output_tokens ||
+        usage.reasoning_output_tokens ||
+        usage.total_tokens),
+  );
+}
+
+function addUsage(left, right) {
+  const a = normalizeUsage(left) ?? emptyUsage();
+  const b = normalizeUsage(right) ?? emptyUsage();
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
+    total_tokens: a.total_tokens + b.total_tokens,
+  };
+}
+
+function subtractUsage(current, previous) {
+  const a = normalizeUsage(current) ?? emptyUsage();
+  const b = normalizeUsage(previous) ?? emptyUsage();
+  return {
+    input_tokens: Math.max(0, a.input_tokens - b.input_tokens),
+    cached_input_tokens: Math.max(0, a.cached_input_tokens - b.cached_input_tokens),
+    output_tokens: Math.max(0, a.output_tokens - b.output_tokens),
+    reasoning_output_tokens: Math.max(0, a.reasoning_output_tokens - b.reasoning_output_tokens),
+    total_tokens: Math.max(0, a.total_tokens - b.total_tokens),
+  };
+}
+
+function tokenCountRecords(records) {
+  return records
+    .filter((record) => record.eventType === "codex.session.token_count" && record.event?.usage)
+    .sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+}
+
+function latestCumulativeUsage(records) {
+  const tokenRecords = tokenCountRecords(records);
+  if (tokenRecords.length) {
+    return normalizeUsage(tokenRecords.at(-1).event.usage);
+  }
+
+  let total = emptyUsage();
+  for (const usage of buildUsageMap(records).values()) {
+    total = addUsage(total, usage);
+  }
+  return hasTokenUsage(total) ? total : null;
+}
+
+function apiCostEstimate(usage, model) {
+  const normalized = normalizeUsage(usage);
+  const rates = model ? API_PRICE_RATES.get(model) : null;
+  if (!normalized || !rates) return null;
+  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
+  const uncached = Math.max(0, normalized.input_tokens - cached);
+  return (
+    (uncached * rates.input +
+      cached * rates.cachedInput +
+      normalized.output_tokens * rates.output) /
+    1_000_000
+  );
+}
+
+function costEstimateText(usage, model, options = {}) {
+  const estimate = apiCostEstimate(usage, model);
+  if (estimate == null) {
+    return model ? `${model}: n/a` : "n/a";
+  }
+  const prefix = options.includeModel && model ? `${model} ` : "";
+  return `${prefix}${fmtUsd(estimate)}`;
+}
+
+function fullUsageText(usage, options = {}) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) return "";
+  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
+  const uncached = Math.max(0, normalized.input_tokens - cached);
+  const parts = [
+    `${fmtInt(normalized.total_tokens)} total`,
+    `${fmtInt(uncached)} in`,
+  ];
+  if (cached) {
+    parts.push(`${fmtInt(cached)} cached`);
+  }
+  parts.push(`${fmtInt(normalized.output_tokens)} out`);
+  if (normalized.reasoning_output_tokens) {
+    parts.push(`${fmtInt(normalized.reasoning_output_tokens)} thinking`);
+  }
+  if (options.includeCost) {
+    const cost = costEstimateText(normalized, options.model);
+    if (cost !== "n/a") parts.push(cost);
+  }
+  return parts.join(" / ");
 }
 
 function buildUsageMap(records) {
   const map = new Map();
+  const tokenRecords = tokenCountRecords(records);
+  if (tokenRecords.length) {
+    let previous = null;
+    for (const record of tokenRecords) {
+      const current = normalizeUsage(record.event.usage);
+      const delta = previous ? subtractUsage(current, previous) : current;
+      previous = current;
+      if (!hasTokenUsage(delta)) continue;
+      const turn = displayTurnForRecord(record);
+      map.set(turn, addUsage(map.get(turn), delta));
+    }
+    return map;
+  }
+
   for (const r of records) {
     // Codex: turn.completed has usage
     if (r.eventType === "turn.completed" && r.event?.usage) {
       const turn = displayTurnForRecord(r);
-      map.set(turn, r.event.usage);
+      map.set(turn, normalizeUsage(r.event.usage));
     }
     // Gemini: finished events have usageMetadata — accumulate per turn
     if (r.eventType === "finished" && r.event?.value?.usageMetadata) {
       const turn = displayTurnForRecord(r);
       const gm = r.event.value.usageMetadata;
       const prev = map.get(turn);
+      const usage = normalizeUsage(gm);
       if (prev && prev._gemini) {
         // Accumulate across multiple finished events in same turn
-        prev.input_tokens += gm.promptTokenCount ?? 0;
-        prev.output_tokens += (gm.candidatesTokenCount ?? 0) + (gm.thoughtsTokenCount ?? 0);
-        prev.cached_input_tokens += gm.cachedContentTokenCount ?? 0;
+        map.set(turn, { ...addUsage(prev, usage), _gemini: true });
       } else if (!prev) {
         map.set(turn, {
           _gemini: true,
-          input_tokens: gm.promptTokenCount ?? 0,
-          output_tokens: (gm.candidatesTokenCount ?? 0) + (gm.thoughtsTokenCount ?? 0),
-          cached_input_tokens: gm.cachedContentTokenCount ?? 0,
+          ...usage,
         });
       }
     }
@@ -812,14 +1055,10 @@ function turnSummaryText(items) {
 
 function usageText(usage) {
   if (!usage) return "";
-  const input = usage.input_tokens ?? 0;
-  const cached = usage.cached_input_tokens ?? 0;
-  const output = usage.output_tokens ?? 0;
-  const total = input + output;
-  const parts = [`${fmtTokens(total)} tok`, `${fmtTokens(input)} in`];
-  if (cached) parts.push(`${fmtTokens(cached)} cached`);
-  parts.push(`${fmtTokens(output)} out`);
-  return parts.join(" / ");
+  return fullUsageText(usage, {
+    includeCost: true,
+    model: inferPriceModel(),
+  });
 }
 
 function renderTimeline(records) {
@@ -829,10 +1068,16 @@ function renderTimeline(records) {
   timelineEl.innerHTML = "";
   const usageMap = buildUsageMap(records);
   const testMap = buildTestStatusMap(records);
+  const durationMap = buildTurnDurationMap(records);
   const filtered = filterRecords(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
   const turnMap = buildTurnMap(filtered);
+  for (const turn of usageMap.keys()) {
+    if (!turnMap.has(turn)) {
+      turnMap.set(turn, []);
+    }
+  }
   for (const turn of testMap.keys()) {
     if (!turnMap.has(turn)) {
       turnMap.set(turn, []);
@@ -870,10 +1115,12 @@ function renderTimeline(records) {
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
+    const duration = durationText(durationMap.get(turn));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts)}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${tsHtml}${usageHtml}`;
+    const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");
@@ -992,14 +1239,26 @@ function isAutoRefreshEnabled() {
 }
 
 function isNearBottom() {
-  const doc = document.documentElement;
-  return window.innerHeight + window.scrollY >= doc.scrollHeight - BOTTOM_STICKY_PX;
+  const root = scrollingRoot();
+  return root.scrollTop + root.clientHeight >= root.scrollHeight - BOTTOM_STICKY_PX;
 }
 
 function scrollToBottom() {
   requestAnimationFrame(() => {
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
+    requestAnimationFrame(() => {
+      const root = scrollingRoot();
+      const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+      if (typeof root.scrollTo === "function") {
+        root.scrollTo({ top: maxTop, behavior: "auto" });
+      } else {
+        root.scrollTop = maxTop;
+      }
+    });
   });
+}
+
+function scrollingRoot() {
+  return document.scrollingElement || document.documentElement;
 }
 
 function startAutoRefresh() {

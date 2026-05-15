@@ -71,6 +71,9 @@ button:hover { background: #252525; }
   letter-spacing: 0.03em;
   margin-right: 0.35rem;
 }
+.summary-wide {
+  flex-basis: 100%;
+}
 
 /* Timeline */
 .timeline { display: grid; gap: 0.2rem; }
@@ -82,6 +85,7 @@ button:hover { background: #252525; }
   list-style: none;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
   font-size: 0.85rem;
   user-select: none;
@@ -100,9 +104,26 @@ button:hover { background: #252525; }
 .turn > summary:hover { color: #fff; }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
+.turn-duration { color: #777; font-size: 0.78rem; }
 .turn-tests { color: #b08030; font-size: 0.78rem; }
 .turn-tests-pass { color: #4a4; }
-.turn-usage { color: #555; font-size: 0.72rem; margin-left: auto; }
+.turn-usage {
+  color: #777;
+  font-size: 0.72rem;
+  flex: 1 1 28rem;
+  margin-left: auto;
+  min-width: 18rem;
+  text-align: right;
+}
+
+@media (max-width: 800px) {
+  .turn-usage {
+    flex-basis: 100%;
+    margin-left: 1.2rem;
+    min-width: 0;
+    text-align: left;
+  }
+}
 
 .turn-feed {
   display: grid;
@@ -214,8 +235,26 @@ button:hover { background: #252525; }
   padding: 0.08rem 0;
   font-family: "SF Mono", "Consolas", monospace;
 }
+.file-title {
+  font-family: "SF Mono", "Consolas", monospace;
+  font-size: 0.78rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .file-kind { color: var(--accent); margin-right: 0.3rem; font-size: 0.7rem; }
 .file-path { color: #ba8; }
+.file-diff {
+  margin: 0.1rem 0 0.35rem 1rem;
+  padding: 0.4rem 0.5rem;
+  border-left: 2px solid #3a3124;
+  color: #aaa;
+  background: #151515;
+  overflow-x: auto;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
 
 /* Todo */
 .ev-todo > summary {
