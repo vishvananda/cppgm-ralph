@@ -1075,6 +1075,8 @@ function buildAgentTestProgressState(records) {
   const byTurn = new Map();
 
   for (const record of records) {
+    seedAgentTestProgressTracker(tracker, record);
+
     const item = record.event?.item;
     if (record.eventType !== "item.completed" || item?.type !== "command_execution") {
       continue;
@@ -1095,6 +1097,19 @@ function buildAgentTestProgressState(records) {
   }
 
   return { byTurn, latest: tracker.latest };
+}
+
+function seedAgentTestProgressTracker(tracker, record) {
+  if (record.eventType !== "ralph.test-status") {
+    return;
+  }
+  const stages = record.event?.testStatus?.stages;
+  if (!Array.isArray(stages)) {
+    return;
+  }
+  for (const stage of stages) {
+    updateKnownStageTotal(tracker, stage?.name, stage?.total);
+  }
 }
 
 function parseAgentTestCommand(command) {
@@ -1179,6 +1194,24 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
         selected,
       );
     }
+
+    const summaryProgress = inferSelectedReportSummaryProgress(
+      output,
+      commandInfo,
+      tracker,
+      item.exit_code,
+    );
+    if (summaryProgress) {
+      return buildAgentTestProgressObservation(
+        record,
+        {
+          ...commandInfo,
+          stage: summaryProgress.stage,
+          stageNumber: stageNumber(summaryProgress.stage),
+        },
+        summaryProgress,
+      );
+    }
   }
 
   if (commandInfo.kind !== "through") {
@@ -1220,6 +1253,91 @@ function buildAgentTestProgressObservation(record, commandInfo, progress) {
     passed: Math.max(0, progress.passed ?? 0),
     total: Math.max(0, progress.total ?? 0),
   };
+}
+
+function inferSelectedReportSummaryProgress(output, commandInfo, tracker, exitCode) {
+  const summary = parseTestReportSummary(output);
+  if (!summary) {
+    return null;
+  }
+
+  const stages = normalizeSelectedReportStages(output, commandInfo);
+  if (stages.length === 0) {
+    return null;
+  }
+
+  if (stages.length === 1) {
+    return {
+      stage: stages[0],
+      passed: summary.testsPassed,
+      total: summary.testsTotal,
+      status: summaryProgressStatus(summary, exitCode),
+    };
+  }
+
+  const inferred = inferMultiStageSelectedProgress(output, stages, summary, tracker);
+  if (inferred.length > 0) {
+    return inferred.find((progress) => progress.status === "fail") ?? inferred.at(-1);
+  }
+
+  return {
+    stage: commandInfo.stage,
+    passed: summary.testsPassed,
+    total: summary.testsTotal,
+    status: summaryProgressStatus(summary, exitCode),
+  };
+}
+
+function normalizeSelectedReportStages(output, commandInfo) {
+  const configured = Array.isArray(commandInfo.stages) ? commandInfo.stages.filter(Boolean) : [];
+  if (configured.length > 0) {
+    return configured;
+  }
+  return parseStageSections(output).map((section) => section.name);
+}
+
+function inferMultiStageSelectedProgress(output, stages, summary, tracker) {
+  const failuresByStage = new Map(
+    parseStageSections(output).map((section) => [section.name, countStageFailureLines(section.body)]),
+  );
+  const inferred = [];
+  let knownTotal = 0;
+  const unknownStages = [];
+
+  for (const stage of stages) {
+    const total = tracker.stageTotals.get(stage);
+    if (Number.isFinite(total) && total > 0) {
+      knownTotal += total;
+      inferred.push(buildKnownStageSummaryProgress(stage, total, failuresByStage, summary));
+    } else {
+      unknownStages.push(stage);
+    }
+  }
+
+  if (unknownStages.length === 1) {
+    const total = Math.max(0, summary.testsTotal - knownTotal);
+    if (total > 0) {
+      inferred.push(buildKnownStageSummaryProgress(unknownStages[0], total, failuresByStage, summary));
+    }
+  }
+
+  return inferred.filter((progress) => progress.total > 0);
+}
+
+function buildKnownStageSummaryProgress(stage, total, failuresByStage, summary) {
+  const failed = Math.max(0, failuresByStage.get(stage) ?? 0);
+  return {
+    stage,
+    passed: summary.allTestsPassed ? total : Math.max(0, total - failed),
+    total,
+    status: summary.allTestsPassed || failed === 0 ? "pass" : "fail",
+  };
+}
+
+function summaryProgressStatus(summary, exitCode) {
+  return summary.allTestsPassed || (exitCode === 0 && summary.testsPassed === summary.testsTotal)
+    ? "pass"
+    : "fail";
 }
 
 function applyAgentTestProgressObservation(tracker, observation) {
