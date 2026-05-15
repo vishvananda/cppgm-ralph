@@ -944,6 +944,7 @@ function deriveTestStatusFromCommand(record) {
   const failingStage = firstFailureLine?.match(/^(pa\d+)\//)?.[1] ?? null;
   const failingIndex = failingStage ? stageNames.indexOf(failingStage) : -1;
   const stageCount = stageNames.length;
+  const canInferPassingThrough = isContiguousStagePrefix(stageNames);
   const stages = stageSections.map((stage, index) => {
     const failed = countStageFailureLines(stage.body);
     return {
@@ -956,6 +957,11 @@ function deriveTestStatusFromCommand(record) {
     };
   });
   const stagesPassed = stages.filter(stage => stage.status === "pass").length;
+  const passingThrough = canInferPassingThrough && summary.allTestsPassed
+    ? stageNames.at(-1) ?? null
+    : canInferPassingThrough && failingIndex > 0
+      ? stageNames[failingIndex - 1]
+      : null;
 
   return {
     recordedAt: record.recordedAt,
@@ -967,6 +973,7 @@ function deriveTestStatusFromCommand(record) {
     stageCount,
     stagesPassed,
     failingStage,
+    passingThrough,
     firstFailureLine,
     stages,
   };
@@ -1022,6 +1029,18 @@ function parseOptionalInt(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isContiguousStagePrefix(stageNames) {
+  if (!Array.isArray(stageNames) || stageNames.length === 0) {
+    return false;
+  }
+  return stageNames.every((stageName, index) => stageNumber(stageName) === index + 1);
+}
+
+function stageNumber(stageName) {
+  const match = String(stageName ?? "").match(/^pa(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
 function buildAgentTestProgressState(records) {
   const tracker = {
     stageTotals: new Map(),
@@ -1066,6 +1085,21 @@ function parseAgentTestCommand(command) {
     };
   }
 
+  match = text.match(/\bmake\b[\s\S]*?\btest-report\b/);
+  if (match) {
+    const stages = parseActiveTestReportStages(text);
+    if (stages.length > 0) {
+      const lastStage = stages.at(-1);
+      return {
+        kind: "selected",
+        stage: lastStage,
+        stageNumber: stageNumber(lastStage),
+        stages,
+        target: `test-report ${stages.join(" ")}`,
+      };
+    }
+  }
+
   match = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
   if (!match) {
     return null;
@@ -1077,6 +1111,12 @@ function parseAgentTestCommand(command) {
     stageNumber: number,
     target: `test-pa${number}`,
   };
+}
+
+function parseActiveTestReportStages(text) {
+  const match = text.match(/\bACTIVE_TEST_REPORT_PAS\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/);
+  const raw = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
+  return [...raw.matchAll(/\bpa\d+\b/g)].map((stage) => stage[0]);
 }
 
 function deriveAgentTestProgress(record, commandInfo, tracker) {
@@ -1094,6 +1134,26 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   const direct = stageProgress.get(commandInfo.stage);
   if (direct?.total > 0) {
     return buildAgentTestProgressObservation(record, commandInfo, direct);
+  }
+
+  if (commandInfo.kind === "selected") {
+    const selectedProgress = (commandInfo.stages ?? [])
+      .map((stage) => stageProgress.get(stage))
+      .filter((progress) => progress?.total > 0);
+    const selected =
+      selectedProgress.find((progress) => progress.status === "fail") ??
+      selectedProgress.at(-1);
+    if (selected) {
+      return buildAgentTestProgressObservation(
+        record,
+        {
+          ...commandInfo,
+          stage: selected.stage,
+          stageNumber: stageNumber(selected.stage),
+        },
+        selected,
+      );
+    }
   }
 
   if (commandInfo.kind !== "through") {

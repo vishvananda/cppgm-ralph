@@ -2,6 +2,10 @@ Read AGENTS.md and follow it exactly. Examine the repository before editing so y
 
 Work on `{{testStage}}`. Get `{{testCommand}}` to fully pass before returning, while preserving behavior for earlier stages.
 
+## Current State
+
+{{currentState}}
+
 Prefer efficient, shared implementation. Keep file sizes reasonable, put reusable code in `dev/src/`, and avoid copying logic between assignments.
 
 Do not use shortcuts, test-specific hacks, or superficial workarounds. Fix the underlying issue in the implementation, and preserve the intended architecture.

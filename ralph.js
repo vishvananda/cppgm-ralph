@@ -24,6 +24,10 @@ Follow the checked-in tests and assignment instructions, even when they differ f
 Ralph is using \`{{testCommand}}\` as the test command for this loop. The configured command template is \`{{testCommandTemplate}}\`.
 For assignment-specific work, get \`{{testCommand}}\` to fully pass before returning.
 
+## Current State
+
+{{currentState}}
+
 Make the implementation efficient. Minimize duplicated code. Put shared code in \`dev/src/\` and reuse it as much as practical.
 
 Commit cohesive progress as you go rather than waiting for a single end-of-assignment commit. Before handing control back, ensure intended work is committed and \`git status --short\` is empty.`;
@@ -314,8 +318,13 @@ async function main() {
 }
 
 function buildInitialPrompt(testStatus, gitStatus, turnNumber = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
+  if (defaultPromptHasCurrentState()) {
+    return defaultPrompt;
+  }
+
   return [
-    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
+    defaultPrompt,
     "",
     ...buildFailureSummaryLines(testStatus),
     "",
@@ -324,11 +333,16 @@ function buildInitialPrompt(testStatus, gitStatus, turnNumber = null) {
 }
 
 function buildContinuePrompt(testStatus, gitStatus, turnNumber = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
+  if (defaultPromptHasCurrentState()) {
+    return defaultPrompt;
+  }
+
   const objectiveLines = buildContinueObjectiveLines(testStatus);
   const failureSummaryLines = buildFailureSummaryLines(testStatus);
 
   return [
-    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
+    defaultPrompt,
     "",
     ...objectiveLines,
     gitStatus.clean
@@ -342,8 +356,13 @@ function buildContinuePrompt(testStatus, gitStatus, turnNumber = null) {
 }
 
 function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
+  if (defaultPromptHasCurrentState()) {
+    return defaultPrompt;
+  }
+
   return [
-    buildDefaultPrompt({ testStatus, gitStatus, turnNumber }),
+    defaultPrompt,
     "",
     "The tests now pass, but the worktree is not clean yet.",
     "Commit the intended changes now so `git status --short` is empty before handing control back.",
@@ -419,11 +438,19 @@ function buildFailureSummaryLines(testStatus) {
 }
 
 function buildDefaultPrompt({ testStatus, gitStatus, turnNumber = null }) {
-  const template = PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
+  const template = getDefaultPromptTemplate();
   return renderTemplateContent(
     template,
     buildTemplateContext({ testStatus, gitStatus, turnNumber }),
   );
+}
+
+function getDefaultPromptTemplate() {
+  return PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
+}
+
+function defaultPromptHasCurrentState() {
+  return /\{\{\s*currentState\s*\}\}/.test(getDefaultPromptTemplate());
 }
 
 function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
@@ -432,6 +459,14 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
   const continueObjectiveLines = buildContinueObjectiveLines(testStatus);
   const failureSummaryLines = buildFailureSummaryLines(testStatus);
   const goalTaskLines = buildLoopGoalTaskLines({ testStatus, gitStatus });
+  const currentStateLines = buildCurrentStateLines({
+    testStatus,
+    gitStatus,
+    turnNumber,
+    continueObjectiveLines,
+    failureSummaryLines,
+    gitStatusLines,
+  });
 
   return {
     defaultPrompt: DEFAULT_PROMPT,
@@ -455,6 +490,7 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
     gitStatus: gitStatusLines.join("\n"),
     gitStatusBlock: gitStatusLines.join("\n"),
     gitStatusOutput: gitStatus.clean ? "empty" : trimmedOutput(gitStatus.output),
+    currentState: currentStateLines.join("\n"),
     worktreeHandoff: gitStatus.clean
       ? "The worktree is currently clean."
       : "Your previous turn left a dirty worktree. Commit intended changes before returning control.",
@@ -475,6 +511,63 @@ function renderTemplateContent(template, context) {
       context[key] == null ? "" : String(context[key]),
     ),
   );
+}
+
+function buildCurrentStateLines({
+  testStatus,
+  gitStatus,
+  turnNumber = null,
+  continueObjectiveLines = null,
+  failureSummaryLines = null,
+  gitStatusLines = null,
+}) {
+  const lines = [];
+  const objectiveLines = continueObjectiveLines ?? buildContinueObjectiveLines(testStatus);
+  const summaryLines = failureSummaryLines ?? buildFailureSummaryLines(testStatus);
+  const statusLines = gitStatusLines ?? buildGitStatusLines(gitStatus);
+
+  if (turnNumber != null) {
+    lines.push(`- Ralph turn: ${turnNumber}`);
+  }
+  lines.push(
+    `- Run: ${CONFIG.runName}`,
+    `- Workdir: \`${CONFIG.workdir}\``,
+  );
+  if (testStatus?.targetStage) {
+    lines.push(`- Current stage: \`${testStatus.targetStage}\``);
+  }
+  lines.push(`- Required command: \`${getTestStatusCommand(testStatus)}\``);
+
+  if (objectiveLines.length > 0) {
+    lines.push("", "Current task:", ...objectiveLines.map((line) => `- ${line}`));
+  }
+
+  lines.push(
+    "",
+    `Latest test status: ${formatTestStatusSummary(testStatus)}`,
+  );
+  if (testStatus?.stages?.length) {
+    lines.push(`Stage breakdown: ${formatStageBreakdown(testStatus)}`);
+  }
+  if (testStatus?.firstFailureLine) {
+    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
+  }
+  if (testStatus?.regressions?.length) {
+    lines.push(`Regressions: ${formatStageList(testStatus.regressions)}`);
+  }
+
+  lines.push(
+    `Last full test output: \`${path.join(CONFIG.stateDir, "last-test.log")}\``,
+    "",
+    "Repository status:",
+    ...statusLines,
+  );
+
+  if (summaryLines.length > 0) {
+    lines.push("", "Detailed latest state:", ...summaryLines);
+  }
+
+  return lines;
 }
 
 function normalizeRenderedPrompt(value) {
@@ -506,10 +599,15 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
 
   const failingIndex = stages.findIndex((stage) => stage.status === "fail");
   const failingStage = failingIndex >= 0 ? stages[failingIndex].name : null;
+  const stageNames = stages.map((stage) => stage.name);
+  const canInferPassingThrough = isContiguousStagePrefix(stageNames);
   const passingThrough =
-    failingIndex > 0
+    canInferPassingThrough && failingIndex > 0
       ? stages[failingIndex - 1].name
-      : failingIndex < 0 && stages.length > 0 && stages.every((stage) => stage.status === "pass")
+      : canInferPassingThrough &&
+          failingIndex < 0 &&
+          stages.length > 0 &&
+          stages.every((stage) => stage.status === "pass")
         ? stages[stages.length - 1].name
         : null;
 
@@ -581,6 +679,18 @@ function parseOptionalCount(value) {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isContiguousStagePrefix(stageNames) {
+  if (!Array.isArray(stageNames) || stageNames.length === 0) {
+    return false;
+  }
+  return stageNames.every((stageName, index) => stageNumber(stageName) === index + 1);
+}
+
+function stageNumber(stageName) {
+  const match = String(stageName ?? "").match(/^pa(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : null;
 }
 
 function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
@@ -1017,16 +1127,32 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
 }
 
 function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
+  const stage = testStatus?.failingStage ?? testStatus?.targetStage ?? "";
+  const command = stage ? buildTestCommandForStage(stage) : getTestStatusCommand(testStatus);
   const lines = [
-    `Ralph loop ${turnNumber}: make progress on ${CONFIG.runName}.`,
-    "Follow AGENTS.md and the checked-in assignment instructions.",
+    `Ralph loop ${turnNumber} for ${CONFIG.runName}.`,
+    "",
+    "This goal is the completion gate only. Follow the accompanying turn prompt for all implementation, architecture, planning, testing, and cleanup requirements.",
+    "",
   ];
 
-  lines.push(...buildLoopGoalTaskLines({ testStatus, gitStatus }));
-  if (!(testStatus.exitCode === 0 && !gitStatus.clean)) {
+  if (stage) {
+    lines.push(`Current stage: ${stage}.`);
+  }
+
+  lines.push("Completion criteria:");
+  if (testStatus.exitCode === 0 && !gitStatus.clean) {
     lines.push(
-      "Commit cohesive progress as you go; do not wait for one end-of-assignment commit.",
-      "Before handing control back, ensure all intended work is committed and `git status --short` is empty.",
+      `- \`${command}\` remains passing.`,
+      "- Intended changes are committed.",
+      "- `git status --short` is empty before handing control back.",
+    );
+  } else {
+    lines.push(
+      `- \`${command}\` fully passes.`,
+      "- Previous stages do not regress.",
+      "- Intended changes are committed.",
+      "- `git status --short` is empty before handing control back.",
     );
   }
 
@@ -1473,6 +1599,9 @@ async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
       if (record?.type !== "event_msg" || record.payload?.type !== "task_complete") {
         continue;
       }
+      if (!hasFinalAgentMessage(record.payload)) {
+        continue;
+      }
       const timestampMs = Date.parse(record.timestamp ?? "");
       if (!Number.isFinite(timestampMs) || timestampMs >= startedAtMs - 5000) {
         return true;
@@ -1487,6 +1616,11 @@ async function findCodexSessionFiles(threadId) {
   const matches = [];
   await walkCodexSessionFiles(sessionsDir, matches, threadId, 0);
   return matches.sort();
+}
+
+function hasFinalAgentMessage(payload) {
+  const message = payload?.last_agent_message;
+  return typeof message === "string" && message.trim().length > 0;
 }
 
 async function walkCodexSessionFiles(directory, matches, threadId, depth) {

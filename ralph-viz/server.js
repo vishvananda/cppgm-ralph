@@ -149,14 +149,15 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
   const allTestsPassed =
     summary.allTestsPassed ||
     (existingStatus.exitCode === 0 && summary.testsPassed === summary.testsTotal);
+  const canInferPassingThrough = isContiguousStagePrefix(stageNames);
   const stagesPassed = allTestsPassed
     ? stageNames.length
     : failingIndex > 0
       ? failingIndex
       : 0;
-  const passingThrough = allTestsPassed
+  const passingThrough = canInferPassingThrough && allTestsPassed
     ? stageNames.at(-1) ?? existingStatus.targetStage ?? null
-    : failingIndex > 0
+    : canInferPassingThrough && failingIndex > 0
       ? stageNames[failingIndex - 1]
       : null;
   const stages = stageSections.map((stage, index) => {
@@ -234,6 +235,18 @@ function parseOptionalInt(value) {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isContiguousStagePrefix(stageNames) {
+  if (!Array.isArray(stageNames) || stageNames.length === 0) {
+    return false;
+  }
+  return stageNames.every((stageName, index) => stageNumber(stageName) === index + 1);
+}
+
+function stageNumber(stageName) {
+  const match = String(stageName ?? "").match(/^pa(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : null;
 }
 
 function inferThreadIdFromRun(filePath, events) {
