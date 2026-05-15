@@ -9,7 +9,7 @@ const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
 
 const AUTO_REFRESH_MS = 2500;
-const BOTTOM_STICKY_PX = 160;
+const BOTTOM_STICKY_PX = 32;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -26,6 +26,7 @@ const state = {
   autoRefreshTimer: null,
   refreshInFlight: false,
   openEntryKeys: new Set(),
+  userScrollVersion: 0,
 };
 
 // Noise event types that clutter the view
@@ -34,6 +35,10 @@ const NOISE_TYPES = new Set([
   "item.started", "error", "codex.session.token_count", "ralph.test-status",
   // Gemini streaming noise
   "content", "finished", "model_info", "tool_call_response",
+]);
+
+const SCROLL_KEYS = new Set([
+  "ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " ",
 ]);
 
 function fmt(time) {
@@ -1065,7 +1070,6 @@ function renderTimeline(records) {
   const options = renderTimeline.pendingOptions ?? {};
   renderTimeline.pendingOptions = {};
   rememberOpenEntryKeys();
-  timelineEl.innerHTML = "";
   const usageMap = buildUsageMap(records);
   const testMap = buildTestStatusMap(records);
   const durationMap = buildTurnDurationMap(records);
@@ -1096,6 +1100,7 @@ function renderTimeline(records) {
     setUrlParam("turns", urlTurns.join(","));
   }
   const hasUrlTurns = urlTurns.length > 0;
+  const fragment = document.createDocumentFragment();
 
   for (const turn of sortedTurns) {
     const items = turnMap.get(turn) ?? [];
@@ -1131,8 +1136,9 @@ function renderTimeline(records) {
       if (el) feed.append(el);
     }
     details.append(feed);
-    timelineEl.append(details);
+    fragment.append(details);
   }
+  timelineEl.replaceChildren(fragment);
 }
 
 function rememberOpenEntryKeys() {
@@ -1212,7 +1218,10 @@ async function loadRuns(options = {}) {
     : state.currentRun && state.runs.some(r => r.id === state.currentRun) ? state.currentRun
     : state.runs[0].id;
   runSelect.value = preferred;
-  await loadRun(preferred, { stickToBottom: options.stickToBottom });
+  await loadRun(preferred, {
+    stickToBottom: options.stickToBottom,
+    scrollSnapshot: options.scrollSnapshot,
+  });
 }
 
 async function loadRun(id, options = {}) {
@@ -1227,34 +1236,69 @@ async function loadRun(id, options = {}) {
   state.events = data.events ?? [];
   state.raw = state.events.slice();
   renderSummary(state.events);
-  renderTimeline.pendingOptions = { openLatestTurn: options.stickToBottom };
+  const scrollSnapshot = options.scrollSnapshot
+    ?? (options.stickToBottom ? captureScrollSnapshot({ forceStickToBottom: true }) : null);
+  renderTimeline.pendingOptions = { openLatestTurn: scrollSnapshot?.stickToBottom ?? false };
   renderTimeline(state.events);
-  if (options.stickToBottom) {
-    scrollToBottom();
-  }
+  restoreScrollAfterRender(scrollSnapshot);
 }
 
 function isAutoRefreshEnabled() {
   return autoRefreshToggle?.checked ?? false;
 }
 
-function isNearBottom() {
-  const root = scrollingRoot();
-  return root.scrollTop + root.clientHeight >= root.scrollHeight - BOTTOM_STICKY_PX;
+function captureScrollSnapshot(options = {}) {
+  const metrics = getScrollMetrics();
+  return {
+    scrollTop: metrics.scrollTop,
+    stickToBottom: options.forceStickToBottom || metrics.distanceFromBottom <= BOTTOM_STICKY_PX,
+    userScrollVersion: state.userScrollVersion,
+  };
 }
 
-function scrollToBottom() {
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const root = scrollingRoot();
-      const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
-      if (typeof root.scrollTo === "function") {
-        root.scrollTo({ top: maxTop, behavior: "auto" });
-      } else {
-        root.scrollTop = maxTop;
-      }
-    });
+function restoreScrollAfterRender(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+  afterNextPaint(() => {
+    if (snapshot.userScrollVersion !== state.userScrollVersion) {
+      return;
+    }
+    if (snapshot.stickToBottom) {
+      scrollToBottomNow();
+      return;
+    }
+    const root = scrollingRoot();
+    const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    root.scrollTop = Math.min(snapshot.scrollTop, maxTop);
   });
+}
+
+function afterNextPaint(callback) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(callback);
+  });
+}
+
+function scrollToBottomNow() {
+  const root = scrollingRoot();
+  const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  if (typeof root.scrollTo === "function") {
+    root.scrollTo({ top: maxTop, behavior: "auto" });
+  } else {
+    root.scrollTop = maxTop;
+  }
+}
+
+function getScrollMetrics() {
+  const root = scrollingRoot();
+  const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  const scrollTop = Math.min(Math.max(0, root.scrollTop), maxTop);
+  return {
+    scrollTop,
+    maxTop,
+    distanceFromBottom: Math.max(0, maxTop - scrollTop),
+  };
 }
 
 function scrollingRoot() {
@@ -1276,22 +1320,26 @@ function stopAutoRefresh() {
   }
 }
 
+function markUserScrollIntent() {
+  state.userScrollVersion += 1;
+}
+
 async function refreshActiveRun() {
   if (!isAutoRefreshEnabled() || state.refreshInFlight) {
     return;
   }
   state.refreshInFlight = true;
   try {
-    const stickToBottom = isNearBottom();
+    const scrollSnapshot = captureScrollSnapshot();
     const stateData = await fetch("/api/state").then(r => r.json());
     const currentRun = stateData.currentThread ?? null;
     state.currentRun = currentRun;
     if (currentRun && currentRun !== state.selectedRun) {
-      await loadRuns({ preferredRun: currentRun, ignoreUrl: true, stickToBottom });
+      await loadRuns({ preferredRun: currentRun, ignoreUrl: true, scrollSnapshot });
     } else if (state.selectedRun) {
-      await loadRun(state.selectedRun, { stickToBottom });
+      await loadRun(state.selectedRun, { scrollSnapshot });
     } else {
-      await loadRuns({ stickToBottom });
+      await loadRuns({ scrollSnapshot });
     }
   } catch (error) {
     console.error("auto-refresh failed", error);
@@ -1307,6 +1355,14 @@ reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
 runSelect.addEventListener("change", e => loadRun(e.target.value));
 eventFilter.addEventListener("input", () => renderTimeline(state.events));
 hideNoiseToggle.addEventListener("change", () => renderTimeline(state.events));
+window.addEventListener("wheel", markUserScrollIntent, { passive: true });
+window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
+window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+window.addEventListener("keydown", (event) => {
+  if (SCROLL_KEYS.has(event.key)) {
+    markUserScrollIntent();
+  }
+});
 if (autoRefreshToggle) {
   autoRefreshToggle.addEventListener("change", () => {
     renderTimeline(state.events);
