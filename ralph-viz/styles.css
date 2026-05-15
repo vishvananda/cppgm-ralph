@@ -74,6 +74,7 @@ button:hover { background: #252525; }
 .summary-wide {
   flex-basis: 100%;
 }
+.summary-progress { color: #d0a64a; }
 
 /* Timeline */
 .timeline { display: grid; gap: 0.2rem; }
@@ -105,6 +106,7 @@ button:hover { background: #252525; }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
 .turn-duration { color: #777; font-size: 0.78rem; }
+.turn-progress { color: #d0a64a; font-size: 0.78rem; }
 .turn-tests { color: #b08030; font-size: 0.78rem; }
 .turn-tests-pass { color: #4a4; }
 .turn-usage {

@@ -99,6 +99,7 @@ function buildSummary(events) {
     first, last,
     tokenUsage: latestCumulativeUsage(events),
     priceModel: inferPriceModel(),
+    testProgress: buildAgentTestProgressState(events),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
@@ -121,6 +122,7 @@ function renderSummary(events) {
   const costText = s.tokenUsage
     ? costEstimateText(s.tokenUsage, s.priceModel, { includeModel: true })
     : '<span class="muted">n/a</span>';
+  const progressText = latestProgressSummaryHtml(s.testProgress.latest);
 
   summaryEl.innerHTML = `
     <div><strong>thread</strong>${truncate(s.threadId, 24)}</div>
@@ -128,6 +130,7 @@ function renderSummary(events) {
     <div><strong>turns</strong>${s.turns}</div>
     <div><strong>started</strong>${fmt(s.first)}</div>
     <div><strong>latest</strong>${fmt(s.last)}</div>
+    <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
     <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
     <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
@@ -1019,6 +1022,310 @@ function parseOptionalInt(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function buildAgentTestProgressState(records) {
+  const tracker = {
+    stageTotals: new Map(),
+    stageBest: new Map(),
+    latest: null,
+  };
+  const byTurn = new Map();
+
+  for (const record of records) {
+    const item = record.event?.item;
+    if (record.eventType !== "item.completed" || item?.type !== "command_execution") {
+      continue;
+    }
+
+    const commandInfo = parseAgentTestCommand(item.command ?? "");
+    if (!commandInfo) {
+      continue;
+    }
+
+    const observation = deriveAgentTestProgress(record, commandInfo, tracker);
+    if (!observation) {
+      continue;
+    }
+
+    const progress = applyAgentTestProgressObservation(tracker, observation);
+    byTurn.set(progress.turn, progress);
+  }
+
+  return { byTurn, latest: tracker.latest };
+}
+
+function parseAgentTestCommand(command) {
+  const text = unwrapCommand(command).replace(/\s+\(continued session \d+\)\s*$/, "");
+  let match = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
+  if (match) {
+    const number = Number.parseInt(match[1], 10);
+    return {
+      kind: "through",
+      stage: `pa${number}`,
+      stageNumber: number,
+      target: `test-report-through-pa${number}`,
+    };
+  }
+
+  match = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
+  if (!match) {
+    return null;
+  }
+  const number = Number.parseInt(match[1], 10);
+  return {
+    kind: "single",
+    stage: `pa${number}`,
+    stageNumber: number,
+    target: `test-pa${number}`,
+  };
+}
+
+function deriveAgentTestProgress(record, commandInfo, tracker) {
+  const item = record.event?.item ?? {};
+  const output = cleanText(item.aggregated_output);
+  if (!output) {
+    return null;
+  }
+
+  const stageProgress = parseStageProgressFromAgentOutput(output, commandInfo.stage);
+  for (const progress of stageProgress.values()) {
+    updateKnownStageTotal(tracker, progress.stage, progress.total);
+  }
+
+  const direct = stageProgress.get(commandInfo.stage);
+  if (direct?.total > 0) {
+    return buildAgentTestProgressObservation(record, commandInfo, direct);
+  }
+
+  if (commandInfo.kind !== "through") {
+    return null;
+  }
+
+  const summary = parseTestReportSummary(output);
+  if (!summary) {
+    return null;
+  }
+  const priorTotal = knownPriorStageTotal(tracker, commandInfo.stageNumber);
+  if (priorTotal == null) {
+    return null;
+  }
+
+  const passed = Math.max(0, summary.testsPassed - priorTotal);
+  const total = Math.max(passed, summary.testsTotal - priorTotal);
+  if (total <= 0) {
+    return null;
+  }
+
+  return buildAgentTestProgressObservation(record, commandInfo, {
+    stage: commandInfo.stage,
+    passed,
+    total,
+    status: summary.allTestsPassed || (item.exit_code === 0 && passed === total) ? "pass" : "fail",
+  });
+}
+
+function buildAgentTestProgressObservation(record, commandInfo, progress) {
+  return {
+    stage: commandInfo.stage,
+    stageNumber: commandInfo.stageNumber,
+    commandKind: commandInfo.kind,
+    commandTarget: commandInfo.target,
+    turn: displayTurnForRecord(record),
+    recordedAt: record.recordedAt,
+    status: progress.status,
+    passed: Math.max(0, progress.passed ?? 0),
+    total: Math.max(0, progress.total ?? 0),
+  };
+}
+
+function applyAgentTestProgressObservation(tracker, observation) {
+  updateKnownStageTotal(tracker, observation.stage, observation.total);
+
+  const knownTotal = Math.max(observation.total, tracker.stageTotals.get(observation.stage) ?? 0);
+  const current = {
+    passed: Math.min(observation.passed, knownTotal || observation.passed),
+    total: knownTotal,
+  };
+  const previousBest = tracker.stageBest.get(observation.stage);
+  const best =
+    !previousBest || current.passed >= previousBest.passed
+      ? { ...current, recordedAt: observation.recordedAt }
+      : previousBest;
+  const normalizedBest = {
+    ...best,
+    total: Math.max(best.total ?? 0, knownTotal),
+  };
+
+  tracker.stageBest.set(observation.stage, normalizedBest);
+  const progress = {
+    ...observation,
+    current,
+    best: normalizedBest,
+  };
+  tracker.latest = progress;
+  return progress;
+}
+
+function updateKnownStageTotal(tracker, stage, total) {
+  if (!stage || !Number.isFinite(total) || total <= 0) {
+    return;
+  }
+  const previous = tracker.stageTotals.get(stage) ?? 0;
+  if (total > previous) {
+    tracker.stageTotals.set(stage, total);
+  }
+}
+
+function knownPriorStageTotal(tracker, stageNumber) {
+  let total = 0;
+  for (let number = 1; number < stageNumber; number += 1) {
+    const stageTotal = tracker.stageTotals.get(`pa${number}`);
+    if (!Number.isFinite(stageTotal) || stageTotal <= 0) {
+      return null;
+    }
+    total += stageTotal;
+  }
+  return total;
+}
+
+function parseStageProgressFromAgentOutput(output, fallbackStage) {
+  const stages = new Map();
+  let sectionStage = fallbackStage;
+
+  for (const line of output.split(/\r?\n/)) {
+    const header = line.match(/^===== (pa\d+) =====$/);
+    if (header) {
+      sectionStage = header[1];
+      continue;
+    }
+
+    let match = line.match(/^(.+?): running (\d+) tests$/);
+    if (match) {
+      setStageTargetProgress(stages, {
+        target: match[1],
+        sectionStage,
+        fallbackStage,
+        passed: 0,
+        total: Number.parseInt(match[2], 10),
+        status: "running",
+      });
+      continue;
+    }
+
+    match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
+    if (match) {
+      setStageTargetProgress(stages, {
+        target: match[1],
+        sectionStage,
+        fallbackStage,
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "pass",
+      });
+      continue;
+    }
+
+    match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/);
+    if (match) {
+      setStageTargetProgress(stages, {
+        target: match[1],
+        sectionStage,
+        fallbackStage,
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+      });
+      continue;
+    }
+
+    match = line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
+    if (match) {
+      setStageTargetProgress(stages, {
+        target: match[1],
+        sectionStage,
+        fallbackStage,
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+      });
+    }
+  }
+
+  const progress = new Map();
+  for (const [stage, state] of stages.entries()) {
+    const targets = [...state.targets.values()];
+    const passed = targets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
+    const total = targets.reduce((sum, target) => sum + (target.total ?? 0), 0);
+    const failed = targets.some((target) => target.status === "fail");
+    const allPassed = targets.length > 0 && targets.every((target) => target.status === "pass");
+    progress.set(stage, {
+      stage,
+      passed,
+      total,
+      status: failed ? "fail" : allPassed ? "pass" : "running",
+    });
+  }
+  return progress;
+}
+
+function setStageTargetProgress(stages, options) {
+  const stage = inferProgressStage(options.target, options.sectionStage, options.fallbackStage);
+  if (!stage) {
+    return;
+  }
+  if (!stages.has(stage)) {
+    stages.set(stage, { targets: new Map() });
+  }
+  stages.get(stage).targets.set(options.target, {
+    passed: options.passed,
+    total: options.total,
+    status: options.status,
+  });
+}
+
+function inferProgressStage(target, sectionStage, fallbackStage) {
+  return target.match(/\b(pa\d+)\b/)?.[1] ?? sectionStage ?? fallbackStage ?? null;
+}
+
+function latestProgressSummaryHtml(progress) {
+  if (!progress) {
+    return '<span class="muted">n/a</span>';
+  }
+  const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
+  return [
+    `<span class="summary-progress">${escapeHtml(turnText)} ${escapeHtml(progress.stage)} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}</span>`,
+    `<span class="muted">${escapeHtml(progress.commandTarget)}</span>`,
+  ].join(" ");
+}
+
+function turnProgressText(progress) {
+  if (!progress) {
+    return "";
+  }
+  const bestText =
+    progress.best && progress.best.passed > progress.current.passed
+      ? ` best ${progressRatioText(progress.best)}`
+      : "";
+  const statusText = progress.status === "running" ? " running" : "";
+  return `${progress.stage} ${progressRatioText(progress.current)}${bestText}${statusText}`;
+}
+
+function progressRatioText(value) {
+  if (!value) {
+    return "0/?";
+  }
+  const total = value.total > 0 ? value.total : "?";
+  return `${value.passed ?? 0}/${total}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function testStatusText(ts) {
   if (!ts) return "";
   const parts = [`${ts.testsPassed}/${ts.testsTotal} tests`];
@@ -1073,6 +1380,7 @@ function renderTimeline(records) {
   const usageMap = buildUsageMap(records);
   const testMap = buildTestStatusMap(records);
   const durationMap = buildTurnDurationMap(records);
+  const progressMap = buildAgentTestProgressState(records).byTurn;
   const filtered = filterRecords(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
@@ -1083,6 +1391,11 @@ function renderTimeline(records) {
     }
   }
   for (const turn of testMap.keys()) {
+    if (!turnMap.has(turn)) {
+      turnMap.set(turn, []);
+    }
+  }
+  for (const turn of progressMap.keys()) {
     if (!turnMap.has(turn)) {
       turnMap.set(turn, []);
     }
@@ -1120,12 +1433,14 @@ function renderTimeline(records) {
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
+    const progress = progressMap.get(turn);
     const duration = durationText(durationMap.get(turn));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts)}</span>` : "";
+    const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${tsHtml}${usageHtml}`;
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${progressHtml}${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");
