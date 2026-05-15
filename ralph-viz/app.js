@@ -1849,13 +1849,8 @@ async function refreshActiveRun() {
   state.refreshInFlight = true;
   try {
     const scrollSnapshot = captureScrollSnapshot();
-    const stateData = await fetch("/api/state").then(r => r.json());
-    const currentRun = stateData.currentThread ?? null;
-    state.currentRun = currentRun;
-    if (currentRun && currentRun !== state.selectedRun) {
-      await loadRuns({ preferredRun: currentRun, ignoreUrl: true, scrollSnapshot });
-    } else if (state.selectedRun) {
-      await loadRun(state.selectedRun, { scrollSnapshot });
+    if (state.selectedRun) {
+      await loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
     } else {
       await loadRuns({ scrollSnapshot });
     }
