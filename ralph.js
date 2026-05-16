@@ -1301,7 +1301,7 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
   const lines = [
     `Ralph loop ${turnNumber} for ${CONFIG.runName}.`,
     "",
-    "This goal is the completion gate. The accompanying turn prompt is mandatory, not advisory: every explicit implementation, architecture, planning, review, cleanup, testing, and commit instruction in that prompt is part of this goal.",
+    "This goal is the completion gate. The accompanying turn prompt is mandatory, not advisory: every explicit implementation, design, validation, cleanup, documentation, and handoff instruction in that prompt is part of this goal.",
     "",
   ];
 
@@ -1321,7 +1321,7 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
     lines.push(
       `- \`${command}\` fully passes.`,
       "- Previous stages do not regress.",
-      "- All explicit requirements in the accompanying turn prompt are satisfied, including any required stage plan, Architecture Review, Final Architecture Review, cleanup/refactor pass, and retrospective.",
+      "- All explicit requirements in the accompanying turn prompt are satisfied, including any requested planning, review, cleanup, documentation, or retrospective work.",
       "- No required prompt item is skipped, weakened into a note, or deferred after the test gate passes.",
       "- Intended changes are committed.",
       "- `git status --short` is empty before handing control back.",

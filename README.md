@@ -205,8 +205,8 @@ that template with the blocking stage and uses the same command in the goal,
 prompt, and Ralph's own test run. The goal requires a full pass before
 returning, plus cohesive progress commits and a clean worktree. The generated
 goal also treats the accompanying prompt as mandatory completion criteria, so
-required plan/review/cleanup/retrospective instructions must be completed rather
-than deferred once the test gate passes.
+requested planning, review, cleanup, documentation, or retrospective work must
+be completed rather than deferred once the test gate passes.
 
 ## State files
 
