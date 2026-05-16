@@ -55,6 +55,28 @@ http://127.0.0.1:4173
 - event-level drill-down with full JSON payload
 - event-type filtering
 
+### Forking a run at a PA boundary
+
+Use `fork-run` to start a new run from the latest assignment repo plus the
+completed work from an existing run through a PA boundary:
+
+```bash
+npm run fork-run -- \
+  --source-run arch-2026-05-15 \
+  --target-run arch2-2026-05-15 \
+  --through pa8 \
+  --remote git@github.com:vishvananda/cppgm-run-arch2.git
+```
+
+The script clones `/home/vishvananda/cppgm-assignments`, cherry-picks source run
+commits through the requested PA commit, runs the rendered boundary command such
+as `make test-report-through-pa8`, writes `<target-run>.config.json`, copies the
+default prompt if needed, seeds `.ralph/<target-run>-<model>-<reasoning>/state.json`
+so Ralph starts on the next PA, and pushes when a remote is supplied.
+
+If the PA boundary cannot be inferred from commit subjects, pass an exact commit
+with `--through-ref <commit>`.
+
 Default config lives in `ralph.config.json`.
 Environment variables still override file settings.
 

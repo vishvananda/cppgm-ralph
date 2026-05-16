@@ -3,6 +3,7 @@ const refreshRuns = document.getElementById("refreshRuns");
 const reloadRun = document.getElementById("reloadRun");
 const summaryEl = document.getElementById("summary");
 const timelineEl = document.getElementById("timeline");
+const progressDock = document.getElementById("progressDock");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
@@ -55,6 +56,20 @@ function fmtShort(time) {
     : "";
 }
 
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let amount = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && amount >= 1024; i += 1) {
+    amount /= 1024;
+    unit = units[i];
+  }
+  return `${amount >= 10 ? amount.toFixed(0) : amount.toFixed(1)} ${unit}`;
+}
+
 function cleanText(text) {
   return (text ?? "").toString().trim();
 }
@@ -100,6 +115,7 @@ function buildSummary(events) {
     tokenUsage: latestCumulativeUsage(events),
     priceModel: inferPriceModel(),
     testProgress: buildAgentTestProgressState(events),
+    latestTestStatus: latestTestStatus(events),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
@@ -134,6 +150,30 @@ function renderSummary(events) {
     <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
     <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
+  `;
+  renderProgressDock(s);
+}
+
+function renderProgressDock(summary) {
+  if (!progressDock) {
+    return;
+  }
+  const run = selectedRunMeta();
+  const progress = summary?.testProgress?.latest ?? null;
+  const testStatus = summary?.latestTestStatus?.status ?? null;
+  const latest = summary?.last ? fmtShort(summary.last) : "";
+  const progressHtml = progress
+    ? `<span class="dock-main">${escapeHtml(dockProgressText(progress))}</span>`
+    : '<span class="muted">test progress n/a</span>';
+  const testHtml = testStatus
+    ? `<span class="dock-tests${testStatus.allTestsPassed ? " dock-tests-pass" : ""}">${escapeHtml(testStatusText(testStatus))}</span>`
+    : '<span class="muted">tests n/a</span>';
+  const updatedHtml = latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : "";
+  progressDock.innerHTML = `
+    <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
+    ${progressHtml}
+    ${testHtml}
+    ${updatedHtml}
   `;
 }
 
@@ -1572,6 +1612,15 @@ function latestProgressSummaryHtml(progress) {
   ].join(" ");
 }
 
+function dockProgressText(progress) {
+  if (!progress) {
+    return "";
+  }
+  const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
+  const runningText = progress.status === "running" ? " running" : "";
+  return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${runningText}`;
+}
+
 function turnProgressText(progress) {
   if (!progress) {
     return "";
@@ -1625,6 +1674,32 @@ function timeoutStatusText(ts) {
     );
   }
   return parts.join(", ");
+}
+
+function latestTestStatus(records) {
+  const testMap = buildTestStatusMap(records);
+  let latestTurn = null;
+  for (const turn of testMap.keys()) {
+    if (latestTurn == null || turnSortValue(turn) > turnSortValue(latestTurn)) {
+      latestTurn = turn;
+    }
+  }
+  return latestTurn == null ? null : { turn: latestTurn, status: testMap.get(latestTurn) };
+}
+
+function turnSortValue(turn) {
+  if (Number.isInteger(turn)) {
+    return turn;
+  }
+  if (turn === "setup") {
+    return -1;
+  }
+  const parsed = Number.parseInt(turn, 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function selectedRunMeta() {
+  return state.runs.find((run) => run.id === state.selectedRun) ?? null;
 }
 
 function turnSummaryText(items) {
@@ -1807,13 +1882,19 @@ async function loadRuns(options = {}) {
     summaryEl.innerHTML = "";
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
+    if (progressDock) {
+      progressDock.innerHTML = '<span class="muted">No runs found</span>';
+    }
     return;
   }
 
   for (const run of state.runs) {
     const opt = document.createElement("option");
     opt.value = run.id;
-    opt.textContent = `${run.label} (${run.events} events)`;
+    const size = formatBytes(run.size);
+    const updated = fmtShort(run.mtime);
+    const details = [size, updated ? `updated ${updated}` : ""].filter(Boolean).join(", ");
+    opt.textContent = details ? `${run.label} (${details})` : run.label;
     runSelect.append(opt);
   }
 
@@ -1822,7 +1903,6 @@ async function loadRuns(options = {}) {
   const preferred = options.preferredRun && state.runs.some(r => r.id === options.preferredRun) ? options.preferredRun
     : selectedRun && state.runs.some(r => r.id === selectedRun) ? selectedRun
     : urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
-    : state.currentRun && state.runs.some(r => r.id === state.currentRun) ? state.currentRun
     : state.runs[0].id;
   runSelect.value = preferred;
   await loadRun(preferred, {

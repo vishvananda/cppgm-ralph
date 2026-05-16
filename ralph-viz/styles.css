@@ -17,6 +17,7 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+  padding-bottom: 3.1rem;
 }
 
 .page {
@@ -76,6 +77,44 @@ button:hover { background: #252525; }
 }
 .summary-progress { color: #d0a64a; }
 
+.progress-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  min-height: 2.35rem;
+  padding: 0.35rem 1.5rem;
+  background: rgba(16, 16, 16, 0.96);
+  border-top: 1px solid #333;
+  box-shadow: 0 -0.25rem 0.75rem rgba(0, 0, 0, 0.35);
+  font-size: 0.78rem;
+}
+
+.progress-dock strong {
+  color: var(--accent);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-main { color: #d0a64a; }
+.dock-tests { color: #b08030; }
+.dock-tests-pass { color: var(--ok); }
+.dock-meta {
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 /* Timeline */
 .timeline { display: grid; gap: 0.2rem; }
 
@@ -119,6 +158,22 @@ button:hover { background: #252525; }
 }
 
 @media (max-width: 800px) {
+  body { padding-bottom: 4.5rem; }
+
+  .progress-dock {
+    gap: 0.35rem 0.65rem;
+    padding: 0.35rem 0.75rem;
+  }
+
+  .progress-dock strong {
+    flex-basis: 100%;
+    max-width: 100%;
+  }
+
+  .dock-meta {
+    margin-left: 0;
+  }
+
   .turn-usage {
     flex-basis: 100%;
     margin-left: 1.2rem;

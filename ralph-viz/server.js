@@ -41,6 +41,7 @@ async function listFiles() {
           id,
           label,
           filePath: path.join(eventsDir, f.name),
+          statePath: path.join(RALPH_DIR, dir.name, "state.json"),
         });
       }
     }
@@ -48,7 +49,28 @@ async function listFiles() {
     if (error?.code === "ENOENT") return [];
     throw error;
   }
-  return results.sort((a, b) => a.label.localeCompare(b.label));
+  const withStats = await Promise.all(results.map(async (entry) => {
+    const eventStat = await fs.stat(entry.filePath);
+    let stateStat = null;
+    try {
+      stateStat = await fs.stat(entry.statePath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const latestMtimeMs = Math.max(eventStat.mtimeMs, stateStat?.mtimeMs ?? 0);
+    return {
+      id: entry.id,
+      label: entry.label,
+      filePath: entry.filePath,
+      size: eventStat.size,
+      mtime: new Date(latestMtimeMs).toISOString(),
+      eventMtime: eventStat.mtime.toISOString(),
+    };
+  }));
+  return withStats.sort((a, b) => {
+    const byMtime = Date.parse(b.mtime) - Date.parse(a.mtime);
+    return byMtime || a.label.localeCompare(b.label);
+  });
 }
 
 function safeRunId(id) {
@@ -689,6 +711,7 @@ function displayTurnForRecord(record) {
 
 async function currentRunId() {
   // Look for state.json in any .ralph/*/state.json and return the matching run id
+  const candidates = [];
   try {
     const dirs = await fs.readdir(RALPH_DIR, { withFileTypes: true });
     for (const dir of dirs) {
@@ -698,12 +721,17 @@ async function currentRunId() {
         const raw = await fs.readFile(statePath, "utf8");
         const parsed = JSON.parse(raw);
         if (typeof parsed.threadId === "string") {
-          return `${dir.name}/${parsed.threadId}`;
+          const stat = await fs.stat(statePath);
+          candidates.push({
+            id: `${dir.name}/${parsed.threadId}`,
+            mtimeMs: stat.mtimeMs,
+          });
         }
       } catch (_) { /* no state file, skip */ }
     }
   } catch (_) {}
-  return null;
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.id ?? null;
 }
 
 async function sendJson(res, payload, status = 200) {
@@ -755,20 +783,13 @@ async function requestHandler(req, res) {
 
   if (pathname === "/api/runs") {
     const fileEntries = await listFiles();
-    const runs = [];
-    for (const entry of fileEntries) {
-      const events = await readRunWithCodexSession(entry.filePath);
-      const summary = buildSummary(events);
-      const stat = await fs.stat(entry.filePath);
-      runs.push({
-        id: entry.id,
-        label: entry.label,
-        size: stat.size,
-        mtime: stat.mtime.toISOString(),
-        events: events.length,
-        summary,
-      });
-    }
+    const runs = fileEntries.map((entry) => ({
+      id: entry.id,
+      label: entry.label,
+      size: entry.size,
+      mtime: entry.mtime,
+      eventMtime: entry.eventMtime,
+    }));
     return sendJson(res, { runs });
   }
 
