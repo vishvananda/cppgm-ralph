@@ -8,9 +8,11 @@ const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
+const fullViewToggle = document.getElementById("fullView");
 
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
+const COMPACT_TURN_CARD_LIMIT = 50;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -100,6 +102,7 @@ function buildSummary(events) {
   }
   const first = events.at(0)?.recordedAt ?? null;
   const last = events.at(-1)?.recordedAt ?? null;
+  const priceModel = inferPriceModel();
 
   const typeCounts = new Map();
   for (const r of events) {
@@ -113,11 +116,34 @@ function buildSummary(events) {
     turns: turnSet.size,
     first, last,
     tokenUsage: latestCumulativeUsage(events),
-    priceModel: inferPriceModel(),
+    priceModel,
+    latestTurn: latestTurnOverview(events, priceModel),
     testProgress: buildAgentTestProgressState(events),
     latestTestStatus: latestTestStatus(events),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
+}
+
+function latestTurnOverview(events, priceModel) {
+  const turn = latestNumericTurn(events);
+  if (turn == null) {
+    return null;
+  }
+  const duration = durationText(buildTurnDurationMap(events).get(turn));
+  const usage = buildUsageMap(events).get(turn);
+  const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
+  return { turn, duration, cost };
+}
+
+function latestNumericTurn(events) {
+  let latest = null;
+  for (const record of events) {
+    const turn = displayTurnForRecord(record);
+    if (Number.isInteger(turn) && (latest == null || turn > latest)) {
+      latest = turn;
+    }
+  }
+  return latest;
 }
 
 function displayTurnForRecord(record) {
@@ -161,20 +187,34 @@ function renderProgressDock(summary) {
   const run = selectedRunMeta();
   const progress = summary?.testProgress?.latest ?? null;
   const testStatus = summary?.latestTestStatus?.status ?? null;
+  const latestTurn = summary?.latestTurn ?? null;
   const latest = summary?.last ? fmtShort(summary.last) : "";
   const progressHtml = progress
     ? `<span class="dock-main">${escapeHtml(dockProgressText(progress))}</span>`
     : '<span class="muted">test progress n/a</span>';
   const testHtml = testStatus
-    ? `<span class="dock-tests${testStatus.allTestsPassed ? " dock-tests-pass" : ""}">${escapeHtml(testStatusText(testStatus))}</span>`
+    ? `<span class="dock-tests${testStatus.allTestsPassed ? " dock-tests-pass" : ""}">${escapeHtml(testStatusText(testStatus, { progress }))}</span>`
     : '<span class="muted">tests n/a</span>';
+  const turnHtml = latestTurn
+    ? `<span class="dock-turn">${escapeHtml(dockTurnText(latestTurn))}</span>`
+    : "";
   const updatedHtml = latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : "";
   progressDock.innerHTML = `
     <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
+    ${turnHtml}
     ${progressHtml}
     ${testHtml}
     ${updatedHtml}
   `;
+}
+
+function dockTurnText(turn) {
+  const parts = [`turn ${turn.turn}`];
+  if (turn.duration) {
+    parts.push(`time ${turn.duration}`);
+  }
+  parts.push(`cost ${turn.cost || "n/a"}`);
+  return parts.join(" / ");
 }
 
 // --- Display entry building (merge command start/end) ---
@@ -692,6 +732,28 @@ function renderDisplayEntry(entry) {
 
   // System / noise
   return renderSystemCard(record);
+}
+
+function isFullCardView() {
+  return fullViewToggle?.checked ?? false;
+}
+
+function displayEntryWindow(entries) {
+  if (isFullCardView() || entries.length <= COMPACT_TURN_CARD_LIMIT) {
+    return { entries, total: entries.length, hidden: 0 };
+  }
+  return {
+    entries: entries.slice(-COMPACT_TURN_CARD_LIMIT),
+    total: entries.length,
+    hidden: entries.length - COMPACT_TURN_CARD_LIMIT,
+  };
+}
+
+function turnCardWindowText(windowInfo) {
+  if (!windowInfo?.hidden) {
+    return "";
+  }
+  return `latest ${windowInfo.entries.length}/${windowInfo.total} cards`;
 }
 
 // --- Filtering ---
@@ -1630,7 +1692,7 @@ function turnProgressText(progress) {
       ? ` best ${progressRatioText(progress.best)}`
       : "";
   const statusText = progress.status === "running" ? " running" : "";
-  return `${progress.stage} ${progressRatioText(progress.current)}${bestText}${statusText}`;
+  return `${progress.stage} current ${progressRatioText(progress.current)}${bestText}${statusText}`;
 }
 
 function progressRatioText(value) {
@@ -1650,15 +1712,69 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function testStatusText(ts) {
+function testStatusText(ts, options = {}) {
   if (!ts) return "";
-  const parts = [`${ts.testsPassed}/${ts.testsTotal} tests`];
+  const currentFull = inferCurrentFullRunStatus(ts, options.progress);
+  const parts = currentFull
+    ? [
+        `full beginning ${ts.testsPassed}/${ts.testsTotal} tests`,
+        `full current ${currentFull.testsPassed}/${currentFull.testsTotal} est`,
+      ]
+    : [`full ${ts.testsPassed}/${ts.testsTotal} tests`];
   if (ts.stageCount > 0) parts.push(`${ts.stagesPassed}/${ts.stageCount} stages`);
   if (ts.failingStage) parts.push(ts.failingStage);
   else if (ts.allTestsPassed) parts.push("all pass");
   const timeoutText = timeoutStatusText(ts);
   if (timeoutText) parts.push(timeoutText);
   return parts.join(", ");
+}
+
+function inferCurrentFullRunStatus(ts, progress) {
+  const current = progress?.current;
+  if (!ts || !current || !progress.stage) {
+    return null;
+  }
+
+  const statusTime = Date.parse(ts.recordedAt ?? "");
+  const progressTime = Date.parse(progress.recordedAt ?? "");
+  if (Number.isFinite(statusTime) && Number.isFinite(progressTime) && progressTime <= statusTime) {
+    return null;
+  }
+
+  const stage = Array.isArray(ts.stages)
+    ? ts.stages.find((candidate) => candidate?.name === progress.stage)
+    : null;
+  if (!stage) {
+    return null;
+  }
+
+  const stagePassed = stagePassedCount(stage);
+  const stageTotal = finitePositiveNumber(stage.total);
+  const currentTotal = finitePositiveNumber(current.total);
+  if (stagePassed == null || stageTotal == null || currentTotal == null) {
+    return null;
+  }
+
+  const testsTotal = Math.max(0, ts.testsTotal - stageTotal + currentTotal);
+  const testsPassed = Math.min(
+    testsTotal,
+    Math.max(0, ts.testsPassed - stagePassed + (current.passed ?? 0)),
+  );
+  return { testsPassed, testsTotal };
+}
+
+function stagePassedCount(stage) {
+  if (Number.isFinite(stage?.passed) && stage.passed >= 0) {
+    return stage.passed;
+  }
+  if (Number.isFinite(stage?.total) && Number.isFinite(stage?.failed)) {
+    return Math.max(0, stage.total - stage.failed);
+  }
+  return null;
+}
+
+function finitePositiveNumber(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function timeoutStatusText(ts) {
@@ -1803,17 +1919,20 @@ function renderTimeline(records) {
     const progress = progressMap.get(turn);
     const duration = durationText(durationMap.get(turn));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
+    const displayEntries = buildDisplayEntries(items);
+    const entryWindow = displayEntryWindow(displayEntries);
+    const cardWindowText = turnCardWindowText(entryWindow);
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
-    const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts)}</span>` : "";
+    const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts, { progress })}</span>` : "";
     const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${progressHtml}${tsHtml}${usageHtml}`;
+    const cardWindowHtml = cardWindowText ? ` <span class="turn-window">${escapeHtml(cardWindowText)}</span>` : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${cardWindowHtml}${progressHtml}${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");
     feed.className = "turn-feed";
-    const displayEntries = buildDisplayEntries(items);
-    for (const entry of displayEntries) {
+    for (const entry of entryWindow.entries) {
       const el = renderDisplayEntry(entry);
       if (el) feed.append(el);
     }
@@ -2037,6 +2156,9 @@ reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
 runSelect.addEventListener("change", e => loadRun(e.target.value));
 eventFilter.addEventListener("input", () => renderTimeline(state.events));
 hideNoiseToggle.addEventListener("change", () => renderTimeline(state.events));
+if (fullViewToggle) {
+  fullViewToggle.addEventListener("change", () => renderTimeline(state.events));
+}
 window.addEventListener("wheel", markUserScrollIntent, { passive: true });
 window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
 window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
