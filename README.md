@@ -86,6 +86,20 @@ The script expects a working Codex CLI environment. In practice that means:
 - an API key is already configured for Codex, such as `OPENAI_API_KEY` or
   `CODEX_API_KEY`
 
+### Example CPPGM run config
+
+The repo includes an example of the current CPPGM assignment-run setup:
+
+- `examples/cppgm-run.config.json`
+- `examples/cppgm-run.default.md`
+
+Copy those files next to each other, adjust `workdir`, `baseDir`,
+`stateBaseDir`, and `name`, then run:
+
+```bash
+RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
+```
+
 ## Config
 
 - `model`

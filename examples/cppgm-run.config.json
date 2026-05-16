@@ -1,0 +1,20 @@
+{
+  "baseDir": "/work",
+  "workdir": "/work/cppgm-run",
+  "useExistingWorkdir": true,
+  "name": "cppgm-run",
+  "testCommand": "make test-report-through-paX",
+  "maxTurns": 30,
+  "stateBaseDir": "/work/.ralph",
+  "model": "gpt-5.5",
+  "reasoningEffort": "xhigh",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "additionalDirectories": [],
+  "outputTailChars": 20000,
+  "codexPath": "codex",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null
+}
