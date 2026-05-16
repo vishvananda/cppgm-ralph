@@ -1794,13 +1794,54 @@ function timeoutStatusText(ts) {
 
 function latestTestStatus(records) {
   const testMap = buildTestStatusMap(records);
-  let latestTurn = null;
-  for (const turn of testMap.keys()) {
-    if (latestTurn == null || turnSortValue(turn) > turnSortValue(latestTurn)) {
-      latestTurn = turn;
+  let selectedTurn = null;
+  let selectedStatus = null;
+  for (const [turn, status] of testMap.entries()) {
+    // Keep the overall header anchored to the widest report; narrow in-turn
+    // commands are still reflected through the current-stage progress estimate.
+    if (
+      !selectedStatus ||
+      compareOverallTestStatus(status, selectedStatus, turn, selectedTurn) > 0
+    ) {
+      selectedTurn = turn;
+      selectedStatus = status;
     }
   }
-  return latestTurn == null ? null : { turn: latestTurn, status: testMap.get(latestTurn) };
+  return selectedStatus == null ? null : { turn: selectedTurn, status: selectedStatus };
+}
+
+function compareOverallTestStatus(a, b, aTurn, bTurn) {
+  const stageDelta = statusStageCount(a) - statusStageCount(b);
+  if (stageDelta !== 0) {
+    return stageDelta;
+  }
+  const totalDelta = statusTestTotal(a) - statusTestTotal(b);
+  if (totalDelta !== 0) {
+    return totalDelta;
+  }
+  const timeDelta = statusRecordedAtValue(a) - statusRecordedAtValue(b);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+  return turnSortValue(aTurn) - turnSortValue(bTurn);
+}
+
+function statusStageCount(status) {
+  if (Number.isFinite(status?.stageCount) && status.stageCount >= 0) {
+    return status.stageCount;
+  }
+  return Array.isArray(status?.stages) ? status.stages.length : 0;
+}
+
+function statusTestTotal(status) {
+  return Number.isFinite(status?.testsTotal) && status.testsTotal >= 0
+    ? status.testsTotal
+    : 0;
+}
+
+function statusRecordedAtValue(status) {
+  const value = Date.parse(status?.recordedAt ?? "");
+  return Number.isFinite(value) ? value : 0;
 }
 
 function turnSortValue(turn) {
