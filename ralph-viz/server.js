@@ -138,11 +138,9 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
     return null;
   }
 
-  const firstFailureLine = output
-    .split(/\r?\n/)
-    .find((line) => /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match/.test(line)) ?? null;
+  const firstFailureLine = findFirstFailureLine(output) ?? null;
   const failingStage =
-    firstFailureLine?.match(/^(pa\d+)\//)?.[1] ??
+    inferFailureStage(firstFailureLine, stageSections) ??
     existingStatus.failingStage ??
     null;
   const failingIndex = failingStage ? stageNames.indexOf(failingStage) : -1;
@@ -161,16 +159,25 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
       ? stageNames[failingIndex - 1]
       : null;
   const stages = stageSections.map((stage, index) => {
-    const failed = countStageFailureLines(stage.body);
+    const failureLines = extractStageFailureLines(stage.body);
+    const failed = failureLines.length;
     return {
       name: stage.name,
       status: allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown",
       passed: 0,
       total: 0,
       failed,
+      timeouts: failureLines.filter((line) => classifyFailureLine(line) === "timeout").length,
+      timeoutExpectations: failureLines.filter((line) => classifyFailureLine(line) === "timeout_expected").length,
       targets: [],
     };
   });
+  const timeoutFailures = stages.length
+    ? stages.reduce((sum, stage) => sum + (stage.timeouts ?? 0), 0)
+    : (existingStatus.timeoutFailures ?? 0);
+  const timeoutExpectationFailures = stages.length
+    ? stages.reduce((sum, stage) => sum + (stage.timeoutExpectations ?? 0), 0)
+    : (existingStatus.timeoutExpectationFailures ?? 0);
 
   return {
     allTestsPassed,
@@ -181,6 +188,9 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
     failingStage: allTestsPassed ? null : failingStage,
     passingThrough,
     firstFailureLine: firstFailureLine ?? existingStatus.firstFailureLine ?? null,
+    firstFailureKind: classifyFailureLine(firstFailureLine ?? existingStatus.firstFailureLine),
+    timeoutFailures,
+    timeoutExpectationFailures,
     stages: stages.length ? stages : existingStatus.stages,
   };
 }
@@ -197,11 +207,53 @@ function parseStageSections(output) {
 }
 
 function countStageFailureLines(body) {
-  return body
-    .split(/\r?\n/)
-    .filter((line) =>
-      /^(?:pa\d+\/|pa\d+\/\.\.\/).+?: (?:ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match)/.test(line),
-    ).length;
+  return extractStageFailureLines(body).length;
+}
+
+function extractStageFailureLines(body) {
+  return body.split(/\r?\n/).filter(isTestFailureLine);
+}
+
+function findFirstFailureLine(output) {
+  return output.split(/\r?\n/).find(isFailureLine);
+}
+
+function isFailureLine(line) {
+  return /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+}
+
+function isTestFailureLine(line) {
+  return /^(?:(?:pa\d+\/|pa\d+\/\.\.\/).+|(?:tests|course|cppgm\.tests)\/.+): /.test(line) &&
+    isFailureLine(line);
+}
+
+function inferFailureStage(line, stageSections) {
+  const explicit = line?.match(/^(pa\d+)\//)?.[1];
+  if (explicit) {
+    return explicit;
+  }
+  if (!line) {
+    return null;
+  }
+  return stageSections.find((stage) => stage.body.includes(line))?.name ?? null;
+}
+
+function classifyFailureLine(line) {
+  const text = String(line ?? "");
+  if (!text) {
+    return null;
+  }
+  if (
+    /\bdid not time out as expected\b/i.test(text) ||
+    (/\bexpected\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text) &&
+      !/\bgot\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text))
+  ) {
+    return "timeout_expected";
+  }
+  if (/\btimed out\b/i.test(text) || /\bgot\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text)) {
+    return "timeout";
+  }
+  return null;
 }
 
 function parseTestReportSummary(output) {

@@ -428,9 +428,11 @@ function buildFailureSummaryLines(testStatus) {
     lines.push(`Regression summary: ${formatStageList(testStatus.regressions)} regressed.`);
   }
 
-  if (testStatus?.firstFailureLine) {
-    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
+  const firstBlockerLine = formatFirstBlockerLine(testStatus);
+  if (firstBlockerLine) {
+    lines.push(firstBlockerLine);
   }
+  lines.push(...buildTimeoutGuidanceLines(testStatus));
 
   lines.push(
     `Full test output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
@@ -485,6 +487,9 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
     failingStage: testStatus?.failingStage ?? "",
     passingThrough: testStatus?.passingThrough ?? "",
     firstFailureLine: testStatus?.firstFailureLine ?? "",
+    firstFailureBlocker: formatFirstBlockerLine(testStatus),
+    firstFailureKind: testStatus?.firstFailureKind ?? "",
+    timeoutGuidance: buildTimeoutGuidanceLines(testStatus).join("\n"),
     regressions: formatStageList(testStatus?.regressions ?? []),
     testStatusSummary: formatTestStatusSummary(testStatus),
     stageBreakdown: testStatus?.stages?.length ? formatStageBreakdown(testStatus) : "",
@@ -552,9 +557,11 @@ function buildCurrentStateLines({
   if (testStatus?.stages?.length) {
     lines.push(`Stage breakdown: ${formatStageBreakdown(testStatus)}`);
   }
-  if (testStatus?.firstFailureLine) {
-    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
+  const firstBlockerLine = formatFirstBlockerLine(testStatus);
+  if (firstBlockerLine) {
+    lines.push(firstBlockerLine);
   }
+  lines.push(...buildTimeoutGuidanceLines(testStatus));
   if (testStatus?.regressions?.length) {
     lines.push(`Regressions: ${formatStageList(testStatus.regressions)}`);
   }
@@ -588,9 +595,7 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     name: match[1],
     index: match.index ?? 0,
   }));
-  const firstFailureLine = normalizedOutput
-    .split(/\r?\n/)
-    .find((line) => /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match/.test(line));
+  const firstFailureLine = findFirstFailureLine(normalizedOutput);
 
   const stages = stageHeaders.map((stage, index) => {
     const start = stage.index;
@@ -626,6 +631,11 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   const testsPassed = reportSummary?.passed ?? stages.reduce((sum, stage) => sum + stage.passed, 0);
   const testsTotal = reportSummary?.total ?? stages.reduce((sum, stage) => sum + stage.total, 0);
   const stagesPassed = stages.filter((stage) => stage.status === "pass").length;
+  const timeoutFailures = stages.reduce((sum, stage) => sum + (stage.timeouts ?? 0), 0);
+  const timeoutExpectationFailures = stages.reduce(
+    (sum, stage) => sum + (stage.timeoutExpectations ?? 0),
+    0,
+  );
 
   return {
     recordedAt: new Date().toISOString(),
@@ -647,6 +657,9 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     failingStage,
     passingThrough,
     firstFailureLine: firstFailureLine ?? null,
+    firstFailureKind: classifyFailureLine(firstFailureLine),
+    timeoutFailures,
+    timeoutExpectationFailures,
     regressions,
     stages,
   };
@@ -890,6 +903,10 @@ function parseStageStatus(stageName, body) {
   }
 
   const stageTargets = Array.from(targets.values());
+  const timeouts = failureLines.filter((line) => classifyFailureLine(line) === "timeout").length;
+  const timeoutExpectations = failureLines.filter(
+    (line) => classifyFailureLine(line) === "timeout_expected",
+  ).length;
   const targetFailureCount = stageTargets.reduce((sum, target) => {
     if (target.status !== "fail" || !Number.isFinite(target.total) || !Number.isFinite(target.passed)) {
       return sum;
@@ -912,12 +929,41 @@ function parseStageStatus(stageName, body) {
     passed,
     total,
     failed,
+    timeouts,
+    timeoutExpectations,
     targets: stageTargets,
   };
 }
 
+function findFirstFailureLine(output) {
+  return output.split(/\r?\n/).find(isFailureLine);
+}
+
+function isFailureLine(line) {
+  return /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+}
+
 function isTestFailureLine(line) {
-  return /^(?:pa\d+\/|pa\d+\/\.\.\/).+?: (?:ERROR:|TEST FAIL|FAIL after|Expected EXIT_|got EXIT_|does not match)/.test(line);
+  return /^(?:(?:pa\d+\/|pa\d+\/\.\.\/).+|(?:tests|course|cppgm\.tests)\/.+): /.test(line) &&
+    isFailureLine(line);
+}
+
+function classifyFailureLine(line) {
+  const text = String(line ?? "");
+  if (!text) {
+    return null;
+  }
+  if (
+    /\bdid not time out as expected\b/i.test(text) ||
+    (/\bexpected\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text) &&
+      !/\bgot\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text))
+  ) {
+    return "timeout_expected";
+  }
+  if (/\btimed out\b/i.test(text) || /\bgot\s+(?:EXIT_TIMEOUT(?:\s*\(124\))?|124)\b/i.test(text)) {
+    return "timeout";
+  }
+  return null;
 }
 
 function ensureStageTarget(targets, targetName) {
@@ -963,6 +1009,11 @@ function formatTestStatusSummary(testStatus) {
     parts.push(`regressions: ${formatStageList(testStatus.regressions)}`);
   }
 
+  const timeoutSummary = formatTimeoutStatusSummary(testStatus);
+  if (timeoutSummary) {
+    parts.push(timeoutSummary);
+  }
+
   return parts.join("; ");
 }
 
@@ -985,8 +1036,70 @@ function formatSingleStageBreakdown(stage) {
   const failureSummary = Number.isFinite(stage.failed) && stage.failed > 0
     ? `${stage.failed} failing`
     : "";
-  const details = [failureSummary, targetSummary].filter(Boolean).join(", ");
+  const timeoutSummary = formatStageTimeoutSummary(stage);
+  const details = [failureSummary, timeoutSummary, targetSummary].filter(Boolean).join(", ");
   return details ? `${stageSummary} (${details})` : stageSummary;
+}
+
+function formatTimeoutStatusSummary(testStatus) {
+  const timeoutFailures = testStatus?.timeoutFailures ?? 0;
+  const timeoutExpectationFailures = testStatus?.timeoutExpectationFailures ?? 0;
+  const parts = [];
+  if (timeoutFailures > 0) {
+    parts.push(formatCount(timeoutFailures, "timeout failure"));
+  }
+  if (timeoutExpectationFailures > 0) {
+    parts.push(formatCount(timeoutExpectationFailures, "timeout expectation mismatch", "timeout expectation mismatches"));
+  }
+  return parts.join(", ");
+}
+
+function formatStageTimeoutSummary(stage) {
+  const parts = [];
+  if ((stage?.timeouts ?? 0) > 0) {
+    parts.push(formatCount(stage.timeouts, "timeout"));
+  }
+  if ((stage?.timeoutExpectations ?? 0) > 0) {
+    parts.push(formatCount(stage.timeoutExpectations, "timeout expectation mismatch", "timeout expectation mismatches"));
+  }
+  return parts.join(", ");
+}
+
+function formatCount(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatFirstBlockerLine(testStatus) {
+  if (!testStatus?.firstFailureLine) {
+    return "";
+  }
+  if (testStatus.firstFailureKind === "timeout") {
+    return `First reported blocker is a timeout: ${testStatus.firstFailureLine}`;
+  }
+  if (testStatus.firstFailureKind === "timeout_expected") {
+    return `First reported blocker is a timeout expectation mismatch: ${testStatus.firstFailureLine}`;
+  }
+  return `First reported blocker: ${testStatus.firstFailureLine}`;
+}
+
+function buildTimeoutGuidanceLines(testStatus) {
+  if (!testStatus) {
+    return [];
+  }
+  if (testStatus.firstFailureKind === "timeout" || (testStatus.timeoutFailures ?? 0) > 0) {
+    return [
+      "Timeout guidance: tests can run concurrently, so code that barely beats the timeout can still be flaky. Treat this as a root-cause performance or termination bug; redesign inefficient work rather than increasing timeouts, skipping tests, or special-casing inputs.",
+    ];
+  }
+  if (
+    testStatus.firstFailureKind === "timeout_expected" ||
+    (testStatus.timeoutExpectationFailures ?? 0) > 0
+  ) {
+    return [
+      "Timeout guidance: preserve the expected timeout behavior and fix the semantic/status mismatch rather than bypassing the test.",
+    ];
+  }
+  return [];
 }
 
 function formatStageList(stageNames) {
@@ -1254,8 +1367,9 @@ function buildLoopGoalTaskLines({ testStatus, gitStatus }) {
     );
   }
 
-  if (testStatus.firstFailureLine) {
-    lines.push(`First reported blocker: ${testStatus.firstFailureLine}`);
+  const firstBlockerLine = formatFirstBlockerLine(testStatus);
+  if (firstBlockerLine) {
+    lines.push(firstBlockerLine);
   }
 
   return lines;
