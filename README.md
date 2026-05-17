@@ -274,6 +274,16 @@ Example two-phase setup:
 }
 ```
 
+The repo also includes `scripts/cppgm-file-audit.js`, which can be used as a
+check command for CPPGM runs:
+
+```json
+"fileAudit": {
+  "command": "node /home/vishvananda/cppgm-ralph/scripts/cppgm-file-audit.js --stage {{testStage}} --paths dev/src --max-file-lines 1500",
+  "required": true
+}
+```
+
 ## State files
 
 - `.ralph/<run-name>/state.json`
