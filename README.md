@@ -282,7 +282,7 @@ when the run config invokes `perl scripts/cppgm_file_audit.pl`:
 
 ```json
 "fileAudit": {
-  "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev/src",
+  "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev",
   "required": true
 }
 ```
@@ -292,7 +292,7 @@ also be referenced directly from the Ralph repo:
 
 ```json
 "fileAudit": {
-  "command": "node /home/vishvananda/cppgm-ralph/scripts/cppgm-file-audit.js --stage {{testStage}} --paths dev/src --max-file-lines 1500",
+  "command": "node /home/vishvananda/cppgm-ralph/scripts/cppgm-file-audit.js --stage {{testStage}} --paths dev --max-file-lines 1500",
   "required": true
 }
 ```

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const DEFAULT_PATHS = ["dev/src"];
+const DEFAULT_PATHS = ["dev"];
 const DEFAULT_MAX_FILE_LINES = 1500;
 const SOURCE_EXTENSIONS = new Set([
   ".c",
@@ -164,7 +164,7 @@ function countLines(text) {
 
 function printUsage() {
   process.stdout.write(`Usage:
-  node scripts/cppgm-file-audit.js [--root DIR] [--paths dev/src] [--max-file-lines N] [--stage paN]
+  node scripts/cppgm-file-audit.js [--root DIR] [--paths dev] [--max-file-lines N] [--stage paN]
 
 Checks C/C++ source and header files for file-size limits. Paths are relative to
 --root, which defaults to the current working directory.

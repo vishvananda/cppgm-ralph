@@ -47,7 +47,7 @@ if ($opt{help}) {
 
 my $root = abs_path($opt{root}) // die "Cannot resolve root $opt{root}\n";
 my @paths = expand_path_options(@{$opt{paths}});
-@paths = ('dev/src') if !@paths;
+@paths = ('dev') if !@paths;
 
 my @files;
 for my $input (@paths) {
@@ -104,7 +104,7 @@ exit($opt{warnings_fail} ? 1 : 0);
 sub print_usage {
     print <<'USAGE';
 Usage:
-  perl scripts/cppgm_file_audit.pl [--stage paN] [--paths dev/src]
+  perl scripts/cppgm_file_audit.pl [--stage paN] [--paths dev]
 
 Audits C/C++ implementation shape for CPPGM runs. The check is deliberately
 heuristic: high-confidence cheating and mechanical split patterns are fatal,
@@ -161,6 +161,11 @@ sub is_exempt_file {
     my ($rel) = @_;
     return $rel =~ m{^dev/src/test_runner\.cpp$} ||
         $rel =~ m{^dev/src/tool_help_text\.h$};
+}
+
+sub is_top_level_dev_tool {
+    my ($rel) = @_;
+    return $rel =~ m{^dev/[^/]+\.(?:c|cc|cpp|cxx)$};
 }
 
 sub read_text {
@@ -255,7 +260,7 @@ sub check_shortcut_smells {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
                 "compiler implementation depends on environment variables");
         }
-        if ($line =~ /\bEXIT_NOT_IMPLEMENTED\b/) {
+        if ($line =~ /\bEXIT_NOT_IMPLEMENTED\b/ && !is_top_level_dev_tool($rel)) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
                 "implementation still exposes EXIT_NOT_IMPLEMENTED");
         }
