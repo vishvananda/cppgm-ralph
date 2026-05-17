@@ -12,6 +12,7 @@ const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
+const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -141,6 +142,9 @@ async function readShapeUsage(shape, selected = {}) {
   const runs = [];
   const seenThreads = new Set();
   let total = emptyUsage();
+  let firstAt = null;
+  let lastAt = null;
+  let durationMs = 0;
 
   for (const fileName of jsonls) {
     const filePath = path.join(eventsDir, fileName);
@@ -176,10 +180,22 @@ async function readShapeUsage(shape, selected = {}) {
       total = addUsage(total, usage);
     }
 
+    const bounds = eventTimeBounds(events);
+    if (bounds.firstAt && (!firstAt || bounds.firstAt < firstAt)) {
+      firstAt = bounds.firstAt;
+    }
+    if (bounds.lastAt && (!lastAt || bounds.lastAt > lastAt)) {
+      lastAt = bounds.lastAt;
+    }
+    durationMs += bounds.durationMs;
+
     const stat = await fs.stat(filePath);
     runs.push({
       id: `${shape}/${fileBase}`,
       threadId: threadId ?? fileBase,
+      firstAt: bounds.firstAt,
+      lastAt: bounds.lastAt,
+      durationMs: bounds.durationMs,
       mtime: stat.mtime.toISOString(),
       usage: hasTokenUsage(usage) ? usage : null,
     });
@@ -189,9 +205,70 @@ async function readShapeUsage(shape, selected = {}) {
     shape,
     runCount: runs.length,
     threadCount: seenThreads.size,
+    firstAt,
+    lastAt,
+    durationMs,
     usage: hasTokenUsage(total) ? total : null,
     runs,
   };
+}
+
+function eventTimeBounds(events) {
+  let firstAt = null;
+  let lastAt = null;
+  const timedEvents = [];
+  for (const event of events) {
+    const recordedAt = event.recordedAt ?? null;
+    const time = Date.parse(recordedAt ?? "");
+    if (!recordedAt || !Number.isFinite(time)) {
+      continue;
+    }
+    timedEvents.push({ ...event, time });
+    if (!firstAt || recordedAt < firstAt) {
+      firstAt = recordedAt;
+    }
+    if (!lastAt || recordedAt > lastAt) {
+      lastAt = recordedAt;
+    }
+  }
+  const durationMs = activeEventDurationMs(timedEvents);
+  return { firstAt, lastAt, durationMs };
+}
+
+function activeEventDurationMs(timedEvents) {
+  const events = [...timedEvents].sort((a, b) => a.time - b.time);
+  let durationMs = 0;
+  let openCommands = 0;
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (isCommandStartEvent(event)) {
+      openCommands += 1;
+    } else if (isCommandEndEvent(event)) {
+      openCommands = Math.max(0, openCommands - 1);
+    }
+
+    const next = events[i + 1];
+    if (!next) {
+      continue;
+    }
+    const gap = Math.max(0, next.time - event.time);
+    if (openCommands > 0 || gap <= ACTIVE_EVENT_GAP_MS) {
+      durationMs += gap;
+    }
+  }
+
+  return durationMs;
+}
+
+function isCommandStartEvent(event) {
+  return event.eventType === "item.started" &&
+    event.event?.item?.type === "command_execution";
+}
+
+function isCommandEndEvent(event) {
+  return event.eventType === "item.completed" &&
+    event.event?.item?.type === "command_execution";
 }
 
 async function readCodexThreadUsage(threadId) {

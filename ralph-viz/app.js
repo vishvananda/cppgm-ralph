@@ -13,6 +13,7 @@ const fullViewToggle = document.getElementById("fullView");
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
 const COMPACT_TURN_CARD_LIMIT = 50;
+const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -116,6 +117,7 @@ function buildSummary(events, shapeUsage = null) {
     events: events.length,
     turns: turnSet.size,
     first, last,
+    activeDurationMs: activeEventDurationMs(events),
     tokenUsage: latestCumulativeUsage(events),
     shapeUsage: normalizeShapeUsage(shapeUsage),
     priceModel,
@@ -161,17 +163,15 @@ function renderSummary(events) {
   const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
-  const tokenText = s.tokenUsage
-    ? fullUsageText(s.tokenUsage)
+  const usageText = s.tokenUsage
+    ? usageSummaryText(s.tokenUsage, s.priceModel, { durationMs: s.activeDurationMs, includeModel: true })
     : '<span class="muted">n/a</span>';
-  const costText = s.tokenUsage
-    ? costEstimateText(s.tokenUsage, s.priceModel, { includeModel: true })
-    : '<span class="muted">n/a</span>';
-  const shapeTokenText = s.shapeUsage?.usage
-    ? `${fullUsageText(s.shapeUsage.usage)} <span class="muted">(${fmtInt(s.shapeUsage.runCount)} runs)</span>`
-    : '<span class="muted">n/a</span>';
-  const shapeCostText = s.shapeUsage?.usage
-    ? costEstimateText(s.shapeUsage.usage, s.priceModel, { includeModel: true })
+  const shapeUsageText = s.shapeUsage?.usage
+    ? usageSummaryText(s.shapeUsage.usage, s.priceModel, {
+        durationMs: s.shapeUsage.durationMs,
+        includeModel: true,
+        suffix: `${fmtInt(s.shapeUsage.runCount)} runs`,
+      })
     : '<span class="muted">n/a</span>';
   const progressText = latestProgressSummaryHtml(s.testProgress.latest);
   const phaseText = s.latestPhaseStatus
@@ -186,10 +186,8 @@ function renderSummary(events) {
     <div><strong>latest</strong>${fmt(s.last)}</div>
     <div class="summary-wide"><strong>phase</strong>${phaseText}</div>
     <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
-    <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
-    <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
-    <div class="summary-wide"><strong>shape tokens</strong>${shapeTokenText}</div>
-    <div class="summary-wide"><strong>shape estimate</strong>${shapeCostText}</div>
+    <div class="summary-wide"><strong>usage</strong>${usageText}</div>
+    <div class="summary-wide"><strong>shape usage</strong>${shapeUsageText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
   `;
   renderProgressDock(s);
@@ -247,10 +245,11 @@ function dockShapeUsageText(shapeUsage, priceModel) {
   if (!usage) {
     return "shape tokens n/a";
   }
-  const cost = costEstimateText(usage, priceModel);
   const runs = fmtInt(shapeUsage.runCount ?? 0);
-  const costPart = cost === "n/a" ? "cost n/a" : cost;
-  return `shape ${runs} runs / ${fmtInt(usage.total_tokens)} tok / ${costPart}`;
+  return `shape ${runs} runs / ${usageSummaryText(usage, priceModel, {
+    durationMs: shapeUsage.durationMs,
+    compact: true,
+  })}`;
 }
 
 // --- Display entry building (merge command start/end) ---
@@ -902,7 +901,12 @@ function buildTurnDurationMap(records) {
 
 function durationText(span) {
   if (!span) return "";
-  const seconds = Math.max(0, Math.round((span.last - span.first) / 1000));
+  const milliseconds = Number.isFinite(span.durationMs)
+    ? span.durationMs
+    : span.first != null && span.last != null
+      ? span.last - span.first
+      : 0;
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
@@ -910,6 +914,45 @@ function durationText(span) {
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
   return `${hours}h ${remainingMinutes}m`;
+}
+
+function activeEventDurationMs(records) {
+  const events = records
+    .map((record) => ({ record, time: Date.parse(record.recordedAt ?? "") }))
+    .filter((entry) => Number.isFinite(entry.time))
+    .sort((a, b) => a.time - b.time);
+  let durationMs = 0;
+  let openCommands = 0;
+
+  for (let i = 0; i < events.length; i += 1) {
+    const record = events[i].record;
+    if (isCommandStartEvent(record)) {
+      openCommands += 1;
+    } else if (isCommandEndEvent(record)) {
+      openCommands = Math.max(0, openCommands - 1);
+    }
+
+    const next = events[i + 1];
+    if (!next) {
+      continue;
+    }
+    const gap = Math.max(0, next.time - events[i].time);
+    if (openCommands > 0 || gap <= ACTIVE_EVENT_GAP_MS) {
+      durationMs += gap;
+    }
+  }
+
+  return durationMs;
+}
+
+function isCommandStartEvent(record) {
+  return record.eventType === "item.started" &&
+    record.event?.item?.type === "command_execution";
+}
+
+function isCommandEndEvent(record) {
+  return record.eventType === "item.completed" &&
+    record.event?.item?.type === "command_execution";
 }
 
 function fmtInt(n) {
@@ -1028,6 +1071,7 @@ function normalizeShapeUsage(shapeUsage) {
     ...shapeUsage,
     runCount: Number.isFinite(shapeUsage?.runCount) ? shapeUsage.runCount : 0,
     threadCount: Number.isFinite(shapeUsage?.threadCount) ? shapeUsage.threadCount : 0,
+    durationMs: Number.isFinite(shapeUsage?.durationMs) ? shapeUsage.durationMs : 0,
     usage,
   };
 }
@@ -1088,13 +1132,53 @@ function costEstimateText(usage, model, options = {}) {
   return `${prefix}${fmtUsd(estimate)}`;
 }
 
+function usageSummaryText(usage, model, options = {}) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) return "";
+  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
+  const uncachedInput = Math.max(0, normalized.input_tokens - cached);
+  const primaryTokens = uncachedInput + normalized.output_tokens;
+  const duration = Number.isFinite(options.durationMs) && options.durationMs > 0
+    ? durationText({ durationMs: options.durationMs })
+    : "";
+  const cost = costEstimateText(normalized, model, { includeModel: options.includeModel });
+  const parts = [];
+  if (duration) {
+    parts.push(duration);
+  }
+  parts.push(`${fmtInt(primaryTokens)} uncached tok`);
+  if (cost !== "n/a") {
+    parts.push(cost);
+  }
+
+  const details = [
+    `${fmtInt(uncachedInput)} in`,
+    `${fmtInt(normalized.output_tokens)} out`,
+  ];
+  if (cached) {
+    details.push(`${fmtInt(cached)} cached`);
+  }
+  details.push(`${fmtInt(normalized.total_tokens)} total`);
+  if (normalized.reasoning_output_tokens) {
+    details.push(`${fmtInt(normalized.reasoning_output_tokens)} thinking`);
+  }
+  if (options.suffix) {
+    details.push(options.suffix);
+  }
+
+  if (options.compact) {
+    return `${parts.join(" / ")} (${details.join(", ")})`;
+  }
+  return `${parts.join(" / ")} <span class="muted">(${escapeHtml(details.join(", "))})</span>`;
+}
+
 function fullUsageText(usage, options = {}) {
   const normalized = normalizeUsage(usage);
   if (!normalized) return "";
   const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
   const uncached = Math.max(0, normalized.input_tokens - cached);
   const parts = [
-    `${fmtInt(normalized.total_tokens)} total`,
+    `${fmtInt(uncached + normalized.output_tokens)} uncached tok`,
     `${fmtInt(uncached)} in`,
   ];
   if (cached) {
