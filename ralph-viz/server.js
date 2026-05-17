@@ -73,12 +73,16 @@ async function listFiles() {
   });
 }
 
-function safeRunId(id) {
+function safeRunRef(id) {
   // id is "dirName/fileBase" — validate both parts
   const parts = id.split("/");
   if (parts.length !== 2) return null;
   if (!parts.every(p => /^[a-zA-Z0-9._-]+$/.test(p))) return null;
-  return path.join(RALPH_DIR, parts[0], "events", `${parts[1]}.jsonl`);
+  return {
+    shape: parts[0],
+    threadId: parts[1],
+    filePath: path.join(RALPH_DIR, parts[0], "events", `${parts[1]}.jsonl`),
+  };
 }
 
 async function readRunFile(filePath) {
@@ -112,6 +116,232 @@ async function readRunWithCodexSession(filePath) {
   }
 
   return mergeEventStreams(events, sessionEvents);
+}
+
+async function readShapeUsage(shape, selected = {}) {
+  if (!/^[a-zA-Z0-9._-]+$/.test(shape ?? "")) {
+    return null;
+  }
+
+  const eventsDir = path.join(RALPH_DIR, shape, "events");
+  let files;
+  try {
+    files = await fs.readdir(eventsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+
+  const jsonls = files
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+    .map((entry) => entry.name)
+    .sort();
+  const runs = [];
+  const seenThreads = new Set();
+  let total = emptyUsage();
+
+  for (const fileName of jsonls) {
+    const filePath = path.join(eventsDir, fileName);
+    const fileBase = path.basename(fileName, ".jsonl");
+    const isSelected = selected.filePath === filePath && Array.isArray(selected.events);
+    let events = [];
+    if (isSelected) {
+      events = selected.events;
+    } else {
+      try {
+        events = await readRunFile(filePath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+    const threadId = inferThreadIdFromRun(filePath, events);
+    const threadAlreadyCounted = threadId ? seenThreads.has(threadId) : false;
+    let usage = null;
+    if (threadId && !threadAlreadyCounted) {
+      seenThreads.add(threadId);
+      usage = isSelected ? usageFromVizEvents(events) : null;
+      if (!hasTokenUsage(usage)) {
+        usage = await readCodexThreadUsage(threadId);
+      }
+    }
+    if (!threadAlreadyCounted && !hasTokenUsage(usage)) {
+      usage = usageFromVizEvents(events);
+    }
+
+    if (hasTokenUsage(usage)) {
+      total = addUsage(total, usage);
+    }
+
+    const stat = await fs.stat(filePath);
+    runs.push({
+      id: `${shape}/${fileBase}`,
+      threadId: threadId ?? fileBase,
+      mtime: stat.mtime.toISOString(),
+      usage: hasTokenUsage(usage) ? usage : null,
+    });
+  }
+
+  return {
+    shape,
+    runCount: runs.length,
+    threadCount: seenThreads.size,
+    usage: hasTokenUsage(total) ? total : null,
+    runs,
+  };
+}
+
+async function readCodexThreadUsage(threadId) {
+  const files = await findCodexSessionFiles(threadId);
+  let total = emptyUsage();
+  let previous = null;
+
+  for (const filePath of files) {
+    const raw = await fs.readFile(filePath, "utf8");
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (const line of lines) {
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_) {
+        continue;
+      }
+      const usage = record?.type === "event_msg" && record.payload?.type === "token_count"
+        ? normalizeUsage(record.payload.info?.total_token_usage)
+        : null;
+      if (!hasTokenUsage(usage)) {
+        continue;
+      }
+      total = addUsage(total, usageDelta(usage, previous));
+      previous = usage;
+    }
+  }
+
+  return hasTokenUsage(total) ? total : null;
+}
+
+function usageFromVizEvents(events) {
+  const tokenRecords = events
+    .filter((event) => event.eventType === "codex.session.token_count" && event.event?.usage)
+    .sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+  if (tokenRecords.length) {
+    let total = emptyUsage();
+    let previous = null;
+    for (const record of tokenRecords) {
+      const usage = normalizeUsage(record.event.usage);
+      if (!hasTokenUsage(usage)) {
+        continue;
+      }
+      total = addUsage(total, usageDelta(usage, previous));
+      previous = usage;
+    }
+    return hasTokenUsage(total) ? total : null;
+  }
+
+  let total = emptyUsage();
+  for (const event of events) {
+    if (event.eventType === "turn.completed" && event.event?.usage) {
+      total = addUsage(total, event.event.usage);
+    }
+    if (event.eventType === "finished" && event.event?.value?.usageMetadata) {
+      total = addUsage(total, event.event.value.usageMetadata);
+    }
+  }
+  return hasTokenUsage(total) ? total : null;
+}
+
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const input = usage.input_tokens ?? usage.promptTokenCount ?? 0;
+  const cached = usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? 0;
+  const output =
+    usage.output_tokens ??
+    ((usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0));
+  const reasoning =
+    usage.reasoning_output_tokens ??
+    usage.thinking_output_tokens ??
+    usage.thoughtsTokenCount ??
+    0;
+  const totalTokens = usage.total_tokens ?? usage.totalTokenCount ?? input + output;
+  return {
+    input_tokens: Math.max(0, input),
+    cached_input_tokens: Math.max(0, cached),
+    output_tokens: Math.max(0, output),
+    reasoning_output_tokens: Math.max(0, reasoning),
+    total_tokens: Math.max(0, totalTokens),
+  };
+}
+
+function emptyUsage() {
+  return {
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: 0,
+  };
+}
+
+function hasTokenUsage(usage) {
+  return Boolean(
+    usage &&
+      (usage.input_tokens ||
+        usage.cached_input_tokens ||
+        usage.output_tokens ||
+        usage.reasoning_output_tokens ||
+        usage.total_tokens),
+  );
+}
+
+function addUsage(left, right) {
+  const a = normalizeUsage(left) ?? emptyUsage();
+  const b = normalizeUsage(right) ?? emptyUsage();
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
+    total_tokens: a.total_tokens + b.total_tokens,
+  };
+}
+
+function subtractUsage(current, previous) {
+  const a = normalizeUsage(current) ?? emptyUsage();
+  const b = normalizeUsage(previous) ?? emptyUsage();
+  return {
+    input_tokens: Math.max(0, a.input_tokens - b.input_tokens),
+    cached_input_tokens: Math.max(0, a.cached_input_tokens - b.cached_input_tokens),
+    output_tokens: Math.max(0, a.output_tokens - b.output_tokens),
+    reasoning_output_tokens: Math.max(0, a.reasoning_output_tokens - b.reasoning_output_tokens),
+    total_tokens: Math.max(0, a.total_tokens - b.total_tokens),
+  };
+}
+
+function usageDelta(current, previous) {
+  if (!previous || usageCounterReset(current, previous)) {
+    return normalizeUsage(current);
+  }
+  return subtractUsage(current, previous);
+}
+
+function usageCounterReset(current, previous) {
+  const a = normalizeUsage(current);
+  const b = normalizeUsage(previous);
+  if (!a || !b) {
+    return false;
+  }
+  return (
+    a.total_tokens < b.total_tokens ||
+    a.input_tokens < b.input_tokens ||
+    a.output_tokens < b.output_tokens ||
+    a.cached_input_tokens < b.cached_input_tokens ||
+    a.reasoning_output_tokens < b.reasoning_output_tokens
+  );
 }
 
 async function augmentLatestTestStatusFromLog(events, filePath) {
@@ -795,13 +1025,18 @@ async function requestHandler(req, res) {
 
   if (pathname.startsWith("/api/run/")) {
     const rawId = decodeURIComponent(pathname.slice("/api/run/".length));
-    const filePath = safeRunId(rawId);
-    if (!filePath) {
+    const runRef = safeRunRef(rawId);
+    if (!runRef) {
       return sendJson(res, { error: "Invalid run id" }, 400);
     }
     let events = [];
+    let shapeUsage = null;
     try {
-      events = await readRunWithCodexSession(filePath);
+      events = await readRunWithCodexSession(runRef.filePath);
+      shapeUsage = await readShapeUsage(runRef.shape, {
+        filePath: runRef.filePath,
+        events,
+      });
     } catch (error) {
       if (error?.code === "ENOENT") {
         return sendJson(res, { error: "Run not found" }, 404);
@@ -811,7 +1046,7 @@ async function requestHandler(req, res) {
     if (!events.length) {
       return sendJson(res, { error: "Run not found" }, 404);
     }
-    return sendJson(res, { events });
+    return sendJson(res, { events, shapeUsage });
   }
 
   res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });

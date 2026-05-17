@@ -112,6 +112,7 @@ button:hover { background: #252525; }
 .dock-phase { color: #d0a64a; }
 .dock-phase-pass { color: var(--ok); }
 .dock-turn { color: #888; }
+.dock-usage { color: #999; }
 .dock-tests { color: #b08030; }
 .dock-tests-pass { color: var(--ok); }
 .dock-meta {
@@ -231,6 +232,7 @@ button:hover { background: #252525; }
   }
 
   .dock-turn,
+  .dock-usage,
   .dock-phase,
   .dock-main,
   .dock-tests {

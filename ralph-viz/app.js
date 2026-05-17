@@ -24,6 +24,7 @@ const state = {
   runs: [],
   selectedRun: null,
   currentRun: null,
+  shapeUsage: null,
   events: [],
   raw: [],
   autoRefreshTimer: null,
@@ -94,7 +95,7 @@ function truncate(text, max = 120) {
   return text.slice(0, max) + "...";
 }
 
-function buildSummary(events) {
+function buildSummary(events, shapeUsage = null) {
   const turnSet = new Set();
   for (const r of events) {
     const turn = displayTurnForRecord(r);
@@ -116,6 +117,7 @@ function buildSummary(events) {
     turns: turnSet.size,
     first, last,
     tokenUsage: latestCumulativeUsage(events),
+    shapeUsage: normalizeShapeUsage(shapeUsage),
     priceModel,
     latestTurn: latestTurnOverview(events, priceModel),
     latestPhaseStatus: latestPhaseStatus(events),
@@ -155,7 +157,7 @@ function displayTurnForRecord(record) {
 }
 
 function renderSummary(events) {
-  const s = buildSummary(events);
+  const s = buildSummary(events, state.shapeUsage);
   const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
@@ -164,6 +166,12 @@ function renderSummary(events) {
     : '<span class="muted">n/a</span>';
   const costText = s.tokenUsage
     ? costEstimateText(s.tokenUsage, s.priceModel, { includeModel: true })
+    : '<span class="muted">n/a</span>';
+  const shapeTokenText = s.shapeUsage?.usage
+    ? `${fullUsageText(s.shapeUsage.usage)} <span class="muted">(${fmtInt(s.shapeUsage.runCount)} runs)</span>`
+    : '<span class="muted">n/a</span>';
+  const shapeCostText = s.shapeUsage?.usage
+    ? costEstimateText(s.shapeUsage.usage, s.priceModel, { includeModel: true })
     : '<span class="muted">n/a</span>';
   const progressText = latestProgressSummaryHtml(s.testProgress.latest);
   const phaseText = s.latestPhaseStatus
@@ -180,6 +188,8 @@ function renderSummary(events) {
     <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
     <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
     <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
+    <div class="summary-wide"><strong>shape tokens</strong>${shapeTokenText}</div>
+    <div class="summary-wide"><strong>shape estimate</strong>${shapeCostText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
   `;
   renderProgressDock(s);
@@ -194,6 +204,7 @@ function renderProgressDock(summary) {
   const testStatus = summary?.latestTestStatus?.status ?? null;
   const phaseStatus = summary?.latestPhaseStatus?.status ?? null;
   const latestTurn = summary?.latestTurn ?? null;
+  const shapeUsage = summary?.shapeUsage ?? null;
   const latest = summary?.last ? fmtShort(summary.last) : "";
   const phaseHtml = phaseStatus
     ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
@@ -207,10 +218,14 @@ function renderProgressDock(summary) {
   const turnHtml = latestTurn
     ? `<span class="dock-turn">${escapeHtml(dockTurnText(latestTurn))}</span>`
     : "";
+  const shapeHtml = shapeUsage?.usage
+    ? `<span class="dock-usage">${escapeHtml(dockShapeUsageText(shapeUsage, summary.priceModel))}</span>`
+    : "";
   const updatedHtml = latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : "";
   progressDock.innerHTML = `
     <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
     ${turnHtml}
+    ${shapeHtml}
     ${phaseHtml}
     ${progressHtml}
     ${testHtml}
@@ -225,6 +240,17 @@ function dockTurnText(turn) {
   }
   parts.push(`cost ${turn.cost || "n/a"}`);
   return parts.join(" / ");
+}
+
+function dockShapeUsageText(shapeUsage, priceModel) {
+  const usage = normalizeUsage(shapeUsage?.usage);
+  if (!usage) {
+    return "shape tokens n/a";
+  }
+  const cost = costEstimateText(usage, priceModel);
+  const runs = fmtInt(shapeUsage.runCount ?? 0);
+  const costPart = cost === "n/a" ? "cost n/a" : cost;
+  return `shape ${runs} runs / ${fmtInt(usage.total_tokens)} tok / ${costPart}`;
 }
 
 // --- Display entry building (merge command start/end) ---
@@ -971,6 +997,41 @@ function subtractUsage(current, previous) {
   };
 }
 
+function usageDelta(current, previous) {
+  if (!previous || usageCounterReset(current, previous)) {
+    return normalizeUsage(current);
+  }
+  return subtractUsage(current, previous);
+}
+
+function usageCounterReset(current, previous) {
+  const a = normalizeUsage(current);
+  const b = normalizeUsage(previous);
+  if (!a || !b) {
+    return false;
+  }
+  return (
+    a.total_tokens < b.total_tokens ||
+    a.input_tokens < b.input_tokens ||
+    a.output_tokens < b.output_tokens ||
+    a.cached_input_tokens < b.cached_input_tokens ||
+    a.reasoning_output_tokens < b.reasoning_output_tokens
+  );
+}
+
+function normalizeShapeUsage(shapeUsage) {
+  const usage = normalizeUsage(shapeUsage?.usage);
+  if (!usage) {
+    return null;
+  }
+  return {
+    ...shapeUsage,
+    runCount: Number.isFinite(shapeUsage?.runCount) ? shapeUsage.runCount : 0,
+    threadCount: Number.isFinite(shapeUsage?.threadCount) ? shapeUsage.threadCount : 0,
+    usage,
+  };
+}
+
 function tokenCountRecords(records) {
   return records
     .filter((record) => record.eventType === "codex.session.token_count" && record.event?.usage)
@@ -980,12 +1041,26 @@ function tokenCountRecords(records) {
 function latestCumulativeUsage(records) {
   const tokenRecords = tokenCountRecords(records);
   if (tokenRecords.length) {
-    return normalizeUsage(tokenRecords.at(-1).event.usage);
+    return cumulativeUsageFromTokenRecords(tokenRecords);
   }
 
   let total = emptyUsage();
   for (const usage of buildUsageMap(records).values()) {
     total = addUsage(total, usage);
+  }
+  return hasTokenUsage(total) ? total : null;
+}
+
+function cumulativeUsageFromTokenRecords(tokenRecords) {
+  let total = emptyUsage();
+  let previous = null;
+  for (const record of tokenRecords) {
+    const current = normalizeUsage(record.event.usage);
+    if (!hasTokenUsage(current)) {
+      continue;
+    }
+    total = addUsage(total, usageDelta(current, previous));
+    previous = current;
   }
   return hasTokenUsage(total) ? total : null;
 }
@@ -1043,7 +1118,7 @@ function buildUsageMap(records) {
     let previous = null;
     for (const record of tokenRecords) {
       const current = normalizeUsage(record.event.usage);
-      const delta = previous ? subtractUsage(current, previous) : current;
+      const delta = usageDelta(current, previous);
       previous = current;
       if (!hasTokenUsage(delta)) continue;
       const turn = displayTurnForRecord(record);
@@ -2277,6 +2352,7 @@ async function loadRuns(options = {}) {
     summaryEl.innerHTML = "";
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
+    state.shapeUsage = null;
     if (progressDock) {
       progressDock.innerHTML = '<span class="muted">No runs found</span>';
     }
@@ -2316,6 +2392,7 @@ async function loadRun(id, options = {}) {
   });
 
   state.events = data.events ?? [];
+  state.shapeUsage = normalizeShapeUsage(data.shapeUsage);
   state.raw = state.events.slice();
   renderSummary(state.events);
   const scrollSnapshot = options.scrollSnapshot
