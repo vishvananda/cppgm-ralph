@@ -1230,7 +1230,7 @@ function deriveTestStatusFromCommand(record) {
   const item = record.event?.item ?? {};
   const command = unwrapCommand(item.command ?? "");
   const output = cleanText(item.aggregated_output);
-  if (!output || !/test-report/.test(command + output)) {
+  if (!output || !parseAgentTestCommand(command)) {
     return null;
   }
 
