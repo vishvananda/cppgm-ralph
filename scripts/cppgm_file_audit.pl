@@ -1,0 +1,538 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use Cwd qw(abs_path getcwd);
+use File::Find qw(find);
+use File::Spec;
+use Getopt::Long qw(GetOptions);
+
+my %opt = (
+    root => '.',
+    paths => [],
+    stage => '',
+    max_source_lines => 1500,
+    max_header_lines => 1200,
+    max_internal_header_lines => 900,
+    max_function_lines => 120,
+    warn_nesting => 6,
+    max_nesting => 8,
+    duplicate_window => 28,
+    duplicate_min_chars => 240,
+    warnings_fail => 0,
+    help => 0,
+);
+
+GetOptions(
+    'root=s' => \$opt{root},
+    'path=s@' => $opt{paths},
+    'paths=s@' => $opt{paths},
+    'stage=s' => \$opt{stage},
+    'max-source-lines=i' => \$opt{max_source_lines},
+    'max-header-lines=i' => \$opt{max_header_lines},
+    'max-internal-header-lines=i' => \$opt{max_internal_header_lines},
+    'max-function-lines=i' => \$opt{max_function_lines},
+    'warn-nesting=i' => \$opt{warn_nesting},
+    'max-nesting=i' => \$opt{max_nesting},
+    'duplicate-window=i' => \$opt{duplicate_window},
+    'duplicate-min-chars=i' => \$opt{duplicate_min_chars},
+    'warnings-fail!' => \$opt{warnings_fail},
+    'help|h' => \$opt{help},
+) or die "Invalid arguments\n";
+
+if ($opt{help}) {
+    print_usage();
+    exit 0;
+}
+
+my $root = abs_path($opt{root}) // die "Cannot resolve root $opt{root}\n";
+my @paths = expand_path_options(@{$opt{paths}});
+@paths = ('dev/src') if !@paths;
+
+my @files;
+for my $input (@paths) {
+    my $target = File::Spec->rel2abs($input, $root);
+    collect_source_files($target, \@files);
+}
+@files = sort @files;
+
+my @fatal;
+my @warning;
+my %source_by_file;
+my %line_count_by_file;
+my %stem_groups;
+
+for my $file (@files) {
+    my $rel = relative_path($file, $root);
+    next if is_exempt_file($rel);
+    my $text = read_text($file);
+    $source_by_file{$rel} = $text;
+    my $line_count = count_lines($text);
+    $line_count_by_file{$rel} = $line_count;
+    push @{$stem_groups{division_stem($rel)}}, $rel;
+
+    check_file_size($rel, $line_count, \@fatal);
+    check_file_name($rel, $line_count, \@fatal, \@warning);
+    check_includes($rel, $text, \@fatal, \@warning);
+    check_shortcut_smells($rel, $text, \@fatal, \@warning);
+    check_functions($rel, $text, \@fatal, \@warning);
+    check_header_body_weight($rel, $text, \@fatal, \@warning);
+}
+
+check_stem_groups(\%stem_groups, \@warning);
+check_duplicate_blocks(\%source_by_file, \@warning);
+
+my $stage_text = $opt{stage} ? " for $opt{stage}" : '';
+if (!@fatal && !@warning) {
+    print "File audit passed$stage_text: " . scalar(@files) . " files checked.\n";
+    exit 0;
+}
+
+if (@fatal) {
+    print "File audit failed$stage_text: " . scalar(@fatal) . " fatal issue(s)";
+    print @warning ? " and " . scalar(@warning) . " warning(s)" : "";
+    print ".\n";
+    print_findings("fatal", \@fatal);
+    print_findings("warning", \@warning) if @warning;
+    exit 1;
+}
+
+print "File audit passed$stage_text with " . scalar(@warning) . " warning(s).\n";
+print_findings("warning", \@warning);
+exit($opt{warnings_fail} ? 1 : 0);
+
+sub print_usage {
+    print <<'USAGE';
+Usage:
+  perl scripts/cppgm_file_audit.pl [--stage paN] [--paths dev/src]
+
+Audits C/C++ implementation shape for CPPGM runs. The check is deliberately
+heuristic: high-confidence cheating and mechanical split patterns are fatal,
+while lower-confidence structure smells are warnings.
+USAGE
+}
+
+sub expand_path_options {
+    my @raw = @_;
+    my @out;
+    for my $value (@raw) {
+        push @out, grep { length $_ } map {
+            s/^\s+//;
+            s/\s+$//;
+            $_;
+        } split /,/, $value;
+    }
+    return @out;
+}
+
+sub collect_source_files {
+    my ($target, $files) = @_;
+    return if !-e $target;
+    if (-f $target) {
+        push @$files, $target if is_source_file($target);
+        return;
+    }
+    return if !-d $target;
+
+    find({
+        wanted => sub {
+            my $name = $_;
+            if (-d $File::Find::name && skip_dir($name)) {
+                $File::Find::prune = 1;
+                return;
+            }
+            push @$files, $File::Find::name if -f $File::Find::name && is_source_file($File::Find::name);
+        },
+        no_chdir => 1,
+    }, $target);
+}
+
+sub skip_dir {
+    my ($name) = @_;
+    return $name =~ /^(?:\.git|obj|build|dist|node_modules)$/;
+}
+
+sub is_source_file {
+    my ($path) = @_;
+    return $path =~ /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$/;
+}
+
+sub is_exempt_file {
+    my ($rel) = @_;
+    return $rel =~ m{^dev/src/test_runner\.cpp$} ||
+        $rel =~ m{^dev/src/tool_help_text\.h$};
+}
+
+sub read_text {
+    my ($file) = @_;
+    open my $fh, '<', $file or die "Cannot read $file: $!\n";
+    local $/;
+    return <$fh>;
+}
+
+sub relative_path {
+    my ($file, $base) = @_;
+    return File::Spec->abs2rel($file, $base);
+}
+
+sub count_lines {
+    my ($text) = @_;
+    return 0 if $text eq '';
+    my $count = ($text =~ tr/\n/\n/);
+    return $text =~ /\n\z/ ? $count : $count + 1;
+}
+
+sub add_finding {
+    my ($out, $category, $path, $line, $message) = @_;
+    push @$out, {
+        category => $category,
+        path => $path,
+        line => $line,
+        message => $message,
+    };
+}
+
+sub check_file_size {
+    my ($rel, $line_count, $fatal) = @_;
+    my $limit = $opt{max_source_lines};
+    if ($rel =~ /\.(?:h|hh|hpp|hxx)$/) {
+        $limit = $opt{max_header_lines};
+    }
+    if ($rel =~ /(?:^|\/)[^\/]*internal[^\/]*\.(?:h|hh|hpp|hxx)$/) {
+        $limit = $opt{max_internal_header_lines};
+    }
+    if ($line_count > $limit) {
+        add_finding($fatal, 'size', $rel, 1, "$line_count lines exceeds limit $limit");
+    }
+}
+
+sub check_file_name {
+    my ($rel, $line_count, $fatal, $warning) = @_;
+    my ($base) = $rel =~ /([^\/]+)$/;
+    if ($base =~ /(?:^|[_-])(?:part|chunk|split|piece)[_-]?\d+(?:[_-]|\.)/i ||
+        $base =~ /(?:^|[_-])\d{1,2}\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$/i) {
+        add_finding($fatal, 'bad-division', $rel, 1,
+            "filename looks like a mechanical split rather than a cohesive module");
+    }
+    if ($base =~ /(?:^|[_-])(?:misc|helpers?|utils?|common|junk|scratch|tmp|hack|workaround)(?:[_-]|\.)/i &&
+        $line_count > 250) {
+        add_finding($warning, 'bad-division', $rel, 1,
+            "large catch-all helper file; consider a responsibility-named module");
+    }
+}
+
+sub check_includes {
+    my ($rel, $text, $fatal, $warning) = @_;
+    my @lines = split /\n/, $text;
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        if ($line =~ /^\s*#\s*include\s+[<"][^>"]+\.(?:c|cc|cpp|cxx)[>"]/) {
+            add_finding($fatal, 'bad-division', $rel, $i + 1,
+                "source file includes another source file");
+        }
+        if ($line =~ /^\s*#\s*include\s+[<"][^>"]+\.(?:inc|ipp|inl)[>"]/) {
+            add_finding($fatal, 'bad-division', $rel, $i + 1,
+                "implementation fragment include is not an acceptable file-size split");
+        }
+    }
+}
+
+sub check_shortcut_smells {
+    my ($rel, $text, $fatal, $warning) = @_;
+    my @lines = split /\n/, $text;
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        next if $line =~ m{^\s*(?://|\*)};
+        if ($line =~ /cppgm\.tests|course\/pa\d+|pa\d+\/tests|\/tests\/[^"']+\.t\b|\b\d{3}-[A-Za-z0-9_.-]+\.t\b/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "source references test-suite paths or concrete test names");
+        }
+        if ($line =~ /\b(?:system|popen)\s*\(/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "compiler implementation shells out");
+        }
+        if ($line =~ /\bgetenv\s*\(/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "compiler implementation depends on environment variables");
+        }
+        if ($line =~ /\bEXIT_NOT_IMPLEMENTED\b/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "implementation still exposes EXIT_NOT_IMPLEMENTED");
+        }
+        if ($line =~ /\b(?:hack|cheat|test[-_ ]specific|hardcod(?:e|ed)|workaround)\b/i) {
+            add_finding($warning, 'shortcut-risk', $rel, $i + 1,
+                "comment or identifier suggests a shortcut that should be reviewed");
+        }
+        if ($line =~ /\b(?:ifstream|fopen|open)\s*\([^;\n]*(?:expected|golden|reference|cppgm\.tests|\/tests\/)/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "implementation appears to read expected/reference test data");
+        }
+    }
+
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        if ($line =~ /R?"(?:\\.|[^"\\]){500,}"/) {
+            add_finding($warning, 'shortcut-risk', $rel, $i + 1,
+                "very large string literal; verify it is not encoded expected output");
+        }
+    }
+}
+
+sub check_functions {
+    my ($rel, $text, $fatal, $warning) = @_;
+    my @lines = split /\n/, mask_comments_and_strings($text);
+    my @raw_lines = split /\n/, $text;
+    my @signature;
+    my $in_function = 0;
+    my $function_start = 0;
+    my $function_name = '';
+    my $brace_depth = 0;
+    my $max_relative_depth = 0;
+
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        if (!$in_function) {
+            push @signature, $line if $line =~ /\S/;
+            shift @signature while @signature > 8;
+            my $open_pos = index($line, '{');
+            next if $open_pos < 0;
+            my $prefix = join(' ', @signature);
+            $prefix =~ s/\{.*\z//;
+            my $name = function_name_from_signature($prefix);
+            next if !$name;
+
+            $in_function = 1;
+            $function_start = $i + 1;
+            $function_name = $name;
+            $brace_depth = count_char(substr($line, $open_pos), '{') -
+                count_char(substr($line, $open_pos), '}');
+            $max_relative_depth = $brace_depth;
+            if ($brace_depth <= 0) {
+                report_function_shape($rel, $function_name, $function_start, $i + 1,
+                    $max_relative_depth, $fatal, $warning);
+                $in_function = 0;
+                @signature = ();
+            }
+            next;
+        }
+
+        $brace_depth += count_char($line, '{') - count_char($line, '}');
+        $max_relative_depth = $brace_depth if $brace_depth > $max_relative_depth;
+        if ($brace_depth <= 0) {
+            report_function_shape($rel, $function_name, $function_start, $i + 1,
+                $max_relative_depth, $fatal, $warning);
+            $in_function = 0;
+            @signature = ();
+        }
+    }
+}
+
+sub function_name_from_signature {
+    my ($signature) = @_;
+    $signature =~ s/\s+/ /g;
+    $signature =~ s/^\s+|\s+$//g;
+    return undef if $signature !~ /\)/;
+    return undef if $signature =~ /;/;
+    return undef if $signature =~ /\b(?:if|for|while|switch|catch|sizeof|alignof)\s*\(/;
+    return undef if $signature =~ /\b(?:class|struct|enum|namespace|union)\b/;
+    return undef if $signature =~ /^\s*(?:else|do)\b/;
+    return undef if $signature =~ /=\s*$/;
+    return undef if $signature =~ /\[\s*\]\s*\(/;
+
+    if ($signature =~ /([A-Za-z_~][A-Za-z0-9_:~]*)\s*\([^;{}]*\)\s*(?:const|noexcept|override|final|\s|->|[A-Za-z0-9_:<>,*&])*\z/) {
+        return $1;
+    }
+    return undef;
+}
+
+sub report_function_shape {
+    my ($rel, $name, $start, $end, $max_depth, $fatal, $warning) = @_;
+    my $length = $end - $start + 1;
+    if ($length > $opt{max_function_lines}) {
+        add_finding($fatal, 'function-size', $rel, $start,
+            "$name is $length lines; limit is $opt{max_function_lines}");
+    }
+    my $nesting = $max_depth - 1;
+    if ($nesting > $opt{max_nesting}) {
+        add_finding($fatal, 'complexity', $rel, $start,
+            "$name nesting depth is $nesting; limit is $opt{max_nesting}");
+    } elsif ($nesting > $opt{warn_nesting}) {
+        add_finding($warning, 'complexity', $rel, $start,
+            "$name nesting depth is $nesting; consider simplifying control flow");
+    }
+}
+
+sub check_header_body_weight {
+    my ($rel, $text, $fatal, $warning) = @_;
+    return if $rel !~ /\.(?:h|hh|hpp|hxx)$/;
+    my @lines = split /\n/, mask_comments_and_strings($text);
+    my $body_lines = 0;
+    for my $line (@lines) {
+        $body_lines++ if $line =~ /[{};]/ && $line !~ /^\s*(?:class|struct|enum|namespace|typedef|using|#)/;
+    }
+    if ($body_lines > 180) {
+        add_finding($warning, 'bad-division', $rel, 1,
+            "header contains substantial implementation body; prefer .cpp ownership");
+    }
+}
+
+sub check_stem_groups {
+    my ($groups, $warning) = @_;
+    for my $stem (sort keys %$groups) {
+        my @group = @{$groups->{$stem}};
+        next if @group < 7;
+        add_finding($warning, 'bad-division', $group[0], 1,
+            "many files share stem '$stem': " . join(', ', @group) .
+            "; verify this is cohesive layering rather than scattering one module");
+    }
+}
+
+sub check_duplicate_blocks {
+    my ($source_by_file, $warning) = @_;
+    my %seen;
+    for my $rel (sort keys %$source_by_file) {
+        my @logical = normalized_logical_lines($source_by_file->{$rel});
+        next if @logical < $opt{duplicate_window};
+        for (my $i = 0; $i + $opt{duplicate_window} <= @logical; ++$i) {
+            my @slice = @logical[$i .. $i + $opt{duplicate_window} - 1];
+            my $key = join("\n", map { $_->{text} } @slice);
+            next if length($key) < $opt{duplicate_min_chars};
+            if (my $first = $seen{$key}) {
+                next if $first->{path} eq $rel && abs($first->{line} - $slice[0]{line}) < $opt{duplicate_window};
+                add_finding($warning, 'duplication', $rel, $slice[0]{line},
+                    "large duplicate block also appears at $first->{path}:$first->{line}");
+                last;
+            }
+            $seen{$key} = { path => $rel, line => $slice[0]{line} };
+        }
+    }
+}
+
+sub normalized_logical_lines {
+    my ($text) = @_;
+    my @lines = split /\n/, mask_comments_and_strings($text);
+    my @out;
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        $line =~ s/\s+//g;
+        next if length($line) < 8;
+        next if $line =~ /^[{};]+$/;
+        next if $line =~ /^(?:break|continue|return|else);?$/;
+        push @out, { text => $line, line => $i + 1 };
+    }
+    return @out;
+}
+
+sub division_stem {
+    my ($rel) = @_;
+    my ($base) = $rel =~ /([^\/]+)$/;
+    $base =~ s/\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)\z//;
+    $base =~ s/(?:[_-](?:part|chunk|split|piece)?\d+)\z//i;
+    $base =~ s/(?:[_-](?:impl|internal|core|model|parser|emit|expr|decl|stmt|ops|primary|function|types|class|lifecycle|convert|aggregate|validate|frontend|backend|helpers?|utils?))\z//i;
+    return $base;
+}
+
+sub mask_comments {
+    my ($text) = @_;
+    return mask_text($text, 1, 0);
+}
+
+sub mask_comments_and_strings {
+    my ($text) = @_;
+    return mask_text($text, 1, 1);
+}
+
+sub mask_text {
+    my ($text, $mask_comments, $mask_strings) = @_;
+    my @chars = split //, $text;
+    my $out = '';
+    my $state = 'normal';
+    for (my $i = 0; $i < @chars; ++$i) {
+        my $ch = $chars[$i];
+        my $next = $i + 1 < @chars ? $chars[$i + 1] : '';
+        if ($state eq 'line_comment') {
+            if ($ch eq "\n") {
+                $state = 'normal';
+                $out .= "\n";
+            } else {
+                $out .= ' ';
+            }
+            next;
+        }
+        if ($state eq 'block_comment') {
+            if ($ch eq '*' && $next eq '/') {
+                $out .= '  ';
+                ++$i;
+                $state = 'normal';
+            } else {
+                $out .= $ch eq "\n" ? "\n" : ' ';
+            }
+            next;
+        }
+        if ($state eq 'string') {
+            if ($ch eq '\\') {
+                $out .= ' ';
+                if ($i + 1 < @chars) {
+                    $out .= $chars[$i + 1] eq "\n" ? "\n" : ' ';
+                    ++$i;
+                }
+                next;
+            }
+            $state = 'normal' if $ch eq '"';
+            $out .= $ch eq "\n" ? "\n" : ' ';
+            next;
+        }
+        if ($state eq 'char') {
+            if ($ch eq '\\') {
+                $out .= ' ';
+                if ($i + 1 < @chars) {
+                    $out .= $chars[$i + 1] eq "\n" ? "\n" : ' ';
+                    ++$i;
+                }
+                next;
+            }
+            $state = 'normal' if $ch eq "'";
+            $out .= $ch eq "\n" ? "\n" : ' ';
+            next;
+        }
+
+        if ($mask_comments && $ch eq '/' && $next eq '/') {
+            $out .= '  ';
+            ++$i;
+            $state = 'line_comment';
+            next;
+        }
+        if ($mask_comments && $ch eq '/' && $next eq '*') {
+            $out .= '  ';
+            ++$i;
+            $state = 'block_comment';
+            next;
+        }
+        if ($mask_strings && $ch eq '"') {
+            $out .= ' ';
+            $state = 'string';
+            next;
+        }
+        if ($mask_strings && $ch eq "'") {
+            $out .= ' ';
+            $state = 'char';
+            next;
+        }
+        $out .= $ch;
+    }
+    return $out;
+}
+
+sub count_char {
+    my ($text, $char) = @_;
+    return () = $text =~ /\Q$char\E/g;
+}
+
+sub print_findings {
+    my ($label, $findings) = @_;
+    for my $finding (@$findings) {
+        my $location = $finding->{path};
+        $location .= ":$finding->{line}" if $finding->{line};
+        print "  [$label][$finding->{category}] $location: $finding->{message}\n";
+    }
+}

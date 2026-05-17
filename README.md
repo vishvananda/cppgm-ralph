@@ -57,6 +57,8 @@ http://127.0.0.1:4173
 
 - a run summary
 - turn-level rollup view
+- active phase and configured check status when the event log contains
+  `ralph.phase-status` or a phase-aware Ralph prompt
 - event-level drill-down with full JSON payload
 - event-type filtering
 
@@ -274,8 +276,19 @@ Example two-phase setup:
 }
 ```
 
-The repo also includes `scripts/cppgm-file-audit.js`, which can be used as a
-check command for CPPGM runs:
+The repo includes two CPPGM audit helpers. `scripts/cppgm_file_audit.pl` is the
+current richer audit used by phase runs; copy it into the assignment worktree
+when the run config invokes `perl scripts/cppgm_file_audit.pl`:
+
+```json
+"fileAudit": {
+  "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev/src",
+  "required": true
+}
+```
+
+`scripts/cppgm-file-audit.js` is a smaller legacy file-size-only helper that can
+also be referenced directly from the Ralph repo:
 
 ```json
 "fileAudit": {

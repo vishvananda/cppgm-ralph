@@ -153,6 +153,14 @@ async function main() {
     ) {
       const threadId = activeThreadId ?? state.threadId ?? null;
       await appendRalphEventRecord(
+        buildRalphPhaseStatusEventRecord({
+          phaseStatus,
+          threadId,
+          turnNumber,
+          action: "checked",
+        }),
+      );
+      await appendRalphEventRecord(
         buildRalphTestStatusEventRecord({
           testStatus,
           threadId,
@@ -299,6 +307,12 @@ async function main() {
     const turn = await collectStreamedTurn(events, {
       prompt,
       preTurnEventRecords: [
+        buildRalphPhaseStatusEventRecord({
+          phaseStatus,
+          threadId: thread.id ?? activeThreadId,
+          turnNumber: turnNumber + 1,
+          action: "turn-start",
+        }),
         buildRalphTestStatusEventRecord({
           testStatus,
           threadId: thread.id ?? activeThreadId,
@@ -2740,6 +2754,25 @@ function buildRalphTestStatusEventRecord({ testStatus, threadId, turnNumber }) {
       type: "ralph.test-status",
       sender: "ralph",
       testStatus,
+    },
+  };
+}
+
+function buildRalphPhaseStatusEventRecord({ phaseStatus, threadId, turnNumber, action = "checked" }) {
+  if (!phaseStatus) {
+    return null;
+  }
+
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.phase-status",
+    event: {
+      type: "ralph.phase-status",
+      sender: "ralph",
+      action,
+      phaseStatus,
     },
   };
 }

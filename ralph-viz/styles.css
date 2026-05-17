@@ -76,6 +76,8 @@ button:hover { background: #252525; }
   flex-basis: 100%;
 }
 .summary-progress { color: #d0a64a; }
+.summary-phase { color: #d0a64a; }
+.summary-phase-pass { color: var(--ok); }
 
 .progress-dock {
   position: fixed;
@@ -107,6 +109,8 @@ button:hover { background: #252525; }
 }
 
 .dock-main { color: #d0a64a; }
+.dock-phase { color: #d0a64a; }
+.dock-phase-pass { color: var(--ok); }
 .dock-turn { color: #888; }
 .dock-tests { color: #b08030; }
 .dock-tests-pass { color: var(--ok); }
@@ -147,6 +151,8 @@ button:hover { background: #252525; }
 .turn-info { color: var(--muted); font-size: 0.78rem; }
 .turn-window { color: #777; font-size: 0.78rem; }
 .turn-duration { color: #777; font-size: 0.78rem; }
+.turn-phase { color: #d0a64a; font-size: 0.78rem; }
+.turn-phase-pass { color: #4a4; }
 .turn-progress { color: #d0a64a; font-size: 0.78rem; }
 .turn-tests { color: #b08030; font-size: 0.78rem; }
 .turn-tests-pass { color: #4a4; }
@@ -225,6 +231,7 @@ button:hover { background: #252525; }
   }
 
   .dock-turn,
+  .dock-phase,
   .dock-main,
   .dock-tests {
     flex-basis: 100%;
@@ -239,6 +246,7 @@ button:hover { background: #252525; }
   }
 
   .turn-window,
+  .turn-phase,
   .turn-progress,
   .turn-tests {
     flex: 1 1 100%;
@@ -462,6 +470,64 @@ button:hover { background: #252525; }
   color: #cfc;
 }
 
+/* Phase status (ralph.phase-status) */
+.ev-phase {
+  padding: 0.3rem 0;
+  border-left: 3px solid #a84;
+  padding-left: 0.6rem;
+  margin: 0.15rem 0;
+}
+
+.phase-label {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #d0a64a;
+  margin-bottom: 0.15rem;
+}
+
+.phase-label-pass { color: var(--ok); }
+
+.phase-checks {
+  display: grid;
+  gap: 0.12rem;
+  font-size: 0.78rem;
+}
+
+.phase-check {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.phase-check-name {
+  color: #ddd;
+  font-weight: 600;
+  min-width: 5.5rem;
+}
+
+.phase-check-result { color: var(--bad); white-space: nowrap; }
+.phase-check-pass .phase-check-result { color: var(--ok); }
+
+.phase-check-command {
+  color: #9d9;
+  font-family: "SF Mono", "Consolas", monospace;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phase-check-preview {
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Gemini thought */
 .ev-thought {
   padding: 0.3rem 0;
@@ -554,5 +620,18 @@ pre { margin: 0; }
   .cmd-output,
   .file-diff {
     margin-left: 0.4rem;
+  }
+
+  .phase-check {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .phase-check-command,
+  .phase-check-preview {
+    flex-basis: 100%;
+    min-width: 0;
+    white-space: normal;
+    word-break: break-word;
   }
 }

@@ -118,6 +118,7 @@ function buildSummary(events) {
     tokenUsage: latestCumulativeUsage(events),
     priceModel,
     latestTurn: latestTurnOverview(events, priceModel),
+    latestPhaseStatus: latestPhaseStatus(events),
     testProgress: buildAgentTestProgressState(events),
     latestTestStatus: latestTestStatus(events),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
@@ -165,6 +166,9 @@ function renderSummary(events) {
     ? costEstimateText(s.tokenUsage, s.priceModel, { includeModel: true })
     : '<span class="muted">n/a</span>';
   const progressText = latestProgressSummaryHtml(s.testProgress.latest);
+  const phaseText = s.latestPhaseStatus
+    ? latestPhaseStatusHtml(s.latestPhaseStatus.status)
+    : '<span class="muted">n/a</span>';
 
   summaryEl.innerHTML = `
     <div><strong>thread</strong>${truncate(s.threadId, 24)}</div>
@@ -172,6 +176,7 @@ function renderSummary(events) {
     <div><strong>turns</strong>${s.turns}</div>
     <div><strong>started</strong>${fmt(s.first)}</div>
     <div><strong>latest</strong>${fmt(s.last)}</div>
+    <div class="summary-wide"><strong>phase</strong>${phaseText}</div>
     <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
     <div class="summary-wide"><strong>tokens</strong>${tokenText}</div>
     <div class="summary-wide"><strong>api estimate</strong>${costText}</div>
@@ -187,8 +192,12 @@ function renderProgressDock(summary) {
   const run = selectedRunMeta();
   const progress = summary?.testProgress?.latest ?? null;
   const testStatus = summary?.latestTestStatus?.status ?? null;
+  const phaseStatus = summary?.latestPhaseStatus?.status ?? null;
   const latestTurn = summary?.latestTurn ?? null;
   const latest = summary?.last ? fmtShort(summary.last) : "";
+  const phaseHtml = phaseStatus
+    ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
+    : '<span class="muted">phase n/a</span>';
   const progressHtml = progress
     ? `<span class="dock-main">${escapeHtml(dockProgressText(progress))}</span>`
     : '<span class="muted">test progress n/a</span>';
@@ -202,6 +211,7 @@ function renderProgressDock(summary) {
   progressDock.innerHTML = `
     <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
     ${turnHtml}
+    ${phaseHtml}
     ${progressHtml}
     ${testHtml}
     ${updatedHtml}
@@ -566,6 +576,59 @@ function renderGoalCard(record) {
   return card;
 }
 
+function renderPhaseStatusCard(record) {
+  const status = record.event?.phaseStatus;
+  if (!status) return null;
+
+  const card = document.createElement("div");
+  card.className = "ev ev-phase";
+
+  const label = document.createElement("span");
+  label.className = status.allRequiredPassed ? "phase-label phase-label-pass" : "phase-label";
+  const action = record.event?.action ? ` / ${record.event.action}` : "";
+  label.textContent = `Phase ${phaseStatusText(status)}${action}`;
+  card.append(label);
+
+  const checks = Array.isArray(status.checks) ? status.checks : [];
+  if (checks.length) {
+    const list = document.createElement("div");
+    list.className = "phase-checks";
+    for (const check of checks) {
+      const row = document.createElement("div");
+      row.className = `phase-check${check.passed ? " phase-check-pass" : " phase-check-fail"}`;
+
+      const name = document.createElement("span");
+      name.className = "phase-check-name";
+      name.textContent = check.name ?? "check";
+      row.append(name);
+
+      const result = document.createElement("span");
+      result.className = "phase-check-result";
+      result.textContent = check.passed ? "pass" : `fail ${check.exitCode ?? "?"}`;
+      row.append(result);
+
+      if (check.command) {
+        const command = document.createElement("code");
+        command.className = "phase-check-command";
+        command.textContent = check.command;
+        row.append(command);
+      }
+
+      if (!check.passed && check.outputPreview) {
+        const preview = document.createElement("span");
+        preview.className = "phase-check-preview";
+        preview.textContent = check.outputPreview;
+        row.append(preview);
+      }
+
+      list.append(row);
+    }
+    card.append(list);
+  }
+
+  return card;
+}
+
 function renderGeminiMessageCard(entry) {
   const text = cleanText(entry.text);
   if (!text) return null;
@@ -723,6 +786,8 @@ function renderDisplayEntry(entry) {
     return renderGoalCard(record);
   if (record.eventType === "ralph.prompt")
     return renderPromptCard(record);
+  if (record.eventType === "ralph.phase-status")
+    return renderPhaseStatusCard(record);
   if (record.eventType === "item.completed" && item?.type === "agent_message")
     return renderMessageCard(record);
   if (record.eventType === "item.completed" && item?.type === "file_change")
@@ -1019,6 +1084,9 @@ function buildTestStatusMap(records) {
     if (r.eventType === "ralph.test-status" && r.event?.testStatus) {
       const turn = displayTurnForRecord(r);
       map.set(turn, r.event.testStatus);
+    } else if (r.eventType === "ralph.phase-status" && r.event?.phaseStatus?.testStatus) {
+      const turn = displayTurnForRecord(r);
+      map.set(turn, r.event.phaseStatus.testStatus);
     }
   }
   for (const r of records) {
@@ -1034,6 +1102,114 @@ function buildTestStatusMap(records) {
     map.set(turn, mergeTestStatus(map.get(turn), derived));
   }
   return map;
+}
+
+function buildPhaseStatusMap(records) {
+  const map = new Map();
+  for (const r of records) {
+    const candidate = phaseStatusCandidateFromRecord(r);
+    if (!candidate) {
+      continue;
+    }
+    const turn = displayTurnForRecord(r);
+    const previous = map.get(turn);
+    if (!previous || candidate.priority >= previous.priority) {
+      map.set(turn, candidate);
+    }
+  }
+  return new Map([...map.entries()].map(([turn, candidate]) => [turn, candidate.status]));
+}
+
+function latestPhaseStatus(records) {
+  let selectedTurn = null;
+  let selectedStatus = null;
+  let selectedTime = 0;
+  let selectedPriority = 0;
+  for (const r of records) {
+    const candidate = phaseStatusCandidateFromRecord(r);
+    if (!candidate) {
+      continue;
+    }
+    const time = Date.parse(r.recordedAt ?? "");
+    const sortableTime = Number.isFinite(time) ? time : 0;
+    if (
+      !selectedStatus ||
+      sortableTime > selectedTime ||
+      (sortableTime === selectedTime && candidate.priority >= selectedPriority)
+    ) {
+      selectedTurn = displayTurnForRecord(r);
+      selectedStatus = candidate.status;
+      selectedTime = sortableTime;
+      selectedPriority = candidate.priority;
+    }
+  }
+  return selectedStatus == null ? null : { turn: selectedTurn, status: selectedStatus };
+}
+
+function phaseStatusCandidateFromRecord(record) {
+  if (record.eventType === "ralph.phase-status" && record.event?.phaseStatus) {
+    return { priority: 2, status: record.event.phaseStatus };
+  }
+  if (record.eventType === "ralph.prompt") {
+    const inferred = inferPhaseStatusFromPrompt(record.event?.prompt);
+    return inferred ? { priority: 1, status: inferred } : null;
+  }
+  return null;
+}
+
+function inferPhaseStatusFromPrompt(prompt) {
+  const text = cleanText(prompt);
+  if (!text) {
+    return null;
+  }
+  const phase =
+    text.match(/^- Current phase:\s*`([^`]+)`/m)?.[1] ??
+    text.match(/^You are in the ([A-Za-z0-9._-]+) phase\b/m)?.[1] ??
+    null;
+  const stage =
+    text.match(/^- Current stage:\s*`(pa\d+)`/m)?.[1] ??
+    text.match(/^You are in the [A-Za-z0-9._-]+ phase for `(pa\d+)`/m)?.[1] ??
+    null;
+  const checkLine = text.match(/^Phase checks \(([^)]+)\):\s*(.+)$/m);
+  const checkPhase = checkLine?.[1] ?? null;
+  const checks = parsePhaseCheckLine(checkLine?.[2] ?? "");
+
+  if (!phase && !checkPhase && !stage && checks.length === 0) {
+    return null;
+  }
+
+  const failedRequiredChecks = checks.filter((check) => check.required && !check.passed);
+  return {
+    phase: phase ?? checkPhase ?? "unknown",
+    stage,
+    checks,
+    allRequiredPassed: checks.length > 0 ? failedRequiredChecks.length === 0 : false,
+    failedRequiredChecks,
+    inferred: true,
+  };
+}
+
+function parsePhaseCheckLine(line) {
+  return String(line ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const match = part.match(/^([A-Za-z0-9._-]+)\s+(pass|fail)\s+\((-?\d+)\)$/i);
+      if (!match) {
+        return null;
+      }
+      const passed = match[2].toLowerCase() === "pass";
+      return {
+        name: match[1],
+        kind: null,
+        required: true,
+        primary: false,
+        exitCode: Number.parseInt(match[3], 10),
+        passed,
+      };
+    })
+    .filter(Boolean);
 }
 
 function mergeTestStatus(existing, derived) {
@@ -1663,6 +1839,55 @@ function inferProgressStage(target, sectionStage, fallbackStage) {
   return target.match(/\b(pa\d+)\b/)?.[1] ?? sectionStage ?? fallbackStage ?? null;
 }
 
+function latestPhaseStatusHtml(status) {
+  if (!status) {
+    return '<span class="muted">n/a</span>';
+  }
+  const checkHtml = (status.checks ?? []).map(checkPillHtml).join(" ");
+  return [
+    `<span class="summary-phase${status.allRequiredPassed ? " summary-phase-pass" : ""}">${escapeHtml(phaseStatusText(status))}</span>`,
+    checkHtml,
+  ].filter(Boolean).join(" ");
+}
+
+function phaseStatusText(status) {
+  if (!status) {
+    return "";
+  }
+  const parts = [];
+  if (status.phase) parts.push(status.phase);
+  if (status.stage) parts.push(status.stage);
+  if (status.allRequiredPassed) {
+    parts.push("checks pass");
+  } else {
+    parts.push(phaseChecksText(status) || "checks incomplete");
+  }
+  return parts.join(" / ");
+}
+
+function phaseChecksText(status) {
+  const checks = (status?.checks ?? []).filter((check) => check?.name);
+  if (!checks.length) {
+    return "";
+  }
+  return checks
+    .map((check) => `${check.name} ${check.passed ? "pass" : "fail"}`)
+    .join(", ");
+}
+
+function checkPillHtml(check) {
+  if (!check?.name) {
+    return "";
+  }
+  const className = check.passed
+    ? "pill pill-ok"
+    : check.required
+      ? "pill pill-bad"
+      : "pill";
+  const text = `${check.name} ${check.passed ? "pass" : `fail ${check.exitCode ?? "?"}`}`;
+  return `<span class="${className}">${escapeHtml(text)}</span>`;
+}
+
 function latestProgressSummaryHtml(progress) {
   if (!progress) {
     return '<span class="muted">n/a</span>';
@@ -1903,6 +2128,7 @@ function renderTimeline(records) {
   rememberOpenEntryKeys();
   const usageMap = buildUsageMap(records);
   const testMap = buildTestStatusMap(records);
+  const phaseMap = buildPhaseStatusMap(records);
   const durationMap = buildTurnDurationMap(records);
   const progressMap = buildAgentTestProgressState(records).byTurn;
   const filtered = filterRecords(records);
@@ -1915,6 +2141,11 @@ function renderTimeline(records) {
     }
   }
   for (const turn of testMap.keys()) {
+    if (!turnMap.has(turn)) {
+      turnMap.set(turn, []);
+    }
+  }
+  for (const turn of phaseMap.keys()) {
     if (!turnMap.has(turn)) {
       turnMap.set(turn, []);
     }
@@ -1957,6 +2188,7 @@ function renderTimeline(records) {
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
+    const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
     const duration = durationText(durationMap.get(turn));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
@@ -1968,7 +2200,10 @@ function renderTimeline(records) {
     const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
     const cardWindowHtml = cardWindowText ? ` <span class="turn-window">${escapeHtml(cardWindowText)}</span>` : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${cardWindowHtml}${progressHtml}${tsHtml}${usageHtml}`;
+    const phaseHtml = phase
+      ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
+      : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
     details.append(summary);
 
     const feed = document.createElement("div");
