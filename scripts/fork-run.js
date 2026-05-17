@@ -101,7 +101,8 @@ async function main() {
     label: "remove source remote",
   });
 
-  const renderedTestCommand = renderTestCommand(targetConfig.testCommand, throughStage);
+  const primaryCheckCommandTemplate = getPrimaryCheckCommandTemplate(targetConfig);
+  const renderedTestCommand = renderTestCommand(primaryCheckCommandTemplate, throughStage);
   let testSummary = {
     stageNames: buildStageNames(stageNumber(throughStage)),
     testsPassed: 0,
@@ -123,10 +124,12 @@ async function main() {
 
   await fs.writeFile(targetConfigPath, `${JSON.stringify(targetConfig, null, 2)}\n`, "utf8");
   await copyPromptIfNeeded(sourcePromptPath, targetPromptPath);
+  await copySidecarTemplates(sourceConfigPath, targetConfigPath);
   await writeSeedState({
     stateDir,
     throughStage,
     targetConfig,
+    primaryCheckCommandTemplate,
     renderedTestCommand,
     testSummary,
   });
@@ -294,7 +297,57 @@ async function copyPromptIfNeeded(sourcePromptPath, targetPromptPath) {
   log(`copied prompt ${sourcePromptPath} -> ${targetPromptPath}`);
 }
 
-async function writeSeedState({ stateDir, throughStage, targetConfig, renderedTestCommand, testSummary }) {
+async function copySidecarTemplates(sourceConfigPath, targetConfigPath) {
+  const sourceBase = buildSidecarTemplateBasePath(sourceConfigPath);
+  const targetBase = buildSidecarTemplateBasePath(targetConfigPath);
+  const sourceDir = path.dirname(sourceBase);
+  const sourcePrefix = `${path.basename(sourceBase)}.`;
+
+  let entries;
+  try {
+    entries = await fs.readdir(sourceDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith(sourcePrefix) || !entry.name.endsWith(".md")) {
+      continue;
+    }
+    const suffix = entry.name.slice(sourcePrefix.length);
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = `${targetBase}.${suffix}`;
+    if (await pathExists(targetPath)) {
+      log(`kept existing sidecar ${targetPath}`);
+      continue;
+    }
+    await fs.copyFile(sourcePath, targetPath);
+    log(`copied sidecar ${sourcePath} -> ${targetPath}`);
+  }
+}
+
+function buildSidecarTemplateBasePath(configPath) {
+  const directory = path.dirname(configPath);
+  const basename = path.basename(configPath);
+  const stem = basename.endsWith(".config.json")
+    ? basename.slice(0, -".config.json".length)
+    : basename.endsWith(".json")
+      ? basename.slice(0, -".json".length)
+      : basename;
+  return path.join(directory, stem);
+}
+
+async function writeSeedState({
+  stateDir,
+  throughStage,
+  targetConfig,
+  primaryCheckCommandTemplate,
+  renderedTestCommand,
+  testSummary,
+}) {
   await fs.mkdir(path.join(stateDir, "events"), { recursive: true });
   const stages = testSummary.stageNames.map((stageName) => ({
     name: stageName,
@@ -314,9 +367,9 @@ async function writeSeedState({ stateDir, throughStage, targetConfig, renderedTe
     lastTestStatus: {
       recordedAt: new Date().toISOString(),
       command: renderedTestCommand,
-      commandTemplate: targetConfig.testCommand,
+      commandTemplate: primaryCheckCommandTemplate,
       targetStage: throughStage,
-      usesStageTemplate: hasStagePlaceholder(targetConfig.testCommand),
+      usesStageTemplate: hasStagePlaceholder(primaryCheckCommandTemplate),
       exitCode: 0,
       allTestsPassed: true,
       stageCount: stages.length,
@@ -333,9 +386,51 @@ async function writeSeedState({ stateDir, throughStage, targetConfig, renderedTe
       stages,
     },
     activeStage: nextStage(throughStage),
+    activePhase: getFirstPhaseName(targetConfig),
+    phaseAttempted: false,
     updatedAt: new Date().toISOString(),
   };
   await fs.writeFile(path.join(stateDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function getPrimaryCheckCommandTemplate(config) {
+  const checks = normalizeCheckEntries(config.checks);
+  if (checks.length === 0) {
+    return config.testCommand ?? DEFAULT_TEST_COMMAND;
+  }
+  const primary =
+    checks.find((check) => check.primary) ??
+    checks.find((check) => check.name === "tests") ??
+    checks[0];
+  return primary.command ?? config.testCommand ?? DEFAULT_TEST_COMMAND;
+}
+
+function normalizeCheckEntries(rawChecks) {
+  if (!rawChecks) {
+    return [];
+  }
+  if (Array.isArray(rawChecks)) {
+    return rawChecks
+      .map((entry, index) => typeof entry === "string"
+        ? { name: index === 0 ? "tests" : `check${index + 1}`, command: entry }
+        : { name: entry?.name ?? (index === 0 ? "tests" : `check${index + 1}`), ...entry })
+      .filter((entry) => entry?.command);
+  }
+  if (typeof rawChecks === "object") {
+    return Object.entries(rawChecks)
+      .map(([name, definition]) => typeof definition === "string"
+        ? { name, command: definition }
+        : { name, ...definition })
+      .filter((entry) => entry?.command);
+  }
+  return [];
+}
+
+function getFirstPhaseName(config) {
+  if (Array.isArray(config.phases) && config.phases.length > 0) {
+    return config.phases[0]?.name ?? "phase1";
+  }
+  return "default";
 }
 
 function parsePassingTestOutput(output, throughStage) {
@@ -354,15 +449,18 @@ function parsePassingTestOutput(output, throughStage) {
 }
 
 function renderTestCommand(command, stageName) {
+  const stageNumberText = String(stageName).replace(/^pa/i, "");
   return command
     .replace(/\bpaX\b/g, stageName)
     .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, stageName)
+    .replace(/\{\{\s*stageNumber\s*\}\}/g, stageNumberText)
     .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, stageName);
 }
 
 function hasStagePlaceholder(command) {
   return /\bpaX\b/.test(command) ||
     /\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/.test(command) ||
+    /\{\{\s*stageNumber\s*\}\}/.test(command) ||
     /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command);
 }
 

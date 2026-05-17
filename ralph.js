@@ -37,6 +37,8 @@ const DEFAULT_CONFIG = {
   baseDir: "/work",
   name: "cppgm",
   testCommand: "make test",
+  checks: null,
+  phases: null,
   maxTurns: 1000,
   stateBaseDir: ".ralph",
   model: "gpt-5.3-codex",
@@ -60,6 +62,7 @@ const CONFIG_PATH = path.resolve(process.cwd(), process.env.RALPH_CONFIG ?? "ral
 let CONFIG = null;
 let STATE_PATH = null;
 let TEST_LOG_PATH = null;
+let CHECK_LOG_DIR_PATH = null;
 let EVENTS_DIR_PATH = null;
 let PROMPT_PARTIALS = {};
 let TEST_STAGE_NAMES = [];
@@ -69,9 +72,11 @@ async function main() {
   PROMPT_PARTIALS = await loadPromptPartials();
   STATE_PATH = path.join(CONFIG.stateDir, "state.json");
   TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
+  CHECK_LOG_DIR_PATH = path.join(CONFIG.stateDir, "checks");
   EVENTS_DIR_PATH = path.join(CONFIG.stateDir, "events");
 
   await fs.mkdir(CONFIG.stateDir, { recursive: true });
+  await fs.mkdir(CHECK_LOG_DIR_PATH, { recursive: true });
   await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
   const state = await loadState();
   const startingFreshRun =
@@ -101,7 +106,8 @@ async function main() {
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
       `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
-      `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"}`,
+      `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
+      `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
   );
   const threadOptions = {
     workingDirectory: CONFIG.workdir,
@@ -125,20 +131,14 @@ async function main() {
   let turnNumber = state.turnsCompleted;
   while (turnNumber < CONFIG.maxTurns) {
     const hadExistingThread = Boolean(activeThreadId);
-    const testCommandContext = buildTestCommandContext(state);
-    log(`Running test command: ${testCommandContext.command}`);
-    const testRun = await runCommand(testCommandContext.command, CONFIG.workdir);
-    await fs.writeFile(TEST_LOG_PATH, testRun.output, "utf8");
+    const phase = resolveActivePhase(state);
+    const phaseStatus = await runPhaseChecks(state, phase);
+    const testStatus = phaseStatus.testStatus;
     const gitStatus = await getGitStatus(CONFIG.workdir);
-    const testStatus = analyzeTestProgress(testRun.output, state.lastTestStatus, {
-      command: testCommandContext.command,
-      commandTemplate: testCommandContext.template,
-      exitCode: testRun.exitCode,
-      targetStage: testCommandContext.stage,
-      usesStageTemplate: testCommandContext.usesStageTemplate,
-    });
-    log(`Latest test output: ${previewText(testRun.output)}`);
-    log(`Test status: ${formatTestStatusSummary(testStatus)}`);
+    const shouldRunRequiredPhaseTurn = shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
+    const cleanupOnlyTurn = phaseStatus.allRequiredPassed && !gitStatus.clean;
+    log(`Phase check status: ${formatPhaseCheckResults(phaseStatus)}`);
+    log(`Primary test status: ${formatTestStatusSummary(testStatus)}`);
     if (testStatus.stages.length > 0) {
       log(`Stage breakdown: ${formatStageBreakdown(testStatus)}`);
     }
@@ -146,8 +146,11 @@ async function main() {
       log(`Git status: ${previewText(gitStatus.output)}`);
     }
 
-    const nextStage = getNextStageAfterPassingCommand(testStatus, gitStatus);
-    if (nextStage) {
+    if (
+      phaseStatus.allRequiredPassed &&
+      gitStatus.clean &&
+      !shouldRunRequiredPhaseTurn
+    ) {
       const threadId = activeThreadId ?? state.threadId ?? null;
       await appendRalphEventRecord(
         buildRalphTestStatusEventRecord({
@@ -157,71 +160,94 @@ async function main() {
         }),
       );
       await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
+      const nextPhase = getNextPhase(phase);
+      if (nextPhase) {
+        await saveState({
+          threadId,
+          eventLogPath: buildEventLogPath(threadId),
+          turnsCompleted: turnNumber,
+          lastExitCode: 0,
+          lastTestStatus: testStatus,
+          activeStage: getStateActiveStageAfterTest(testStatus),
+          activePhase: nextPhase.name,
+          phaseAttempted: false,
+          updatedAt: new Date().toISOString(),
+        });
+        state.threadId = threadId;
+        state.lastExitCode = 0;
+        state.lastTestStatus = testStatus;
+        state.activeStage = getStateActiveStageAfterTest(testStatus);
+        state.activePhase = nextPhase.name;
+        state.phaseAttempted = false;
+        log(`Phase ${phase.name} completed. Advancing to phase ${nextPhase.name}.`);
+        continue;
+      }
+
+      const nextStage = getNextStageAfterCompletedPhase(testStatus);
+      if (nextStage) {
+        const firstPhase = CONFIG.phases[0];
+        await saveState({
+          threadId,
+          eventLogPath: buildEventLogPath(threadId),
+          turnsCompleted: turnNumber,
+          lastExitCode: 0,
+          lastTestStatus: testStatus,
+          activeStage: nextStage,
+          activePhase: firstPhase.name,
+          phaseAttempted: false,
+          updatedAt: new Date().toISOString(),
+        });
+        state.threadId = threadId;
+        state.lastExitCode = 0;
+        state.lastTestStatus = testStatus;
+        state.activeStage = nextStage;
+        state.activePhase = firstPhase.name;
+        state.phaseAttempted = false;
+        log(`Phase ${phase.name} completed for ${testStatus.targetStage}. Advancing to ${nextStage}.`);
+        continue;
+      }
+
       await saveState({
         threadId,
         eventLogPath: buildEventLogPath(threadId),
         turnsCompleted: turnNumber,
         lastExitCode: 0,
         lastTestStatus: testStatus,
-        activeStage: nextStage,
+        activeStage: null,
+        activePhase: null,
+        phaseAttempted: false,
         updatedAt: new Date().toISOString(),
       });
       state.threadId = threadId;
       state.lastExitCode = 0;
       state.lastTestStatus = testStatus;
-      state.activeStage = nextStage;
-      log(`\`${testStatus.command}\` passed. Advancing to ${nextStage}.`);
-      continue;
-    }
-
-    if (testRun.exitCode === 0 && gitStatus.clean) {
-      const finalThreadId = activeThreadId ?? state.threadId ?? null;
-      await appendRalphEventRecord(
-        buildRalphTestStatusEventRecord({
-          testStatus,
-          threadId: finalThreadId,
-          turnNumber,
-        }),
-      );
-      await completeLoopGoalIfPresent(finalThreadId, testStatus, turnNumber);
-      if (
-        activeThreadId ||
-        state.threadId ||
-        state.turnsCompleted > 0 ||
-        state.activeStage ||
-        state.lastTestStatus
-      ) {
-        await saveState({
-          threadId: finalThreadId,
-          eventLogPath: buildEventLogPath(finalThreadId),
-          turnsCompleted: turnNumber,
-          lastExitCode: 0,
-          lastTestStatus: testStatus,
-          activeStage: null,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-      state.threadId = finalThreadId;
-      state.lastExitCode = 0;
-      state.lastTestStatus = testStatus;
       state.activeStage = null;
+      state.activePhase = null;
+      state.phaseAttempted = false;
       state.turnsCompleted = turnNumber;
-      log(`\`${testStatus.command}\` passed. Exiting.`);
+      log(`All required checks passed for final phase ${phase.name}. Exiting.`);
       return;
     }
 
-    log(
-      `Test run failed with exit code ${testRun.exitCode}. Handing control back to Codex ` +
-        `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
-    );
+    if (shouldRunRequiredPhaseTurn) {
+      log(
+        `Required checks pass; handing control to Codex for phase ${phase.name} ` +
+          `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
+      );
+    } else {
+      log(
+        `Required phase checks are not complete. Handing control back to Codex ` +
+          `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
+      );
+    }
 
     PROMPT_PARTIALS = await loadPromptPartials();
     const prompt =
-      testRun.exitCode === 0 && !gitStatus.clean
-        ? buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber + 1)
+      cleanupOnlyTurn
+        ? buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber + 1, phase, phaseStatus)
         : turnNumber === 0 && !hadExistingThread
-          ? buildInitialPrompt(testStatus, gitStatus, turnNumber + 1)
-          : buildContinuePrompt(testStatus, gitStatus, turnNumber + 1);
+          ? buildInitialPrompt(testStatus, gitStatus, turnNumber + 1, phase, phaseStatus)
+          : buildContinuePrompt(testStatus, gitStatus, turnNumber + 1, phase, phaseStatus);
 
     let loopGoalEventRecord = null;
     if (CONFIG.loopGoalsEnabled) {
@@ -229,6 +255,8 @@ async function main() {
         threadId: activeThreadId,
         testStatus,
         gitStatus,
+        phase,
+        phaseStatus,
         turnNumber: turnNumber + 1,
       });
       activeThreadId = preparedGoal.threadId;
@@ -244,9 +272,11 @@ async function main() {
           threadId: activeThreadId,
           eventLogPath: buildEventLogPath(activeThreadId),
           turnsCompleted: turnNumber,
-          lastExitCode: testRun.exitCode,
+          lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
           lastTestStatus: testStatus,
           activeStage: getStateActiveStageAfterTest(testStatus),
+          activePhase: phase.name,
+          phaseAttempted: state.phaseAttempted === true,
           updatedAt: new Date().toISOString(),
         });
       }
@@ -281,19 +311,24 @@ async function main() {
     });
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
 
+    const phaseAttemptedAfterTurn = cleanupOnlyTurn ? state.phaseAttempted === true : true;
     await saveState({
       threadId: activeThreadId,
       eventLogPath: buildEventLogPath(activeThreadId),
       turnsCompleted: turnNumber + 1,
-      lastExitCode: testRun.exitCode,
+      lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
       lastTestStatus: testStatus,
       activeStage: getStateActiveStageAfterTest(testStatus),
+      activePhase: phase.name,
+      phaseAttempted: phaseAttemptedAfterTurn,
       updatedAt: new Date().toISOString(),
     });
     state.threadId = activeThreadId;
-    state.lastExitCode = testRun.exitCode;
+    state.lastExitCode = phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode;
     state.lastTestStatus = testStatus;
     state.activeStage = getStateActiveStageAfterTest(testStatus);
+    state.activePhase = phase.name;
+    state.phaseAttempted = phaseAttemptedAfterTurn;
     turnNumber += 1;
     state.turnsCompleted = turnNumber;
     try {
@@ -314,33 +349,33 @@ async function main() {
   }
 
   throw new Error(
-    `Hit the max turn limit (${CONFIG.maxTurns}) and \`${CONFIG.testCommand}\` still fails.`,
+    `Hit the max turn limit (${CONFIG.maxTurns}) and required phase checks still fail.`,
   );
 }
 
-function buildInitialPrompt(testStatus, gitStatus, turnNumber = null) {
-  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
-  if (defaultPromptHasCurrentState()) {
+function buildInitialPrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  if (defaultPromptHasCurrentState(phase)) {
     return defaultPrompt;
   }
 
   return [
     defaultPrompt,
     "",
-    ...buildFailureSummaryLines(testStatus),
+    ...buildFailureSummaryLines(testStatus, phaseStatus),
     "",
     ...buildGitStatusLines(gitStatus),
   ].join("\n");
 }
 
-function buildContinuePrompt(testStatus, gitStatus, turnNumber = null) {
-  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
-  if (defaultPromptHasCurrentState()) {
+function buildContinuePrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  if (defaultPromptHasCurrentState(phase)) {
     return defaultPrompt;
   }
 
-  const objectiveLines = buildContinueObjectiveLines(testStatus);
-  const failureSummaryLines = buildFailureSummaryLines(testStatus);
+  const objectiveLines = buildContinueObjectiveLines(testStatus, phase, phaseStatus);
+  const failureSummaryLines = buildFailureSummaryLines(testStatus, phaseStatus);
 
   return [
     defaultPrompt,
@@ -356,20 +391,21 @@ function buildContinuePrompt(testStatus, gitStatus, turnNumber = null) {
   ].join("\n");
 }
 
-function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null) {
-  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber });
-  if (defaultPromptHasCurrentState()) {
+function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null, phase = null, phaseStatus = null) {
+  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  if (defaultPromptHasCurrentState(phase)) {
     return defaultPrompt;
   }
 
   return [
     defaultPrompt,
     "",
-    "The tests now pass, but the worktree is not clean yet.",
+    "The required checks now pass, but the worktree is not clean yet.",
     "Commit the intended changes now so `git status --short` is empty before handing control back.",
     "Do not discard intended work. Create the appropriate commit(s) and leave the repository clean.",
     "",
     ...buildTestStatusLines(testStatus),
+    ...buildCheckResultLines(phaseStatus),
     "",
     ...buildGitStatusLines(gitStatus),
   ].join("\n");
@@ -381,12 +417,26 @@ function buildGitStatusLines(gitStatus) {
     : ["Current `git status --short`:", trimmedOutput(gitStatus.output)];
 }
 
-function buildContinueObjectiveLines(testStatus) {
+function buildContinueObjectiveLines(testStatus, phase = null, phaseStatus = null) {
   const lines = [];
   const targetStage = getObjectiveTargetStage(testStatus);
   const reportTarget = targetStage
     ? buildTestCommandForStage(targetStage)
     : getTestStatusCommand(testStatus);
+
+  if (phaseStatus?.allRequiredPassed && phase?.runWhenChecksPass) {
+    lines.push(
+      `All required checks currently pass for phase \`${phase.name}\`. Complete the phase work described in the prompt before returning.`,
+    );
+    return lines;
+  }
+
+  if (phaseStatus?.failedRequiredChecks?.length > 0) {
+    const failedChecks = phaseStatus.failedRequiredChecks
+      .map((check) => `\`${check.name}\``)
+      .join(", ");
+    lines.push(`Required check(s) ${failedChecks} are failing and must pass before this phase can complete.`);
+  }
 
   if (testStatus.regressions.length > 0) {
     lines.push(
@@ -419,10 +469,13 @@ function buildContinueObjectiveLines(testStatus) {
   return lines;
 }
 
-function buildFailureSummaryLines(testStatus) {
+function buildFailureSummaryLines(testStatus, phaseStatus = null) {
   const lines = [`Latest exit code: ${testStatus.exitCode}`];
 
   lines.push(...buildTestStatusLines(testStatus));
+  if (phaseStatus) {
+    lines.push(...buildCheckResultLines(phaseStatus));
+  }
 
   if (testStatus.regressions.length > 0) {
     lines.push(`Regression summary: ${formatStageList(testStatus.regressions)} regressed.`);
@@ -435,39 +488,50 @@ function buildFailureSummaryLines(testStatus) {
   lines.push(...buildTimeoutGuidanceLines(testStatus));
 
   lines.push(
-    `Full test output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
+    `Full primary check output is in \`${path.join(CONFIG.stateDir, "last-test.log")}\` if you need more detail.`,
     "After the current blocker is fixed, rerun the required command and keep going until Ralph's configured success condition passes.",
   );
 
   return lines;
 }
 
-function buildDefaultPrompt({ testStatus, gitStatus, turnNumber = null }) {
-  const template = getDefaultPromptTemplate();
+function buildDefaultPrompt({ testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null }) {
+  const template = getDefaultPromptTemplate(phase);
   return renderTemplateContent(
     template,
-    buildTemplateContext({ testStatus, gitStatus, turnNumber }),
+    buildTemplateContext({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
   );
 }
 
-function getDefaultPromptTemplate() {
-  return PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
+function getDefaultPromptTemplate(phase = null) {
+  return phase && PROMPT_PARTIALS.phasePrompts?.[phase.name]?.content
+    ? PROMPT_PARTIALS.phasePrompts[phase.name].content
+    : PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
 }
 
-function defaultPromptHasCurrentState() {
-  return /\{\{\s*currentState\s*\}\}/.test(getDefaultPromptTemplate());
+function defaultPromptHasCurrentState(phase = null) {
+  return /\{\{\s*currentState\s*\}\}/.test(getDefaultPromptTemplate(phase));
 }
 
-function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
+function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null }) {
+  phase = phase ?? CONFIG.phases[0];
+  const primaryCheck = phaseStatus?.primaryCheck ?? { command: getTestStatusCommand(testStatus), name: getPrimaryCheck().name };
+  const activeStage = phaseStatus?.stage ?? testStatus?.targetStage ?? resolveActiveTestStage({
+    activeStage: testStatus?.targetStage,
+    lastTestStatus: testStatus,
+  });
   const testStatusLines = buildTestStatusLines(testStatus);
+  const checkResultLines = phaseStatus ? buildCheckResultLines(phaseStatus) : [];
   const gitStatusLines = buildGitStatusLines(gitStatus);
-  const continueObjectiveLines = buildContinueObjectiveLines(testStatus);
-  const failureSummaryLines = buildFailureSummaryLines(testStatus);
-  const goalTaskLines = buildLoopGoalTaskLines({ testStatus, gitStatus });
+  const continueObjectiveLines = buildContinueObjectiveLines(testStatus, phase, phaseStatus);
+  const failureSummaryLines = buildFailureSummaryLines(testStatus, phaseStatus);
+  const goalTaskLines = buildLoopGoalTaskLines({ testStatus, gitStatus, phase, phaseStatus });
   const currentStateLines = buildCurrentStateLines({
     testStatus,
     gitStatus,
     turnNumber,
+    phase,
+    phaseStatus,
     continueObjectiveLines,
     failureSummaryLines,
     gitStatusLines,
@@ -479,9 +543,18 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
     name: CONFIG.name,
     workdir: CONFIG.workdir,
     stateDir: CONFIG.stateDir,
-    testCommand: getTestStatusCommand(testStatus),
-    testCommandTemplate: CONFIG.testCommand,
-    testStage: testStatus?.targetStage ?? "",
+    phaseName: phase.name,
+    activePhase: phase.name,
+    phaseChecks: formatPhaseChecksForTemplate(phase, activeStage),
+    checkResults: checkResultLines.join("\n"),
+    checkResultsBlock: checkResultLines.join("\n"),
+    checkResultsJson: JSON.stringify(phaseStatus ?? null, null, 2),
+    primaryCheckName: primaryCheck.name ?? "",
+    primaryCheckCommand: primaryCheck.command ?? getTestStatusCommand(testStatus),
+    testCommand: primaryCheck.command ?? getTestStatusCommand(testStatus),
+    testCommandTemplate: primaryCheck.commandTemplate ?? CONFIG.testCommand,
+    testStage: activeStage ?? "",
+    stageNumber: activeStage?.slice(2) ?? "",
     turnNumber: turnNumber == null ? "" : String(turnNumber),
     exitCode: String(testStatus?.exitCode ?? ""),
     failingStage: testStatus?.failingStage ?? "",
@@ -507,7 +580,7 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null }) {
     lastTestLogPath: path.join(CONFIG.stateDir, "last-test.log"),
     goalTask: goalTaskLines.join("\n"),
     goalHandoffRequirement:
-      testStatus?.exitCode === 0 && !gitStatus.clean
+      phaseStatus?.allRequiredPassed && !gitStatus.clean
         ? ""
         : "Commit cohesive progress as you go; before handing control back, ensure all intended work is committed and `git status --short` is empty.",
   };
@@ -525,13 +598,15 @@ function buildCurrentStateLines({
   testStatus,
   gitStatus,
   turnNumber = null,
+  phase = null,
+  phaseStatus = null,
   continueObjectiveLines = null,
   failureSummaryLines = null,
   gitStatusLines = null,
 }) {
   const lines = [];
-  const objectiveLines = continueObjectiveLines ?? buildContinueObjectiveLines(testStatus);
-  const summaryLines = failureSummaryLines ?? buildFailureSummaryLines(testStatus);
+  const objectiveLines = continueObjectiveLines ?? buildContinueObjectiveLines(testStatus, phase, phaseStatus);
+  const summaryLines = failureSummaryLines ?? buildFailureSummaryLines(testStatus, phaseStatus);
   const statusLines = gitStatusLines ?? buildGitStatusLines(gitStatus);
 
   if (turnNumber != null) {
@@ -541,10 +616,24 @@ function buildCurrentStateLines({
     `- Run: ${CONFIG.runName}`,
     `- Workdir: \`${CONFIG.workdir}\``,
   );
+  if (phase?.name) {
+    lines.push(`- Current phase: \`${phase.name}\``);
+  }
   if (testStatus?.targetStage) {
     lines.push(`- Current stage: \`${testStatus.targetStage}\``);
   }
-  lines.push(`- Required command: \`${getTestStatusCommand(testStatus)}\``);
+  lines.push("", "Required checks:");
+  if (phaseStatus?.checks?.length) {
+    for (const check of phaseStatus.checks) {
+      lines.push(
+        `- ${check.name}: \`${check.command}\` (${check.required ? "required" : "optional"})`,
+      );
+    }
+  } else if (phase) {
+    lines.push(...formatPhaseChecksForTemplate(phase, testStatus?.targetStage).split("\n"));
+  } else {
+    lines.push(`- ${getPrimaryCheck().name}: \`${getTestStatusCommand(testStatus)}\` (required, primary)`);
+  }
 
   if (objectiveLines.length > 0) {
     lines.push("", "Current task:", ...objectiveLines.map((line) => `- ${line}`));
@@ -556,6 +645,9 @@ function buildCurrentStateLines({
   );
   if (testStatus?.stages?.length) {
     lines.push(`Stage breakdown: ${formatStageBreakdown(testStatus)}`);
+  }
+  if (phaseStatus?.checks?.length) {
+    lines.push(...buildCheckResultLines(phaseStatus));
   }
   const firstBlockerLine = formatFirstBlockerLine(testStatus);
   if (firstBlockerLine) {
@@ -639,8 +731,8 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
 
   return {
     recordedAt: new Date().toISOString(),
-    command: options.command ?? CONFIG.testCommand,
-    commandTemplate: options.commandTemplate ?? CONFIG.testCommand,
+    command: options.command ?? getPrimaryCheck().command,
+    commandTemplate: options.commandTemplate ?? getPrimaryCheck().command,
     targetStage: options.targetStage ?? null,
     usesStageTemplate: Boolean(options.usesStageTemplate),
     exitCode: options.exitCode ?? null,
@@ -989,6 +1081,40 @@ function buildTestStatusLines(testStatus) {
   ];
 }
 
+function buildCheckResultLines(phaseStatus) {
+  if (!phaseStatus?.checks?.length) {
+    return [];
+  }
+  const lines = [
+    `Phase checks (${phaseStatus.phase}): ${formatPhaseCheckResults(phaseStatus)}`,
+  ];
+  for (const check of phaseStatus.failedRequiredChecks ?? []) {
+    lines.push(
+      `Required check \`${check.name}\` failed with exit ${check.exitCode}; output: \`${check.outputPath}\``,
+    );
+  }
+  return lines;
+}
+
+function formatPhaseCheckResults(phaseStatus) {
+  return phaseStatus.checks
+    .map((check) =>
+      `${check.name} ${check.passed ? "pass" : "fail"} (${check.exitCode})`,
+    )
+    .join("; ");
+}
+
+function formatPhaseChecksForTemplate(phase, stage) {
+  return phase.checks
+    .map((name) => {
+      const check = getCheckByName(name);
+      const required = check.required ? "required" : "optional";
+      const primary = check.primary ? ", primary" : "";
+      return `- ${check.name}: \`${buildCheckCommandForStage(check, stage)}\` (${required}${primary})`;
+    })
+    .join("\n");
+}
+
 function formatTestStatusSummary(testStatus) {
   if (!testStatus || testStatus.stages.length === 0) {
     return `exit ${testStatus?.exitCode ?? "unknown"}`;
@@ -1144,6 +1270,97 @@ async function runCommand(command, cwd) {
   });
 }
 
+async function runPhaseChecks(state, phase) {
+  const stage = resolveActiveTestStage(state);
+  const checks = phase.checks.map((name) => getCheckByName(name));
+  const results = [];
+  let primaryTestStatus = null;
+  let previousTestStatus = state.lastTestStatus;
+
+  for (const check of checks) {
+    const context = buildCheckCommandContext(check, stage);
+    log(`Running ${phase.name} check ${check.name}: ${context.command}`);
+    const run = await runCommand(context.command, CONFIG.workdir);
+    const outputPath = await writeCheckLog(check.name, run.output);
+    const result = {
+      name: check.name,
+      kind: check.kind,
+      required: check.required,
+      primary: check.primary,
+      command: context.command,
+      commandTemplate: context.template,
+      usesStageTemplate: context.usesStageTemplate,
+      targetStage: context.stage,
+      exitCode: run.exitCode,
+      passed: run.exitCode === 0,
+      outputPath,
+      outputPreview: previewText(run.output),
+    };
+
+    if (check.primary || check.kind === "test") {
+      const testStatus = analyzeTestProgress(run.output, previousTestStatus, {
+        command: context.command,
+        commandTemplate: context.template,
+        exitCode: run.exitCode,
+        targetStage: context.stage,
+        usesStageTemplate: context.usesStageTemplate,
+      });
+      result.testStatus = testStatus;
+      previousTestStatus = testStatus;
+      if (check.primary || !primaryTestStatus) {
+        primaryTestStatus = testStatus;
+        await fs.writeFile(TEST_LOG_PATH, run.output, "utf8");
+      }
+    }
+
+    results.push(result);
+  }
+
+  const required = results.filter((result) => result.required);
+  const failedRequired = required.filter((result) => !result.passed);
+  return {
+    phase: phase.name,
+    stage,
+    checks: results,
+    primaryCheck: results.find((result) => result.primary) ?? results[0] ?? null,
+    testStatus: primaryTestStatus ?? buildGenericTestStatus(results[0], stage),
+    allRequiredPassed: failedRequired.length === 0,
+    failedRequiredChecks: failedRequired,
+  };
+}
+
+async function writeCheckLog(checkName, output) {
+  await fs.mkdir(CHECK_LOG_DIR_PATH, { recursive: true });
+  const safeName = sanitizeIdentifier(checkName, "check log name");
+  const filePath = path.join(CHECK_LOG_DIR_PATH, `last-${safeName}.log`);
+  await fs.writeFile(filePath, output, "utf8");
+  return filePath;
+}
+
+function buildGenericTestStatus(result, stage) {
+  return {
+    recordedAt: new Date().toISOString(),
+    command: result?.command ?? "",
+    commandTemplate: result?.commandTemplate ?? "",
+    targetStage: stage ?? null,
+    usesStageTemplate: Boolean(result?.usesStageTemplate),
+    exitCode: result?.exitCode ?? null,
+    allTestsPassed: Boolean(result?.passed),
+    stageCount: 0,
+    stagesPassed: 0,
+    testsPassed: result?.passed ? 1 : 0,
+    testsTotal: 1,
+    failingStage: null,
+    passingThrough: null,
+    firstFailureLine: result?.passed ? null : `${result?.name ?? "check"} failed`,
+    firstFailureKind: null,
+    timeoutFailures: 0,
+    timeoutExpectationFailures: 0,
+    regressions: [],
+    stages: [],
+  };
+}
+
 async function initializeRunRepository({ workdir, branchName }) {
   await assertPathDoesNotExist(workdir);
   await assertRemoteBranchDoesNotExist(branchName);
@@ -1229,7 +1446,7 @@ async function getGitStatus(cwd) {
   };
 }
 
-async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber }) {
+async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
   return withCodexAppServer(async (client) => {
     let activeThreadId = threadId;
     let startedThread = false;
@@ -1248,7 +1465,7 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
 
     const params = {
       threadId: activeThreadId,
-      objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }),
+      objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
       status: "active",
     };
     if (CONFIG.goalTokenBudget != null) {
@@ -1295,11 +1512,21 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
   }
 }
 
-function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
+function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = null, phaseStatus = null }) {
+  phase = phase ?? CONFIG.phases[0];
+  const goalTemplate = phase ? PROMPT_PARTIALS.phaseGoals?.[phase.name]?.content : null;
+  if (goalTemplate) {
+    return truncateGoalObjective(renderTemplateContent(
+      goalTemplate,
+      buildTemplateContext({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
+    ));
+  }
+
   const stage = getObjectiveTargetStage(testStatus) ?? "";
-  const command = stage ? buildTestCommandForStage(stage) : getTestStatusCommand(testStatus);
+  const primaryCommand = phaseStatus?.primaryCheck?.command ??
+    (stage ? buildTestCommandForStage(stage) : getTestStatusCommand(testStatus));
   const lines = [
-    `Ralph loop ${turnNumber} for ${CONFIG.runName}.`,
+    `Ralph loop ${turnNumber} ${phase.name} phase for ${CONFIG.runName}.`,
     "",
     "This goal is the completion gate. The accompanying turn prompt is mandatory, not advisory: every explicit implementation, design, validation, cleanup, documentation, and handoff instruction in that prompt is part of this goal.",
     "",
@@ -1308,18 +1535,21 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
   if (stage) {
     lines.push(`Current stage: ${stage}.`);
   }
+  lines.push(`Current phase: ${phase.name}.`);
 
   lines.push("Completion criteria:");
-  if (testStatus.exitCode === 0 && !gitStatus.clean) {
+  if (phaseStatus?.allRequiredPassed && !gitStatus.clean) {
     lines.push(
-      `- \`${command}\` remains passing.`,
+      "- All required phase checks remain passing.",
       "- All explicit requirements in the accompanying turn prompt are satisfied.",
       "- Intended changes are committed.",
       "- `git status --short` is empty before handing control back.",
     );
   } else {
     lines.push(
-      `- \`${command}\` fully passes.`,
+      "- All required phase checks pass:",
+      ...formatPhaseChecksForTemplate(phase, stage).split("\n").map((line) => `  ${line}`),
+      `- Primary verification command: \`${primaryCommand}\`.`,
       "- Previous stages do not regress.",
       "- All explicit requirements in the accompanying turn prompt are satisfied, including any requested planning, review, cleanup, documentation, or retrospective work.",
       "- No required prompt item is skipped, weakened into a note, or deferred after the test gate passes.",
@@ -1331,14 +1561,26 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber }) {
   return truncateGoalObjective(lines.join("\n"));
 }
 
-function buildLoopGoalTaskLines({ testStatus, gitStatus }) {
+function buildLoopGoalTaskLines({ testStatus, gitStatus, phase = null, phaseStatus = null }) {
   const lines = [];
 
-  if (testStatus.exitCode === 0 && !gitStatus.clean) {
+  if (phaseStatus?.allRequiredPassed && !gitStatus.clean) {
     lines.push(
-      `The command \`${getTestStatusCommand(testStatus)}\` now passes, but the worktree is dirty.`,
+      "All required phase checks now pass, but the worktree is dirty.",
       "Commit intended changes now as cohesive progress commits and leave `git status --short` empty before handing control back.",
     );
+    return lines;
+  }
+
+  if (phaseStatus?.failedRequiredChecks?.length > 0) {
+    const failedChecks = phaseStatus.failedRequiredChecks
+      .map((check) => `\`${check.name}\``)
+      .join(", ");
+    lines.push(`Required phase check(s) ${failedChecks} are failing.`);
+  }
+
+  if (phaseStatus?.allRequiredPassed && phase?.runWhenChecksPass) {
+    lines.push(`All required checks pass; complete the required \`${phase.name}\` phase work before returning.`);
     return lines;
   }
 
@@ -1379,33 +1621,55 @@ function buildLoopGoalTaskLines({ testStatus, gitStatus }) {
 }
 
 function getTestStatusCommand(testStatus) {
-  return testStatus?.command ?? CONFIG.testCommand;
+  return testStatus?.command ?? getPrimaryCheck().command;
 }
 
 function buildTestCommandForStage(stageName) {
+  return buildCheckCommandForStage(getPrimaryCheck(), stageName);
+}
+
+function buildCheckCommandForStage(check, stageName) {
   const normalizedStage = normalizeStageName(stageName);
-  if (normalizedStage && hasTestCommandStagePlaceholder(CONFIG.testCommand)) {
-    return renderTestCommandTemplate(CONFIG.testCommand, normalizedStage);
+  if (normalizedStage && hasTestCommandStagePlaceholder(check.command)) {
+    return renderTestCommandTemplate(check.command, normalizedStage);
   }
-  return CONFIG.testCommand;
+  return check.command;
 }
 
 function buildTestCommandContext(state) {
-  const usesStageTemplate = hasTestCommandStagePlaceholder(CONFIG.testCommand);
-  const stage = usesStageTemplate ? resolveActiveTestStage(state) : null;
+  return buildCheckCommandContext(getPrimaryCheck(), resolveActiveTestStage(state));
+}
+
+function buildCheckCommandContext(check, activeStage) {
+  const usesStageTemplate = hasTestCommandStagePlaceholder(check.command);
+  const stage = usesStageTemplate ? normalizeStageName(activeStage) : null;
   return {
-    template: CONFIG.testCommand,
+    checkName: check.name,
+    template: check.command,
     command: usesStageTemplate
-      ? renderTestCommandTemplate(CONFIG.testCommand, stage)
-      : CONFIG.testCommand,
+      ? renderTestCommandTemplate(check.command, stage)
+      : check.command,
     stage,
     usesStageTemplate,
   };
 }
 
+function getPrimaryCheck() {
+  return CONFIG.checks.find((check) => check.primary) ?? CONFIG.checks[0];
+}
+
+function getCheckByName(name) {
+  const check = CONFIG.checks.find((candidate) => candidate.name === name);
+  if (!check) {
+    throw new Error(`Unknown check ${name}`);
+  }
+  return check;
+}
+
 function hasTestCommandStagePlaceholder(command) {
   return /\bpaX\b/.test(command) ||
     /\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/.test(command) ||
+    /\{\{\s*stageNumber\s*\}\}/.test(command) ||
     /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command);
 }
 
@@ -1415,9 +1679,11 @@ function renderTestCommandTemplate(command, stageName) {
     throw new Error(`Cannot render test command template without a pa stage: ${command}`);
   }
 
+  const stageNumberText = normalizedStage.slice(2);
   return command
     .replace(/\bpaX\b/g, normalizedStage)
     .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage)
+    .replace(/\{\{\s*stageNumber\s*\}\}/g, stageNumberText)
     .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage);
 }
 
@@ -1441,8 +1707,36 @@ function resolveActiveTestStage(state) {
   return getFirstStageName();
 }
 
+function resolveActivePhase(state) {
+  const savedPhase = CONFIG.phases.find((phase) => phase.name === state?.activePhase);
+  return savedPhase ?? CONFIG.phases[0];
+}
+
+function getNextPhase(phase) {
+  const index = CONFIG.phases.findIndex((candidate) => candidate.name === phase?.name);
+  return index >= 0 && index + 1 < CONFIG.phases.length
+    ? CONFIG.phases[index + 1]
+    : null;
+}
+
+function shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state }) {
+  return phase.runWhenChecksPass &&
+    phaseStatus.allRequiredPassed &&
+    gitStatus.clean &&
+    state.phaseAttempted !== true;
+}
+
 function getNextStageAfterPassingCommand(testStatus, gitStatus) {
   if (!testStatus?.usesStageTemplate || testStatus.exitCode !== 0 || !gitStatus.clean) {
+    return null;
+  }
+  const completedStage =
+    normalizeStageName(testStatus.passingThrough) ?? normalizeStageName(testStatus.targetStage);
+  return getNextStageName(completedStage);
+}
+
+function getNextStageAfterCompletedPhase(testStatus) {
+  if (!testStatus?.usesStageTemplate || testStatus.exitCode !== 0) {
     return null;
   }
   const completedStage =
@@ -2065,6 +2359,12 @@ async function loadConfig() {
       DEFAULT_CONFIG.stateBaseDir,
   );
 
+  const configuredTestCommand =
+    process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand;
+  const checks = normalizeCheckConfig(fileConfig.checks, configuredTestCommand);
+  const phases = normalizePhaseConfig(fileConfig.phases, checks);
+  const primaryCheck = checks.find((check) => check.primary) ?? checks[0];
+
   return {
     baseDir,
     name,
@@ -2072,8 +2372,9 @@ async function loadConfig() {
     workdir: explicitWorkdir
       ? path.resolve(process.cwd(), explicitWorkdir)
       : path.join(baseDir, runName),
-    testCommand:
-      process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand,
+    testCommand: primaryCheck?.command ?? configuredTestCommand,
+    checks,
+    phases,
     maxTurns: parsePositiveInt(
       process.env.RALPH_MAX_TURNS ?? fileConfig.maxTurns,
       DEFAULT_CONFIG.maxTurns,
@@ -2148,6 +2449,30 @@ async function loadPromptPartials() {
     const loaded = await readFirstExistingFile(candidates);
     if (loaded) {
       partials[kind] = loaded;
+    }
+  }
+
+  partials.phasePrompts = {};
+  partials.phaseGoals = {};
+  for (const phase of CONFIG.phases ?? []) {
+    if (phase.promptTemplate) {
+      const loaded = await readFirstExistingFile([
+        `${sidecarBasePath}.${phase.promptTemplate}.md`,
+        ...(phase.promptTemplate === "default" ? [] : [`${sidecarBasePath}.default.md`]),
+        path.join(DEFAULT_TEMPLATE_DIR, "default.md"),
+      ]);
+      if (loaded) {
+        partials.phasePrompts[phase.name] = loaded;
+      }
+    }
+    if (phase.goalTemplate) {
+      const loaded = await readFirstExistingFile([
+        `${sidecarBasePath}.${phase.goalTemplate}.md`,
+        path.join(DEFAULT_TEMPLATE_DIR, `${phase.goalTemplate}.md`),
+      ]);
+      if (loaded) {
+        partials.phaseGoals[phase.name] = loaded;
+      }
     }
   }
 
@@ -2558,6 +2883,8 @@ async function loadState() {
           ? parsed.lastTestStatus
           : null,
       activeStage: normalizeStageName(parsed.activeStage),
+      activePhase: typeof parsed.activePhase === "string" ? parsed.activePhase : null,
+      phaseAttempted: parsed.phaseAttempted === true,
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
@@ -2568,6 +2895,8 @@ async function loadState() {
         lastExitCode: null,
         lastTestStatus: null,
         activeStage: null,
+        activePhase: null,
+        phaseAttempted: false,
       };
     }
     throw error;
@@ -2658,6 +2987,134 @@ function deriveLegacyStateBaseDir(stateDir) {
   const resolved = path.resolve(process.cwd(), String(stateDir));
   const leaf = path.basename(resolved);
   return leaf.startsWith(".") ? resolved : path.dirname(resolved);
+}
+
+function normalizeCheckConfig(rawChecks, legacyTestCommand) {
+  const checks = [];
+  if (!rawChecks) {
+    checks.push(normalizeCheckDefinition("tests", {
+      command: legacyTestCommand,
+      required: true,
+      primary: true,
+      kind: "test",
+    }));
+  } else if (Array.isArray(rawChecks)) {
+    rawChecks.forEach((entry, index) => {
+      const name = typeof entry === "string"
+        ? entry
+        : entry?.name ?? (index === 0 ? "tests" : `check${index + 1}`);
+      const definition = typeof entry === "string" ? { command: entry } : entry;
+      checks.push(normalizeCheckDefinition(name, definition));
+    });
+  } else if (typeof rawChecks === "object") {
+    for (const [name, definition] of Object.entries(rawChecks)) {
+      checks.push(normalizeCheckDefinition(name, definition));
+    }
+  } else {
+    throw new Error("Config checks must be an object or array");
+  }
+
+  if (checks.length === 0) {
+    throw new Error("Config checks must define at least one check");
+  }
+
+  let primaryIndex = checks.findIndex((check) => check.primary);
+  if (primaryIndex < 0) {
+    primaryIndex = checks.findIndex((check) => check.name === "tests");
+  }
+  if (primaryIndex < 0) {
+    primaryIndex = 0;
+  }
+  return checks.map((check, index) => ({
+    ...check,
+    primary: index === primaryIndex,
+    kind: check.kind ?? (index === primaryIndex ? "test" : "generic"),
+  }));
+}
+
+function normalizeCheckDefinition(name, definition) {
+  const value = typeof definition === "string" ? { command: definition } : definition;
+  if (!value || typeof value !== "object") {
+    throw new Error(`Config check ${name} must be an object or command string`);
+  }
+  const normalizedName = sanitizeIdentifier(name, "check name");
+  const command = String(value.command ?? "").trim();
+  if (!command) {
+    throw new Error(`Config check ${normalizedName} must define a command`);
+  }
+  return {
+    name: normalizedName,
+    command,
+    required: parseBoolean(value.required, true),
+    primary: parseBoolean(value.primary, false),
+    kind: typeof value.kind === "string" ? value.kind : null,
+  };
+}
+
+function normalizePhaseConfig(rawPhases, checks) {
+  if (!rawPhases) {
+    const primary = checks.find((check) => check.primary) ?? checks[0];
+    return [
+      normalizePhaseDefinition({
+        name: "default",
+        promptTemplate: "default",
+        checks: [primary.name],
+      }, checks),
+    ];
+  }
+  if (!Array.isArray(rawPhases) || rawPhases.length === 0) {
+    throw new Error("Config phases must be a non-empty array");
+  }
+  return rawPhases.map((phase, index) =>
+    normalizePhaseDefinition({
+      name: phase?.name ?? `phase${index + 1}`,
+      ...phase,
+    }, checks),
+  );
+}
+
+function normalizePhaseDefinition(phase, checks) {
+  if (!phase || typeof phase !== "object") {
+    throw new Error("Config phase must be an object");
+  }
+  const checkNames = new Set(checks.map((check) => check.name));
+  const normalizedChecks = (Array.isArray(phase.checks) && phase.checks.length > 0
+    ? phase.checks
+    : checks.map((check) => check.name))
+    .map((entry) => typeof entry === "string" ? entry : entry?.name)
+    .filter(Boolean)
+    .map((name) => sanitizeIdentifier(name, "phase check name"));
+  for (const name of normalizedChecks) {
+    if (!checkNames.has(name)) {
+      throw new Error(`Config phase ${phase.name} references unknown check ${name}`);
+    }
+  }
+  if (normalizedChecks.length === 0) {
+    throw new Error(`Config phase ${phase.name} must include at least one check`);
+  }
+  const name = sanitizeIdentifier(phase.name, "phase name");
+  return {
+    name,
+    promptTemplate: sanitizeOptionalTemplateName(phase.promptTemplate ?? name),
+    goalTemplate: sanitizeOptionalTemplateName(phase.goalTemplate ?? `${name}-goal`),
+    checks: normalizedChecks,
+    runWhenChecksPass: parseBoolean(phase.runWhenChecksPass, false),
+  };
+}
+
+function sanitizeIdentifier(value, label) {
+  const text = String(value ?? "").trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(text)) {
+    throw new Error(`Config ${label} must contain only letters, numbers, dot, underscore, or hyphen`);
+  }
+  return text;
+}
+
+function sanitizeOptionalTemplateName(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  return sanitizeIdentifier(value, "template name");
 }
 
 async function pathExists(targetPath) {

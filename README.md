@@ -29,6 +29,11 @@ to the config file. For a config named `goals-2026-05-14.config.json`, Ralph
 looks for `goals-2026-05-14.default.md`. If it is missing, Ralph falls back to
 `templates/default.md`.
 
+Runs can also be split into named phases. Each phase runs configured checks and
+can use its own prompt and goal sidecars, for example
+`goals-2026-05-14.implement.md`, `goals-2026-05-14.implement-goal.md`,
+`goals-2026-05-14.audit.md`, and `goals-2026-05-14.audit-goal.md`.
+
 ## Usage
 
 ```bash
@@ -69,10 +74,11 @@ npm run fork-run -- \
 ```
 
 The script clones `/home/vishvananda/cppgm-assignments`, cherry-picks source run
-commits through the requested PA commit, runs the rendered boundary command such
-as `make test-report-through-pa8`, writes `<target-run>.config.json`, copies the
-default prompt if needed, seeds `.ralph/<target-run>-<model>-<reasoning>/state.json`
-so Ralph starts on the next PA, and pushes when a remote is supplied.
+commits through the requested PA commit, runs the rendered primary check command
+such as `make test-report-through-pa8`, writes `<target-run>.config.json`,
+copies prompt/goal sidecars if needed, seeds
+`.ralph/<target-run>-<model>-<reasoning>/state.json` so Ralph starts on the next
+PA, and pushes when a remote is supplied.
 
 If the PA boundary cannot be inferred from commit subjects, pass an exact commit
 with `--through-ref <commit>`.
@@ -113,9 +119,23 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 - `stateBaseDir`
   Default: `.ralph`
 - `testCommand`
-  Default: `make test`. If the command contains `paX`, Ralph substitutes the
-  active assignment stage, for example `make test-report-through-paX` becomes
-  `make test-report-through-pa4`.
+  Default: `make test`. Backward-compatible shorthand for a single primary
+  `tests` check. If the command contains `paX` or `{{testStage}}`, Ralph
+  substitutes the active assignment stage, for example
+  `make test-report-through-paX` becomes `make test-report-through-pa4`.
+- `checks`
+  Optional object or array of named checks. Each check has `command`, optional
+  `required` (default `true`), optional `primary`, and optional `kind`. If
+  omitted, Ralph synthesizes a primary required `tests` check from `testCommand`.
+  All required checks in the active phase must pass before the phase can
+  complete.
+- `phases`
+  Optional ordered array of phase definitions. Each phase has `name`, optional
+  `checks` (defaults to all checks), optional `promptTemplate` (defaults to the
+  phase name), optional `goalTemplate` (defaults to `<phase>-goal`), and optional
+  `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
+  the old behavior. A phase with `runWhenChecksPass: true` sends Codex one turn
+  even when checks already pass, which is useful for audit/cleanup phases.
 - `maxTurns`
   Default: `1000`
 - `webSearchEnabled`
@@ -187,11 +207,21 @@ Common variables:
 - `{{runName}}`
 - `{{turnNumber}}`
 - `{{testCommand}}`
-  The rendered command Ralph is using for this loop.
+  Legacy alias for the rendered primary check command.
 - `{{testCommandTemplate}}`
-  The raw configured command, such as `make test-report-through-paX`.
+  The raw primary check command template, such as `make test-report-through-paX`.
 - `{{testStage}}`
   The active stage used to render a stage-aware test command.
+- `{{stageNumber}}`
+  The numeric part of `{{testStage}}`, for example `17`.
+- `{{phaseName}}`
+  The active phase name.
+- `{{primaryCheckCommand}}`
+  The rendered primary check command.
+- `{{phaseChecks}}`
+  Markdown list of checks configured for the current phase.
+- `{{checkResults}}`
+  Latest status for all phase checks, including log paths for failing checks.
 - `{{testStatusSummary}}`
 - `{{stageBreakdown}}`
 - `{{lastTestLogPath}}`
@@ -199,20 +229,58 @@ Common variables:
 - `{{passingThrough}}`
 - `{{firstFailureLine}}`
 
-Per-loop goals are generated deterministically from the current failing stage and
-are not loaded from Markdown. When `testCommand` contains `paX`, Ralph renders
-that template with the blocking stage and uses the same command in the goal,
-prompt, and Ralph's own test run. The goal requires a full pass before
-returning, plus cohesive progress commits and a clean worktree. The generated
-goal also treats the accompanying prompt as mandatory completion criteria, so
-requested planning, review, cleanup, documentation, or retrospective work must
-be completed rather than deferred once the test gate passes.
+Per-loop goals are generated deterministically unless the active phase has a
+goal sidecar. When a check command contains `paX` or `{{testStage}}`, Ralph
+renders that template with the active stage and uses the rendered checks in the
+goal, prompt, and Ralph's own verification run. The goal requires all required
+phase checks to pass before returning, plus cohesive progress commits and a
+clean worktree. The generated goal also treats the accompanying prompt as
+mandatory completion criteria, so requested planning, review, cleanup,
+documentation, or retrospective work must be completed rather than deferred once
+the check gate passes.
+
+Example two-phase setup:
+
+```json
+{
+  "testCommand": "make test-report-through-paX",
+  "checks": {
+    "tests": {
+      "command": "make test-report-through-{{testStage}}",
+      "primary": true,
+      "required": true,
+      "kind": "test"
+    },
+    "fileAudit": {
+      "command": "make file-audit-through-{{testStage}}",
+      "required": true
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "checks": ["tests", "fileAudit"]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "runWhenChecksPass": true,
+      "checks": ["tests", "fileAudit"]
+    }
+  ]
+}
+```
 
 ## State files
 
 - `.ralph/<run-name>/state.json`
   Saved thread metadata, including the current event log path
 - `.ralph/<run-name>/last-test.log`
-  Full output from the most recent configured test command
+  Full output from the most recent primary check command
+- `.ralph/<run-name>/checks/last-<check>.log`
+  Full output from the most recent run of each configured check
 - `.ralph/<run-name>/events/<thread-id>.jsonl`
   Append-only stream of Ralph prompt events plus all Codex SDK events for that thread
