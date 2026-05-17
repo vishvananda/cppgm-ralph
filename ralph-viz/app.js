@@ -163,14 +163,12 @@ function renderSummary(events) {
   const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
-  const usageText = s.tokenUsage
-    ? usageSummaryText(s.tokenUsage, s.priceModel, { durationMs: s.activeDurationMs, includeModel: true })
-    : '<span class="muted">n/a</span>';
-  const shapeUsageText = s.shapeUsage?.usage
-    ? usageSummaryText(s.shapeUsage.usage, s.priceModel, {
-        durationMs: s.shapeUsage.durationMs,
+  const usage = preferredUsageSummary(s);
+  const usageText = usage
+    ? usageSummaryText(usage.usage, s.priceModel, {
+        durationMs: usage.durationMs,
         includeModel: true,
-        suffix: `${fmtInt(s.shapeUsage.runCount)} runs`,
+        suffix: usage.suffix,
       })
     : '<span class="muted">n/a</span>';
   const progressText = latestProgressSummaryHtml(s.testProgress.latest);
@@ -187,7 +185,6 @@ function renderSummary(events) {
     <div class="summary-wide"><strong>phase</strong>${phaseText}</div>
     <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
     <div class="summary-wide"><strong>usage</strong>${usageText}</div>
-    <div class="summary-wide"><strong>shape usage</strong>${shapeUsageText}</div>
     <div style="grid-column:1/-1"><strong>types</strong>${chips || '<span class="muted">none</span>'}</div>
   `;
   renderProgressDock(s);
@@ -202,7 +199,7 @@ function renderProgressDock(summary) {
   const testStatus = summary?.latestTestStatus?.status ?? null;
   const phaseStatus = summary?.latestPhaseStatus?.status ?? null;
   const latestTurn = summary?.latestTurn ?? null;
-  const shapeUsage = summary?.shapeUsage ?? null;
+  const usage = preferredUsageSummary(summary);
   const latest = summary?.last ? fmtShort(summary.last) : "";
   const phaseHtml = phaseStatus
     ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
@@ -216,14 +213,14 @@ function renderProgressDock(summary) {
   const turnHtml = latestTurn
     ? `<span class="dock-turn">${escapeHtml(dockTurnText(latestTurn))}</span>`
     : "";
-  const shapeHtml = shapeUsage?.usage
-    ? `<span class="dock-usage">${escapeHtml(dockShapeUsageText(shapeUsage, summary.priceModel))}</span>`
+  const usageHtml = usage
+    ? `<span class="dock-usage">${escapeHtml(dockUsageText(usage, summary.priceModel))}</span>`
     : "";
   const updatedHtml = latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : "";
   progressDock.innerHTML = `
     <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
     ${turnHtml}
-    ${shapeHtml}
+    ${usageHtml}
     ${phaseHtml}
     ${progressHtml}
     ${testHtml}
@@ -240,15 +237,33 @@ function dockTurnText(turn) {
   return parts.join(" / ");
 }
 
-function dockShapeUsageText(shapeUsage, priceModel) {
-  const usage = normalizeUsage(shapeUsage?.usage);
-  if (!usage) {
-    return "shape tokens n/a";
+function preferredUsageSummary(summary) {
+  if (summary?.shapeUsage?.usage) {
+    return {
+      usage: summary.shapeUsage.usage,
+      durationMs: summary.shapeUsage.durationMs,
+      suffix: `${fmtInt(summary.shapeUsage.runCount)} runs`,
+    };
   }
-  const runs = fmtInt(shapeUsage.runCount ?? 0);
-  return `shape ${runs} runs / ${usageSummaryText(usage, priceModel, {
-    durationMs: shapeUsage.durationMs,
+  if (summary?.tokenUsage) {
+    return {
+      usage: summary.tokenUsage,
+      durationMs: summary.activeDurationMs,
+      suffix: "selected thread",
+    };
+  }
+  return null;
+}
+
+function dockUsageText(usageSummary, priceModel) {
+  const usage = normalizeUsage(usageSummary?.usage);
+  if (!usage) {
+    return "usage n/a";
+  }
+  return `usage ${usageSummaryText(usage, priceModel, {
+    durationMs: usageSummary.durationMs,
     compact: true,
+    suffix: usageSummary.suffix,
   })}`;
 }
 
