@@ -905,25 +905,61 @@ function recordScrollKey(record, prefix = "event", index = null) {
   return `${prefix}:${threadId}:${turn}:${record.eventType ?? "event"}:${stableId}`;
 }
 
+function expandableEntryKey(entry) {
+  if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
+  if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "file_change") {
+    return fileChangeEntryKey(entry.record);
+  }
+  return null;
+}
+
 function isFullCardView() {
   return fullViewToggle?.checked ?? false;
 }
 
 function displayEntryWindow(entries) {
   if (isFullCardView() || entries.length <= COMPACT_TURN_CARD_LIMIT) {
-    return { entries, total: entries.length, hidden: 0, startIndex: 0 };
+    return {
+      entries,
+      total: entries.length,
+      hidden: 0,
+      startIndex: 0,
+      indices: entries.map((_, index) => index),
+      latestCount: entries.length,
+      openExtra: 0,
+    };
   }
+  const startIndex = entries.length - COMPACT_TURN_CARD_LIMIT;
+  const visibleIndices = new Set();
+  for (let index = startIndex; index < entries.length; index += 1) {
+    visibleIndices.add(index);
+  }
+  entries.forEach((entry, index) => {
+    const key = expandableEntryKey(entry);
+    if (key && state.openEntryKeys.has(key)) {
+      visibleIndices.add(index);
+    }
+  });
+  const indices = [...visibleIndices].sort((a, b) => a - b);
+  const openExtra = indices.filter(index => index < startIndex).length;
   return {
-    entries: entries.slice(-COMPACT_TURN_CARD_LIMIT),
+    entries: indices.map(index => entries[index]),
     total: entries.length,
-    hidden: entries.length - COMPACT_TURN_CARD_LIMIT,
-    startIndex: entries.length - COMPACT_TURN_CARD_LIMIT,
+    hidden: entries.length - indices.length,
+    startIndex,
+    indices,
+    latestCount: COMPACT_TURN_CARD_LIMIT,
+    openExtra,
   };
 }
 
 function turnCardWindowText(windowInfo) {
   if (!windowInfo?.hidden) {
     return "";
+  }
+  if (windowInfo.openExtra) {
+    return `latest ${windowInfo.latestCount}/${windowInfo.total} cards + ${windowInfo.openExtra} open`;
   }
   return `latest ${windowInfo.entries.length}/${windowInfo.total} cards`;
 }
@@ -2416,7 +2452,6 @@ function renderTimeline(records) {
     const details = document.createElement("details");
     details.className = "turn";
     details.dataset.turn = String(turn);
-    details.dataset.scrollKey = turnScrollKey(turn);
     attachPreToggleScrollSnapshot(details);
 
     // Open turns from URL, or default to last turn
@@ -2431,6 +2466,7 @@ function renderTimeline(records) {
 
     const summary = document.createElement("summary");
     summary.className = "turn-header";
+    summary.dataset.scrollKey = turnScrollKey(turn);
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
@@ -2458,7 +2494,8 @@ function renderTimeline(records) {
       const el = renderDisplayEntry(entry);
       if (el) {
         if (!el.dataset.scrollKey) {
-          const key = scrollKeyForEntry(entry, entryWindow.startIndex + offset);
+          const entryIndex = entryWindow.indices?.[offset] ?? entryWindow.startIndex + offset;
+          const key = scrollKeyForEntry(entry, entryIndex);
           if (key) {
             el.dataset.scrollKey = key;
           }
@@ -2628,9 +2665,7 @@ function restoreScrollAfterRender(snapshot) {
     if (restoreScrollAnchor(restoreSnapshot)) {
       return;
     }
-    const root = scrollingRoot();
-    const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    root.scrollTop = Math.min(restoreSnapshot.scrollTop, maxTop);
+    setScrollTop(restoreSnapshot.scrollTop);
   });
 }
 
@@ -2675,7 +2710,12 @@ function restoreScrollAnchor(snapshot) {
     const currentOffset = rect.top - scrollViewportTop();
     const delta = currentOffset - anchor.offset;
     if (Number.isFinite(delta)) {
-      setScrollTop(root.scrollTop + delta);
+      const targetTop = root.scrollTop + delta;
+      const maxExpectedShift = Math.max(1000, root.clientHeight * 2);
+      if (Math.abs(targetTop - snapshot.scrollTop) > maxExpectedShift) {
+        continue;
+      }
+      setScrollTop(targetTop);
       return true;
     }
   }
