@@ -17,7 +17,7 @@ const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const SCROLL_JUMP_LOG_PX = 80;
 const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
-const SCROLL_DEBUG_DEFAULT = true;
+const SCROLL_DEBUG_DEFAULT = false;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],

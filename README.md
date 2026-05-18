@@ -62,6 +62,10 @@ http://127.0.0.1:4173
 - event-level drill-down with full JSON payload
 - event-type filtering
 
+Scroll debug logging is off by default. Open the viewer with
+`?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;
+use `?scrollDebug=0` to disable it again.
+
 ### Forking a run at a PA boundary
 
 Use `fork-run` to start a new run from the latest assignment repo plus the
