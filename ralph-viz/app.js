@@ -419,6 +419,8 @@ function renderCommandCard(entry) {
     summary.append(badge);
   }
 
+  appendFullCommand(body, cmd);
+
   if (output) {
     const pre = document.createElement("pre");
     pre.className = "cmd-output";
@@ -441,6 +443,17 @@ function renderCommandCard(entry) {
   }
 
   return card;
+}
+
+function appendFullCommand(body, command) {
+  const text = cleanText(command);
+  if (!text) {
+    return;
+  }
+  const pre = document.createElement("pre");
+  pre.className = "cmd-full";
+  pre.textContent = text;
+  body.append(pre);
 }
 
 function commandEntryKey(entry) {
@@ -842,6 +855,8 @@ function renderGeminiToolCallCard(entry) {
     badge.textContent = isError ? "error" : "ok";
     summary.append(badge);
   }
+
+  appendFullCommand(body, cmd || description);
 
   if (output) {
     const pre = document.createElement("pre");

@@ -338,6 +338,20 @@ button:hover { background: #252525; }
   text-overflow: ellipsis;
 }
 
+.cmd-full {
+  font-family: "SF Mono", "Consolas", monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #101510;
+  border-left: 2px solid #354835;
+  border-radius: 3px;
+  padding: 0.4rem 0.6rem;
+  margin: 0.2rem 0 0.2rem 1rem;
+  color: #b8e0b8;
+  line-height: 1.4;
+}
+
 .cmd-output {
   font-family: "SF Mono", "Consolas", monospace;
   font-size: 0.75rem;
