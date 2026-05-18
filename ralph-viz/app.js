@@ -33,6 +33,7 @@ const state = {
   openEntryKeys: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
+  stickToBottomAfterLayout: false,
 };
 
 // Noise event types that clutter the view
@@ -395,9 +396,10 @@ function renderCommandCard(entry) {
       more.className = "btn-more";
       more.textContent = `Show all (${output.length} chars)`;
       more.onclick = () => {
+        const scrollSnapshot = captureScrollSnapshot();
         pre.textContent = output;
         more.remove();
-        markLayoutScrollIntent();
+        markLayoutScrollIntent(scrollSnapshot);
       };
       card.append(pre, more);
     } else {
@@ -430,14 +432,39 @@ function restoreExpandableState(details, key) {
   details.dataset.entryKey = key;
   details.dataset.scrollKey = key;
   details.open = state.openEntryKeys.has(key);
+  attachPreToggleScrollSnapshot(details);
   details.addEventListener("toggle", () => {
     if (details.open) {
       state.openEntryKeys.add(key);
     } else {
       state.openEntryKeys.delete(key);
     }
-    markLayoutScrollIntent();
+    markLayoutScrollIntent(takePreToggleScrollSnapshot(details));
   });
+}
+
+function attachPreToggleScrollSnapshot(details) {
+  details.addEventListener("pointerdown", (event) => {
+    if (isDirectSummaryEvent(details, event)) {
+      details._preToggleScrollSnapshot = captureScrollSnapshot();
+    }
+  }, { capture: true });
+  details.addEventListener("keydown", (event) => {
+    if ((event.key === "Enter" || event.key === " ") && isDirectSummaryEvent(details, event)) {
+      details._preToggleScrollSnapshot = captureScrollSnapshot();
+    }
+  }, { capture: true });
+}
+
+function takePreToggleScrollSnapshot(details) {
+  const snapshot = details._preToggleScrollSnapshot ?? null;
+  details._preToggleScrollSnapshot = null;
+  return snapshot;
+}
+
+function isDirectSummaryEvent(details, event) {
+  const summary = event.target?.closest?.("summary");
+  return summary?.parentElement === details;
 }
 
 function renderMessageCard(record) {
@@ -767,9 +794,10 @@ function renderGeminiToolCallCard(entry) {
       more.className = "btn-more";
       more.textContent = `Show all (${output.length} chars)`;
       more.onclick = () => {
+        const scrollSnapshot = captureScrollSnapshot();
         pre.textContent = output;
         more.remove();
-        markLayoutScrollIntent();
+        markLayoutScrollIntent(scrollSnapshot);
       };
       card.append(pre, more);
     } else {
@@ -2389,6 +2417,7 @@ function renderTimeline(records) {
     details.className = "turn";
     details.dataset.turn = String(turn);
     details.dataset.scrollKey = turnScrollKey(turn);
+    attachPreToggleScrollSnapshot(details);
 
     // Open turns from URL, or default to last turn
     if (hasUrlTurns ? urlTurns.includes(String(turn)) : turn === lastTurn) {
@@ -2397,7 +2426,7 @@ function renderTimeline(records) {
 
     details.addEventListener("toggle", () => {
       syncOpenTurnsToUrl();
-      markLayoutScrollIntent();
+      markLayoutScrollIntent(takePreToggleScrollSnapshot(details));
     });
 
     const summary = document.createElement("summary");
@@ -2562,7 +2591,10 @@ function isAutoRefreshEnabled() {
 
 function captureScrollSnapshot(options = {}) {
   const metrics = getScrollMetrics();
-  const stickToBottom = options.forceStickToBottom || metrics.distanceFromBottom <= BOTTOM_STICKY_PX;
+  const stickToBottom =
+    options.forceStickToBottom ||
+    state.stickToBottomAfterLayout ||
+    metrics.distanceFromBottom <= BOTTOM_STICKY_PX;
   return {
     scrollTop: metrics.scrollTop,
     stickToBottom,
@@ -2724,11 +2756,16 @@ function stopAutoRefresh() {
 function markUserScrollIntent() {
   state.userScrollVersion += 1;
   state.latestLayoutScrollSnapshot = null;
+  state.stickToBottomAfterLayout = false;
 }
 
-function markLayoutScrollIntent() {
+function markLayoutScrollIntent(preLayoutSnapshot = null) {
   state.userScrollVersion += 1;
-  state.latestLayoutScrollSnapshot = captureScrollSnapshot();
+  state.stickToBottomAfterLayout =
+    state.stickToBottomAfterLayout || preLayoutSnapshot?.stickToBottom === true;
+  state.latestLayoutScrollSnapshot = captureScrollSnapshot({
+    forceStickToBottom: state.stickToBottomAfterLayout,
+  });
 }
 
 function renderTimelinePreservingScroll() {
