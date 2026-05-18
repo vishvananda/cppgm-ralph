@@ -349,11 +349,12 @@ function renderCommandCard(entry) {
   const exitCode = item.exit_code;
   const time = fmtShort(entry.endRecord?.recordedAt ?? entry.startRecord?.recordedAt);
 
-  const card = document.createElement("details");
+  const card = document.createElement("div");
   card.className = "ev ev-cmd" + (exitCode != null && exitCode !== 0 ? " ev-cmd-fail" : "");
-  restoreExpandableState(card, commandEntryKey(entry));
+  const { header: summary, body } = createAccordion(card, {
+    key: commandEntryKey(entry),
+  });
 
-  const summary = document.createElement("summary");
   const cmdSpan = document.createElement("code");
   cmdSpan.className = "cmd-inline";
   cmdSpan.textContent = truncate(cmd, 200);
@@ -386,8 +387,6 @@ function renderCommandCard(entry) {
     summary.append(badge);
   }
 
-  card.append(summary);
-
   if (output) {
     const pre = document.createElement("pre");
     pre.className = "cmd-output";
@@ -402,10 +401,10 @@ function renderCommandCard(entry) {
         more.remove();
         markLayoutScrollIntent(scrollSnapshot);
       };
-      card.append(pre, more);
+      body.append(pre, more);
     } else {
       pre.textContent = output;
-      card.append(pre);
+      body.append(pre);
     }
   }
 
@@ -426,58 +425,58 @@ function commandEntryKey(entry) {
   return `command:${threadId}:${turn}:${recordedAt}:${command}`;
 }
 
-function restoreExpandableState(details, key) {
-  if (!key) {
-    return;
+function createAccordion(root, options = {}) {
+  const {
+    key = null,
+    initialOpen = key ? state.openEntryKeys.has(key) : false,
+    headerClass = "accordion-header",
+    bodyClass = "accordion-body",
+    scrollKey = key,
+    onToggle = null,
+  } = options;
+
+  root.classList.add("accordion");
+  if (key) {
+    root.dataset.entryKey = key;
   }
-  details.dataset.entryKey = key;
-  details.dataset.scrollKey = key;
-  details.open = state.openEntryKeys.has(key);
-  attachPreToggleScrollSnapshot(details);
-  addDetailsToggleHandler(details, () => {
-    if (details.open) {
-      state.openEntryKeys.add(key);
-    } else {
-      state.openEntryKeys.delete(key);
+
+  const header = document.createElement("button");
+  header.type = "button";
+  header.className = headerClass;
+  if (scrollKey) {
+    header.dataset.scrollKey = scrollKey;
+  }
+
+  const body = document.createElement("div");
+  body.className = bodyClass;
+
+  function setOpen(open) {
+    root.classList.toggle("is-open", open);
+    root.dataset.open = open ? "true" : "false";
+    header.setAttribute("aria-expanded", String(open));
+    body.hidden = !open;
+  }
+
+  setOpen(Boolean(initialOpen));
+  header.addEventListener("click", () => {
+    const scrollSnapshot = captureScrollSnapshot();
+    const open = !root.classList.contains("is-open");
+    setOpen(open);
+    if (key) {
+      if (open) {
+        state.openEntryKeys.add(key);
+      } else {
+        state.openEntryKeys.delete(key);
+      }
     }
-    markLayoutScrollIntent(takePreToggleScrollSnapshot(details));
+    if (onToggle) {
+      onToggle(open);
+    }
+    markLayoutScrollIntent(scrollSnapshot);
   });
-}
 
-function addDetailsToggleHandler(details, handler) {
-  details.addEventListener("toggle", () => {
-    if (!details._userTogglePending) {
-      return;
-    }
-    details._userTogglePending = false;
-    handler();
-  });
-}
-
-function attachPreToggleScrollSnapshot(details) {
-  details.addEventListener("pointerdown", (event) => {
-    if (isDirectSummaryEvent(details, event)) {
-      details._preToggleScrollSnapshot = captureScrollSnapshot();
-      details._userTogglePending = true;
-    }
-  }, { capture: true });
-  details.addEventListener("keydown", (event) => {
-    if ((event.key === "Enter" || event.key === " ") && isDirectSummaryEvent(details, event)) {
-      details._preToggleScrollSnapshot = captureScrollSnapshot();
-      details._userTogglePending = true;
-    }
-  }, { capture: true });
-}
-
-function takePreToggleScrollSnapshot(details) {
-  const snapshot = details._preToggleScrollSnapshot ?? null;
-  details._preToggleScrollSnapshot = null;
-  return snapshot;
-}
-
-function isDirectSummaryEvent(details, event) {
-  const summary = event.target?.closest?.("summary");
-  return summary?.parentElement === details;
+  root.append(header, body);
+  return { header, body, setOpen };
 }
 
 function renderMessageCard(record) {
@@ -500,10 +499,11 @@ function renderFileChangeCard(record) {
   const changes = item.changes ?? [];
   if (!changes.length) return null;
 
-  const card = document.createElement("details");
+  const card = document.createElement("div");
   card.className = "ev ev-file";
-  restoreExpandableState(card, fileChangeEntryKey(record));
-  const summary = document.createElement("summary");
+  const { header: summary, body } = createAccordion(card, {
+    key: fileChangeEntryKey(record),
+  });
   if (changes.length === 1) {
     summary.append(fileChangeLabel(changes[0]));
   } else {
@@ -533,7 +533,7 @@ function renderFileChangeCard(record) {
     }
   }
 
-  card.append(summary, list);
+  body.append(list);
   return card;
 }
 
@@ -573,9 +573,9 @@ function renderTodoCard(record) {
   const items = record.event?.item?.items ?? [];
   if (!items.length) return null;
 
-  const card = document.createElement("details");
+  const card = document.createElement("div");
   card.className = "ev ev-todo";
-  const summary = document.createElement("summary");
+  const { header: summary, body } = createAccordion(card);
   const done = items.filter(t => t.completed).length;
   summary.innerHTML = `<span class="pill">${done}/${items.length} tasks</span>`;
 
@@ -588,7 +588,7 @@ function renderTodoCard(record) {
     list.append(row);
   }
 
-  card.append(summary, list);
+  body.append(list);
   return card;
 }
 
@@ -744,12 +744,13 @@ function renderGeminiToolCallCard(entry) {
   const time = fmtShort(responseRecord?.recordedAt ?? record.recordedAt);
   const durationMs = respVal.durationMs;
 
-  const card = document.createElement("details");
+  const card = document.createElement("div");
   const isError = respVal.status === "error";
   card.className = "ev ev-cmd" + (isError ? " ev-cmd-fail" : "");
-  restoreExpandableState(card, geminiToolEntryKey(entry));
+  const { header: summary, body } = createAccordion(card, {
+    key: geminiToolEntryKey(entry),
+  });
 
-  const summary = document.createElement("summary");
   const toolSpan = document.createElement("span");
   toolSpan.className = "pill";
   toolSpan.textContent = toolName;
@@ -796,8 +797,6 @@ function renderGeminiToolCallCard(entry) {
     summary.append(badge);
   }
 
-  card.append(summary);
-
   if (output) {
     const pre = document.createElement("pre");
     pre.className = "cmd-output";
@@ -812,10 +811,10 @@ function renderGeminiToolCallCard(entry) {
         more.remove();
         markLayoutScrollIntent(scrollSnapshot);
       };
-      card.append(pre, more);
+      body.append(pre, more);
     } else {
       pre.textContent = output;
-      card.append(pre);
+      body.append(pre);
     }
   } else if (!responseRecord) {
     // No response yet — show args as fallback
@@ -824,7 +823,7 @@ function renderGeminiToolCallCard(entry) {
       const pre = document.createElement("pre");
       pre.className = "cmd-output";
       pre.textContent = argText;
-      card.append(pre);
+      body.append(pre);
     }
   }
 
@@ -2462,24 +2461,20 @@ function renderTimeline(records) {
 
   for (const turn of sortedTurns) {
     const items = turnMap.get(turn) ?? [];
-    const details = document.createElement("details");
-    details.className = "turn";
-    details.dataset.turn = String(turn);
-    attachPreToggleScrollSnapshot(details);
+    const turnEl = document.createElement("div");
+    turnEl.className = "turn";
+    turnEl.dataset.turn = String(turn);
 
     // Open turns from URL, or default to last turn
-    if (hasUrlTurns ? urlTurns.includes(String(turn)) : turn === lastTurn) {
-      details.open = true;
-    }
-
-    addDetailsToggleHandler(details, () => {
-      syncOpenTurnsToUrl();
-      markLayoutScrollIntent(takePreToggleScrollSnapshot(details));
+    const initialOpen = hasUrlTurns ? urlTurns.includes(String(turn)) : turn === lastTurn;
+    const { header: summary, body: feed } = createAccordion(turnEl, {
+      initialOpen,
+      headerClass: "turn-header accordion-header",
+      bodyClass: "turn-feed accordion-body",
+      scrollKey: turnScrollKey(turn),
+      onToggle: syncOpenTurnsToUrl,
     });
 
-    const summary = document.createElement("summary");
-    summary.className = "turn-header";
-    summary.dataset.scrollKey = turnScrollKey(turn);
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
     const usage = usageMap.get(turn);
     const ts = testMap.get(turn);
@@ -2499,14 +2494,11 @@ function renderTimeline(records) {
       ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
       : "";
     summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
-    details.append(summary);
 
-    const feed = document.createElement("div");
-    feed.className = "turn-feed";
     entryWindow.entries.forEach((entry, offset) => {
       const el = renderDisplayEntry(entry);
       if (el) {
-        if (!el.dataset.scrollKey) {
+        if (!el.dataset.scrollKey && !el.querySelector("[data-scroll-key]")) {
           const entryIndex = entryWindow.indices?.[offset] ?? entryWindow.startIndex + offset;
           const key = scrollKeyForEntry(entry, entryIndex);
           if (key) {
@@ -2516,8 +2508,7 @@ function renderTimeline(records) {
         feed.append(el);
       }
     });
-    details.append(feed);
-    fragment.append(details);
+    fragment.append(turnEl);
   }
   timelineEl.replaceChildren(fragment);
 }
@@ -2527,12 +2518,12 @@ function turnScrollKey(turn) {
 }
 
 function rememberOpenEntryKeys() {
-  for (const details of timelineEl.querySelectorAll("details[data-entry-key]")) {
-    const key = details.dataset.entryKey;
+  for (const entry of timelineEl.querySelectorAll(".accordion[data-entry-key]")) {
+    const key = entry.dataset.entryKey;
     if (!key) {
       continue;
     }
-    if (details.open) {
+    if (entry.classList.contains("is-open")) {
       state.openEntryKeys.add(key);
     } else {
       state.openEntryKeys.delete(key);
@@ -2560,7 +2551,7 @@ function setUrlParam(key, value) {
 
 function syncOpenTurnsToUrl() {
   const open = [];
-  for (const el of timelineEl.querySelectorAll("details.turn[open]")) {
+  for (const el of timelineEl.querySelectorAll(".turn.is-open")) {
     const t = el.dataset.turn;
     if (t) open.push(t);
   }

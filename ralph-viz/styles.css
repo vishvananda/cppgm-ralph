@@ -124,11 +124,27 @@ button:hover { background: #252525; }
 /* Timeline */
 .timeline { display: grid; gap: 0.2rem; }
 
+.accordion-body[hidden] { display: none !important; }
+
+.accordion-header {
+  appearance: none;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  min-width: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.accordion-header:hover { background: none; }
+.accordion-header:focus-visible { outline: 1px solid #555; outline-offset: 2px; }
+
 /* Turn accordion */
-.turn > summary {
+.turn > .turn-header {
   cursor: pointer;
   padding: 0.3rem 0;
-  list-style: none;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -138,16 +154,15 @@ button:hover { background: #252525; }
   border-bottom: 1px solid #222;
 }
 
-.turn > summary::-webkit-details-marker { display: none; }
-.turn > summary::before {
+.turn > .turn-header::before {
   content: "\25B8";
   font-size: 0.7rem;
   color: var(--dim);
   transition: transform 0.15s;
   width: 0.7rem;
 }
-.turn[open] > summary::before { transform: rotate(90deg); }
-.turn > summary:hover { color: #fff; }
+.turn.is-open > .turn-header::before { transform: rotate(90deg); }
+.turn > .turn-header:hover { color: #fff; }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
 .turn-window { color: #777; font-size: 0.78rem; }
@@ -242,7 +257,7 @@ button:hover { background: #252525; }
     line-height: 1.35;
   }
 
-  .turn > summary {
+  .turn > .turn-header {
     align-items: flex-start;
     gap: 0.3rem 0.45rem;
   }
@@ -282,17 +297,15 @@ button:hover { background: #252525; }
 /* Command */
 .ev-cmd-fail .cmd-inline { color: var(--bad); }
 
-.ev-cmd > summary {
+.ev-cmd > .accordion-header {
   cursor: pointer;
   padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  list-style: none;
 }
 
-.ev-cmd > summary::-webkit-details-marker { display: none; }
-.ev-cmd > summary::before {
+.ev-cmd > .accordion-header::before {
   content: "$";
   color: var(--dim);
   font-family: monospace;
@@ -356,17 +369,15 @@ button:hover { background: #252525; }
 }
 
 /* File changes */
-.ev-file > summary {
+.ev-file > .accordion-header {
   cursor: pointer;
   padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  list-style: none;
 }
 
-.ev-file > summary::-webkit-details-marker { display: none; }
-.ev-file > summary::before {
+.ev-file > .accordion-header::before {
   content: "\25AA";
   color: #a84;
   font-size: 0.6rem;
@@ -400,17 +411,15 @@ button:hover { background: #252525; }
 }
 
 /* Todo */
-.ev-todo > summary {
+.ev-todo > .accordion-header {
   cursor: pointer;
   padding: 0.15rem 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  list-style: none;
 }
 
-.ev-todo > summary::-webkit-details-marker { display: none; }
-.ev-todo > summary::before {
+.ev-todo > .accordion-header::before {
   content: "\2610";
   color: #88a;
   font-size: 0.75rem;
@@ -605,9 +614,9 @@ pre { margin: 0; }
     margin-left: 0.15rem;
   }
 
-  .ev-cmd > summary,
-  .ev-file > summary,
-  .ev-todo > summary {
+  .ev-cmd > .accordion-header,
+  .ev-file > .accordion-header,
+  .ev-todo > .accordion-header {
     align-items: flex-start;
     flex-wrap: wrap;
   }
