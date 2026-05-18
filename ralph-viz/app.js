@@ -434,7 +434,7 @@ function restoreExpandableState(details, key) {
   details.dataset.scrollKey = key;
   details.open = state.openEntryKeys.has(key);
   attachPreToggleScrollSnapshot(details);
-  details.addEventListener("toggle", () => {
+  addDetailsToggleHandler(details, () => {
     if (details.open) {
       state.openEntryKeys.add(key);
     } else {
@@ -444,15 +444,27 @@ function restoreExpandableState(details, key) {
   });
 }
 
+function addDetailsToggleHandler(details, handler) {
+  details.addEventListener("toggle", () => {
+    if (!details._userTogglePending) {
+      return;
+    }
+    details._userTogglePending = false;
+    handler();
+  });
+}
+
 function attachPreToggleScrollSnapshot(details) {
   details.addEventListener("pointerdown", (event) => {
     if (isDirectSummaryEvent(details, event)) {
       details._preToggleScrollSnapshot = captureScrollSnapshot();
+      details._userTogglePending = true;
     }
   }, { capture: true });
   details.addEventListener("keydown", (event) => {
     if ((event.key === "Enter" || event.key === " ") && isDirectSummaryEvent(details, event)) {
       details._preToggleScrollSnapshot = captureScrollSnapshot();
+      details._userTogglePending = true;
     }
   }, { capture: true });
 }
@@ -2460,7 +2472,7 @@ function renderTimeline(records) {
       details.open = true;
     }
 
-    details.addEventListener("toggle", () => {
+    addDetailsToggleHandler(details, () => {
       syncOpenTurnsToUrl();
       markLayoutScrollIntent(takePreToggleScrollSnapshot(details));
     });
@@ -2648,28 +2660,42 @@ function restoreScrollAfterRender(snapshot) {
     return;
   }
   afterNextPaint(() => {
-    let restoreSnapshot = snapshot;
-    if (restoreSnapshot.userScrollVersion !== state.userScrollVersion) {
-      const layoutSnapshot = state.latestLayoutScrollSnapshot;
-      if (
-        layoutSnapshot &&
-        layoutSnapshot.userScrollVersion === state.userScrollVersion &&
-        layoutSnapshot.userScrollVersion > restoreSnapshot.userScrollVersion
-      ) {
-        restoreSnapshot = layoutSnapshot;
-      } else {
-        return;
-      }
+    if (applyScrollRestoration(snapshot)) {
+      window.setTimeout(() => applyScrollRestoration(snapshot), 50);
+      window.setTimeout(() => applyScrollRestoration(snapshot), 150);
     }
-    if (restoreSnapshot.stickToBottom) {
-      scrollToBottomNow();
-      return;
-    }
-    if (!restoreSnapshot.preferScrollTop && restoreScrollAnchor(restoreSnapshot)) {
-      return;
-    }
-    setScrollTop(restoreSnapshot.scrollTop);
   });
+}
+
+function applyScrollRestoration(snapshot) {
+  const restoreSnapshot = resolveScrollSnapshot(snapshot);
+  if (!restoreSnapshot) {
+    return false;
+  }
+  if (restoreSnapshot.stickToBottom) {
+    scrollToBottomNow();
+    return true;
+  }
+  if (!restoreSnapshot.preferScrollTop && restoreScrollAnchor(restoreSnapshot)) {
+    return true;
+  }
+  setScrollTop(restoreSnapshot.scrollTop);
+  return true;
+}
+
+function resolveScrollSnapshot(snapshot) {
+  if (snapshot.userScrollVersion === state.userScrollVersion) {
+    return snapshot;
+  }
+  const layoutSnapshot = state.latestLayoutScrollSnapshot;
+  if (
+    layoutSnapshot &&
+    layoutSnapshot.userScrollVersion === state.userScrollVersion &&
+    layoutSnapshot.userScrollVersion > snapshot.userScrollVersion
+  ) {
+    return layoutSnapshot;
+  }
+  return null;
 }
 
 function captureScrollAnchors() {
