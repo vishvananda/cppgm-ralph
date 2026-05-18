@@ -245,6 +245,13 @@ mandatory completion criteria, so requested planning, review, cleanup,
 documentation, or retrospective work must be completed rather than deferred once
 the check gate passes.
 
+For CPPGM runs, prompt and goal templates should treat file-size, file-audit,
+and architecture requirements as substantive design constraints, not as text to
+route around. If an agent discovers a pre-existing audit violation or a blind
+spot such as hidden include fragments, macro-mediated includes, unchecked
+extensions, or weakened check commands, the current phase should require fixing
+that issue rather than deferring it because the visible checks pass.
+
 Example two-phase setup:
 
 ```json

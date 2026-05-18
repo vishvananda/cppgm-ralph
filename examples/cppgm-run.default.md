@@ -64,6 +64,12 @@ Architecture requirements:
   cohesive components with clear responsibilities and interfaces; do not satisfy
   the limit by mechanically slicing one large implementation into numbered parts
   or include-file fragments.
+- You MUST treat file-size, file-audit, and architecture requirements as
+  substantive design requirements, not merely script output. Do not route around
+  them by moving implementation into unchecked extensions or paths, generated
+  blobs, macro-mediated includes, include fragments, or by weakening the
+  audit/check commands. If current work exposes a pre-existing violation or an
+  audit blind spot, fixing it is part of the current assignment work.
 - You MUST avoid shortcuts, test-specific hacks, hardcoded answers, and
   superficial workarounds. Fix the underlying implementation issue.
 
@@ -82,7 +88,9 @@ After `{{testCommand}}` first passes:
    records, symbols, enums, IDs, spans, or canonical tables owned by the stage.
 4. Specifically inspect implementation size and shape. If any file or function
    is too large, refactor by responsibility into cohesive modules with clear
-   interfaces.
+   interfaces. Also inspect included fragments, nonstandard source extensions,
+   generated-looking files, and macro-mediated includes; hidden implementation
+   code is an audit violation even if the current audit script misses it.
 5. Rerun `{{testCommand}}`.
 6. Add a `Final Architecture Review` describing the refactors made and confirming
    that the implementation now satisfies the architecture requirements.

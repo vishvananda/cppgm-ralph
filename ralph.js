@@ -1556,6 +1556,7 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
     lines.push(
       "- All required phase checks remain passing.",
       "- All explicit requirements in the accompanying turn prompt are satisfied.",
+      "- File-size, audit, and architecture requirements are satisfied in substance, not bypassed; pre-existing or newly discovered violations and audit blind spots are fixed as current work.",
       "- Intended changes are committed.",
       "- `git status --short` is empty before handing control back.",
     );
@@ -1567,6 +1568,7 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
       "- Previous stages do not regress.",
       "- All explicit requirements in the accompanying turn prompt are satisfied, including any requested planning, review, cleanup, documentation, or retrospective work.",
       "- No required prompt item is skipped, weakened into a note, or deferred after the test gate passes.",
+      "- File-size, audit, and architecture requirements are satisfied in substance, not bypassed; pre-existing or newly discovered violations and audit blind spots are fixed as current work.",
       "- Intended changes are committed.",
       "- `git status --short` is empty before handing control back.",
     );
