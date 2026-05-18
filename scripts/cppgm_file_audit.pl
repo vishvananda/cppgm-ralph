@@ -54,6 +54,8 @@ for my $input (@paths) {
     my $target = File::Spec->rel2abs($input, $root);
     collect_source_files($target, \@files);
 }
+my %included_by;
+discover_included_files($root, \@files, \%included_by);
 @files = sort @files;
 
 my @fatal;
@@ -73,7 +75,7 @@ for my $file (@files) {
 
     check_file_size($rel, $line_count, \@fatal);
     check_file_name($rel, $line_count, \@fatal, \@warning);
-    check_includes($rel, $text, \@fatal, \@warning);
+    check_includes($rel, $text, \%included_by, \@fatal, \@warning);
     check_shortcut_smells($rel, $text, \@fatal, \@warning);
     check_functions($rel, $text, \@fatal, \@warning);
     check_header_body_weight($rel, $text, \@fatal, \@warning);
@@ -147,6 +149,36 @@ sub collect_source_files {
     }, $target);
 }
 
+sub discover_included_files {
+    my ($root, $files, $included_by) = @_;
+    my %seen = map { abs_path($_) => 1 } grep { defined abs_path($_) } @$files;
+
+    for (my $index = 0; $index < @$files; ++$index) {
+        my $including_file = $files->[$index];
+        my $including_abs = abs_path($including_file) // next;
+        my $including_rel = relative_path($including_abs, $root);
+        my $text = read_text($including_abs);
+        my $including_dir = file_dir($including_abs);
+
+        for my $include (find_include_records($text)) {
+            next if $include->{delimiter} ne '"';
+            my $target_abs = abs_path(File::Spec->rel2abs($include->{target}, $including_dir));
+            next if !$target_abs || !-f $target_abs;
+            my $target_rel = relative_path($target_abs, $root);
+            push @{$included_by->{$target_rel}}, {
+                from => $including_rel,
+                line => $include->{line},
+                after_code => $include->{after_code},
+                target => $include->{target},
+            };
+            if (!$seen{$target_abs}) {
+                $seen{$target_abs} = 1;
+                push @$files, $target_abs;
+            }
+        }
+    }
+}
+
 sub skip_dir {
     my ($name) = @_;
     return $name =~ /^(?:\.git|obj|build|dist|node_modules)$/;
@@ -173,6 +205,12 @@ sub read_text {
     open my $fh, '<', $file or die "Cannot read $file: $!\n";
     local $/;
     return <$fh>;
+}
+
+sub file_dir {
+    my ($file) = @_;
+    my ($volume, $directory) = File::Spec->splitpath($file);
+    return File::Spec->catpath($volume, $directory, '');
 }
 
 sub relative_path {
@@ -227,19 +265,125 @@ sub check_file_name {
 }
 
 sub check_includes {
-    my ($rel, $text, $fatal, $warning) = @_;
-    my @lines = split /\n/, $text;
-    for my $i (0 .. $#lines) {
-        my $line = $lines[$i];
-        if ($line =~ /^\s*#\s*include\s+[<"][^>"]+\.(?:c|cc|cpp|cxx)[>"]/) {
-            add_finding($fatal, 'bad-division', $rel, $i + 1,
+    my ($rel, $text, $included_by, $fatal, $warning) = @_;
+    my @include_sites = @{$included_by->{$rel} // []};
+    my @inline_sites = grep { $_->{after_code} } @include_sites;
+    if (@inline_sites) {
+        my $first = $inline_sites[0];
+        add_finding($fatal, 'bad-division', $rel, 1,
+            "file is included from inside code at $first->{from}:$first->{line}; make it a cohesive .cpp/.h module");
+    }
+    if (!@inline_sites && @include_sites && !has_header_preamble($text) && contains_function_definition($text)) {
+        my $first = $include_sites[0];
+        add_finding($fatal, 'bad-division', $rel, 1,
+            "included file contains implementation bodies but is not a guarded header; included from $first->{from}:$first->{line}");
+    }
+
+    for my $include (find_include_records($text)) {
+        if ($include->{after_code}) {
+            add_finding($fatal, 'bad-division', $rel, $include->{line},
+                "include appears after code; includes must stay in the file preamble");
+        }
+        if ($include->{delimiter} eq '"' && $include->{target} =~ /\.(?:c|cc|cpp|cxx)$/) {
+            add_finding($fatal, 'bad-division', $rel, $include->{line},
                 "source file includes another source file");
         }
-        if ($line =~ /^\s*#\s*include\s+[<"][^>"]+\.(?:inc|ipp|inl)[>"]/) {
-            add_finding($fatal, 'bad-division', $rel, $i + 1,
-                "implementation fragment include is not an acceptable file-size split");
+    }
+}
+
+sub find_include_records {
+    my ($text) = @_;
+    my @lines = split /\n/, $text;
+    my @code_lines = split /\n/, mask_comments($text);
+    my @records;
+    my $saw_real_code = 0;
+
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        if ($line =~ /^\s*#\s*include\s+([<"])([^>"]+)[>"]/) {
+            push @records, {
+                line => $i + 1,
+                delimiter => $1,
+                target => $2,
+                after_code => $saw_real_code,
+            };
+            next;
+        }
+        if (line_is_real_code($code_lines[$i] // '')) {
+            $saw_real_code = 1;
         }
     }
+
+    return @records;
+}
+
+sub has_header_preamble {
+    my ($text) = @_;
+    return $text =~ /^\s*#\s*pragma\s+once\b/m ||
+        ($text =~ /^\s*#\s*ifndef\s+\w+/m && $text =~ /^\s*#\s*define\s+\w+/m);
+}
+
+sub contains_function_definition {
+    my ($text) = @_;
+    my @defs = find_function_definitions($text);
+    return scalar(@defs) > 0;
+}
+
+sub find_function_definitions {
+    my ($text) = @_;
+    my @lines = split /\n/, mask_comments_and_strings($text);
+    my @signature;
+    my @definitions;
+    my $in_function = 0;
+    my $function_start = 0;
+    my $function_name = '';
+    my $brace_depth = 0;
+
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        if (!$in_function) {
+            push @signature, $line if $line =~ /\S/;
+            shift @signature while @signature > 8;
+            my $open_pos = index($line, '{');
+            next if $open_pos < 0;
+            my $prefix = join(' ', @signature);
+            $prefix =~ s/\{.*\z//;
+            my $name = function_name_from_signature($prefix);
+            next if !$name;
+
+            $in_function = 1;
+            $function_start = $i + 1;
+            $function_name = $name;
+            $brace_depth = count_char(substr($line, $open_pos), '{') -
+                count_char(substr($line, $open_pos), '}');
+            if ($brace_depth <= 0) {
+                push @definitions, { name => $function_name, line => $function_start };
+                $in_function = 0;
+                @signature = ();
+            }
+            next;
+        }
+
+        $brace_depth += count_char($line, '{') - count_char($line, '}');
+        if ($brace_depth <= 0) {
+            push @definitions, { name => $function_name, line => $function_start };
+            $in_function = 0;
+            @signature = ();
+        }
+    }
+
+    return @definitions;
+}
+
+sub line_is_real_code {
+    my ($line) = @_;
+    $line =~ s/^\s+|\s+$//g;
+    return 0 if $line eq '';
+    return 0 if $line =~ /^#/;
+    return 0 if $line =~ /^using\s+namespace\s+[A-Za-z_][A-Za-z0-9_:]*\s*;\s*$/;
+    return 0 if $line =~ /^using\s+[A-Za-z_][A-Za-z0-9_:]*\s*;\s*$/;
+    return 0 if $line =~ /^(?:public|protected|private)\s*:\s*$/;
+    return 1;
 }
 
 sub check_shortcut_smells {
@@ -431,7 +575,7 @@ sub normalized_logical_lines {
 sub division_stem {
     my ($rel) = @_;
     my ($base) = $rel =~ /([^\/]+)$/;
-    $base =~ s/\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)\z//;
+    $base =~ s/\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|def|defs|inc|ipp|inl)\z//;
     $base =~ s/(?:[_-](?:part|chunk|split|piece)?\d+)\z//i;
     $base =~ s/(?:[_-](?:impl|internal|core|model|parser|emit|expr|decl|stmt|ops|primary|function|types|class|lifecycle|convert|aggregate|validate|frontend|backend|helpers?|utils?))\z//i;
     return $base;
