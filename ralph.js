@@ -731,7 +731,7 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
       .map((stage) => stage.name),
   );
   const regressions = stages
-    .filter((stage) => previousPassingStages.has(stage.name) && stage.status !== "pass")
+    .filter((stage) => previousPassingStages.has(stage.name) && stage.status === "fail")
     .map((stage) => stage.name);
 
   const testsPassed = reportSummary?.passed ?? stages.reduce((sum, stage) => sum + stage.passed, 0);
@@ -830,8 +830,17 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
     const previous = previousStages.get(stage.name);
     if (stage.status === "unknown" && previous?.status === "pass" && hasStageCounts(previous)) {
       setStageStatus(stage, "pass", previous.passed, previous.total);
+    } else if (
+      stage.status === "fail" &&
+      !hasStageCounts(stage) &&
+      previous?.status === "pass" &&
+      hasStageCounts(previous) &&
+      Number.isFinite(stage.failed)
+    ) {
+      setStageStatus(stage, "fail", Math.max(0, previous.total - stage.failed), previous.total);
     }
   }
+  inferEmptyReportStagesPassed(stages);
 
   if (reportSummary.allPassed) {
     inferAllStagesPassed(stages, reportSummary);
@@ -849,10 +858,15 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
 
   inferPreviousStagesPassed(stages.slice(0, failingIndex), reportSummary.passed);
 
+  const failingStage = stages[failingIndex];
+  if (hasStageCounts(failingStage)) {
+    return;
+  }
+
   const canAllocateFailingCounts =
     failingIndex === 0 || stages.slice(0, failingIndex).every((stage) => hasStageCounts(stage));
   if (!canAllocateFailingCounts) {
-    setStageStatus(stages[failingIndex], "fail", stages[failingIndex].passed, stages[failingIndex].total);
+    setStageStatus(failingStage, "fail", failingStage.passed, failingStage.total);
     return;
   }
 
@@ -862,7 +876,6 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
   const totalBefore = stages
     .slice(0, failingIndex)
     .reduce((sum, stage) => sum + (stage.total ?? 0), 0);
-  const failingStage = stages[failingIndex];
   const failingPassed =
     reportSummary.passed == null
       ? failingStage.passed
@@ -872,6 +885,22 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
       ? Math.max(failingStage.total, failingPassed)
       : Math.max(failingPassed, reportSummary.total - totalBefore);
   setStageStatus(failingStage, "fail", failingPassed, failingTotal);
+}
+
+function inferEmptyReportStagesPassed(stages) {
+  for (const stage of stages) {
+    if (isEmptyUnknownStageReport(stage)) {
+      setStageStatus(stage, "pass", stage.passed, stage.total);
+    }
+  }
+}
+
+function isEmptyUnknownStageReport(stage) {
+  return stage?.status === "unknown" &&
+    (stage.failed ?? 0) === 0 &&
+    (stage.timeouts ?? 0) === 0 &&
+    (stage.timeoutExpectations ?? 0) === 0 &&
+    (stage.targets?.length ?? 0) === 0;
 }
 
 function applyPreviousStageCounts(stages, previousStages, reportSummary) {
