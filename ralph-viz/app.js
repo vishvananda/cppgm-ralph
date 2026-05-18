@@ -423,8 +423,10 @@ function restoreExpandableState(details, key) {
     return;
   }
   details.dataset.entryKey = key;
+  details.dataset.scrollKey = key;
   details.open = state.openEntryKeys.has(key);
   details.addEventListener("toggle", () => {
+    markUserScrollIntent();
     if (details.open) {
       state.openEntryKeys.add(key);
     } else {
@@ -839,18 +841,46 @@ function renderDisplayEntry(entry) {
   return renderSystemCard(record);
 }
 
+function scrollKeyForEntry(entry, index = null) {
+  if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
+  if (entry.kind === "gemini-message") return recordScrollKey(entry.record, "gemini-message", index);
+  if (entry.kind === "gemini-thought") return recordScrollKey(entry.record, "gemini-thought", index);
+  return recordScrollKey(entry.record, entry.kind ?? "event", index);
+}
+
+function recordScrollKey(record, prefix = "event", index = null) {
+  if (!record) {
+    return null;
+  }
+  const item = record.event?.item ?? {};
+  const threadId = record.threadId ?? "thread";
+  const turn = displayTurnForRecord(record);
+  const stableParts = [
+    item.id,
+    item.type,
+    record.event?.traceId,
+    record.event?.action,
+    record.recordedAt,
+    index == null ? null : `entry-${index}`,
+  ].filter(part => part != null && part !== "");
+  const stableId = stableParts.join(":") || record.eventType || "";
+  return `${prefix}:${threadId}:${turn}:${record.eventType ?? "event"}:${stableId}`;
+}
+
 function isFullCardView() {
   return fullViewToggle?.checked ?? false;
 }
 
 function displayEntryWindow(entries) {
   if (isFullCardView() || entries.length <= COMPACT_TURN_CARD_LIMIT) {
-    return { entries, total: entries.length, hidden: 0 };
+    return { entries, total: entries.length, hidden: 0, startIndex: 0 };
   }
   return {
     entries: entries.slice(-COMPACT_TURN_CARD_LIMIT),
     total: entries.length,
     hidden: entries.length - COMPACT_TURN_CARD_LIMIT,
+    startIndex: entries.length - COMPACT_TURN_CARD_LIMIT,
   };
 }
 
@@ -2349,13 +2379,17 @@ function renderTimeline(records) {
     const details = document.createElement("details");
     details.className = "turn";
     details.dataset.turn = String(turn);
+    details.dataset.scrollKey = turnScrollKey(turn);
 
     // Open turns from URL, or default to last turn
     if (hasUrlTurns ? urlTurns.includes(String(turn)) : turn === lastTurn) {
       details.open = true;
     }
 
-    details.addEventListener("toggle", syncOpenTurnsToUrl);
+    details.addEventListener("toggle", () => {
+      markUserScrollIntent();
+      syncOpenTurnsToUrl();
+    });
 
     const summary = document.createElement("summary");
     summary.className = "turn-header";
@@ -2382,14 +2416,26 @@ function renderTimeline(records) {
 
     const feed = document.createElement("div");
     feed.className = "turn-feed";
-    for (const entry of entryWindow.entries) {
+    entryWindow.entries.forEach((entry, offset) => {
       const el = renderDisplayEntry(entry);
-      if (el) feed.append(el);
-    }
+      if (el) {
+        if (!el.dataset.scrollKey) {
+          const key = scrollKeyForEntry(entry, entryWindow.startIndex + offset);
+          if (key) {
+            el.dataset.scrollKey = key;
+          }
+        }
+        feed.append(el);
+      }
+    });
     details.append(feed);
     fragment.append(details);
   }
   timelineEl.replaceChildren(fragment);
+}
+
+function turnScrollKey(turn) {
+  return `turn:${turn}`;
 }
 
 function rememberOpenEntryKeys() {
@@ -2507,9 +2553,11 @@ function isAutoRefreshEnabled() {
 
 function captureScrollSnapshot(options = {}) {
   const metrics = getScrollMetrics();
+  const stickToBottom = options.forceStickToBottom || metrics.distanceFromBottom <= BOTTOM_STICKY_PX;
   return {
     scrollTop: metrics.scrollTop,
-    stickToBottom: options.forceStickToBottom || metrics.distanceFromBottom <= BOTTOM_STICKY_PX,
+    stickToBottom,
+    anchors: stickToBottom ? [] : captureScrollAnchors(),
     userScrollVersion: state.userScrollVersion,
   };
 }
@@ -2526,10 +2574,70 @@ function restoreScrollAfterRender(snapshot) {
       scrollToBottomNow();
       return;
     }
+    if (restoreScrollAnchor(snapshot)) {
+      return;
+    }
     const root = scrollingRoot();
     const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
     root.scrollTop = Math.min(snapshot.scrollTop, maxTop);
   });
+}
+
+function captureScrollAnchors() {
+  const viewportTop = scrollViewportTop();
+  const viewportBottom = scrollViewportBottom();
+  const anchors = [];
+
+  for (const element of timelineEl.querySelectorAll("[data-scroll-key]")) {
+    const key = element.dataset.scrollKey;
+    if (!key) {
+      continue;
+    }
+    const rect = element.getBoundingClientRect();
+    if (rect.height <= 0 || rect.bottom <= viewportTop || rect.top >= viewportBottom) {
+      continue;
+    }
+    anchors.push({
+      key,
+      offset: rect.top - viewportTop,
+      distance: Math.abs(rect.top - viewportTop),
+    });
+  }
+
+  anchors.sort((a, b) => a.distance - b.distance);
+  return anchors.slice(0, 12).map(({ key, offset }) => ({ key, offset }));
+}
+
+function restoreScrollAnchor(snapshot) {
+  const anchors = Array.isArray(snapshot?.anchors) ? snapshot.anchors : [];
+  if (!anchors.length) {
+    return false;
+  }
+
+  const root = scrollingRoot();
+  for (const anchor of anchors) {
+    const element = findScrollAnchor(anchor.key);
+    if (!element) {
+      continue;
+    }
+    const rect = element.getBoundingClientRect();
+    const currentOffset = rect.top - scrollViewportTop();
+    const delta = currentOffset - anchor.offset;
+    if (Number.isFinite(delta)) {
+      setScrollTop(root.scrollTop + delta);
+      return true;
+    }
+  }
+  return false;
+}
+
+function findScrollAnchor(key) {
+  for (const element of timelineEl.querySelectorAll("[data-scroll-key]")) {
+    if (element.dataset.scrollKey === key) {
+      return element;
+    }
+  }
+  return null;
 }
 
 function afterNextPaint(callback) {
@@ -2541,10 +2649,17 @@ function afterNextPaint(callback) {
 function scrollToBottomNow() {
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  setScrollTop(maxTop);
+}
+
+function setScrollTop(value) {
+  const root = scrollingRoot();
+  const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  const top = Math.min(Math.max(0, value), maxTop);
   if (typeof root.scrollTo === "function") {
-    root.scrollTo({ top: maxTop, behavior: "auto" });
+    root.scrollTo({ top, behavior: "auto" });
   } else {
-    root.scrollTop = maxTop;
+    root.scrollTop = top;
   }
 }
 
@@ -2561,6 +2676,15 @@ function getScrollMetrics() {
 
 function scrollingRoot() {
   return document.scrollingElement || document.documentElement;
+}
+
+function scrollViewportTop() {
+  return 0;
+}
+
+function scrollViewportBottom() {
+  const root = scrollingRoot();
+  return root.clientHeight || window.innerHeight || document.documentElement.clientHeight || 0;
 }
 
 function startAutoRefresh() {
@@ -2580,6 +2704,12 @@ function stopAutoRefresh() {
 
 function markUserScrollIntent() {
   state.userScrollVersion += 1;
+}
+
+function renderTimelinePreservingScroll() {
+  const scrollSnapshot = captureScrollSnapshot();
+  renderTimeline(state.events);
+  restoreScrollAfterRender(scrollSnapshot);
 }
 
 async function refreshActiveRun() {
@@ -2603,13 +2733,18 @@ async function refreshActiveRun() {
 
 // --- Bind ---
 
-refreshRuns.addEventListener("click", () => loadRuns({ preserveSelection: true }));
-reloadRun.addEventListener("click", () => loadRun(state.selectedRun));
+refreshRuns.addEventListener("click", () => loadRuns({
+  preserveSelection: true,
+  scrollSnapshot: captureScrollSnapshot(),
+}));
+reloadRun.addEventListener("click", () => loadRun(state.selectedRun, {
+  scrollSnapshot: captureScrollSnapshot(),
+}));
 runSelect.addEventListener("change", e => loadRun(e.target.value));
-eventFilter.addEventListener("input", () => renderTimeline(state.events));
-hideNoiseToggle.addEventListener("change", () => renderTimeline(state.events));
+eventFilter.addEventListener("input", renderTimelinePreservingScroll);
+hideNoiseToggle.addEventListener("change", renderTimelinePreservingScroll);
 if (fullViewToggle) {
-  fullViewToggle.addEventListener("change", () => renderTimeline(state.events));
+  fullViewToggle.addEventListener("change", renderTimelinePreservingScroll);
 }
 window.addEventListener("wheel", markUserScrollIntent, { passive: true });
 window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
@@ -2621,7 +2756,7 @@ window.addEventListener("keydown", (event) => {
 });
 if (autoRefreshToggle) {
   autoRefreshToggle.addEventListener("change", () => {
-    renderTimeline(state.events);
+    renderTimelinePreservingScroll();
     if (autoRefreshToggle.checked) {
       startAutoRefresh();
       refreshActiveRun();
