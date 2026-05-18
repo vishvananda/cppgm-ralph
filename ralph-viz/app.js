@@ -32,6 +32,7 @@ const state = {
   refreshInFlight: false,
   openEntryKeys: new Set(),
   userScrollVersion: 0,
+  latestLayoutScrollSnapshot: null,
 };
 
 // Noise event types that clutter the view
@@ -393,7 +394,11 @@ function renderCommandCard(entry) {
       const more = document.createElement("button");
       more.className = "btn-more";
       more.textContent = `Show all (${output.length} chars)`;
-      more.onclick = () => { pre.textContent = output; more.remove(); };
+      more.onclick = () => {
+        pre.textContent = output;
+        more.remove();
+        markLayoutScrollIntent();
+      };
       card.append(pre, more);
     } else {
       pre.textContent = output;
@@ -426,12 +431,12 @@ function restoreExpandableState(details, key) {
   details.dataset.scrollKey = key;
   details.open = state.openEntryKeys.has(key);
   details.addEventListener("toggle", () => {
-    markUserScrollIntent();
     if (details.open) {
       state.openEntryKeys.add(key);
     } else {
       state.openEntryKeys.delete(key);
     }
+    markLayoutScrollIntent();
   });
 }
 
@@ -761,7 +766,11 @@ function renderGeminiToolCallCard(entry) {
       const more = document.createElement("button");
       more.className = "btn-more";
       more.textContent = `Show all (${output.length} chars)`;
-      more.onclick = () => { pre.textContent = output; more.remove(); };
+      more.onclick = () => {
+        pre.textContent = output;
+        more.remove();
+        markLayoutScrollIntent();
+      };
       card.append(pre, more);
     } else {
       pre.textContent = output;
@@ -2387,8 +2396,8 @@ function renderTimeline(records) {
     }
 
     details.addEventListener("toggle", () => {
-      markUserScrollIntent();
       syncOpenTurnsToUrl();
+      markLayoutScrollIntent();
     });
 
     const summary = document.createElement("summary");
@@ -2567,19 +2576,29 @@ function restoreScrollAfterRender(snapshot) {
     return;
   }
   afterNextPaint(() => {
-    if (snapshot.userScrollVersion !== state.userScrollVersion) {
-      return;
+    let restoreSnapshot = snapshot;
+    if (restoreSnapshot.userScrollVersion !== state.userScrollVersion) {
+      const layoutSnapshot = state.latestLayoutScrollSnapshot;
+      if (
+        layoutSnapshot &&
+        layoutSnapshot.userScrollVersion === state.userScrollVersion &&
+        layoutSnapshot.userScrollVersion > restoreSnapshot.userScrollVersion
+      ) {
+        restoreSnapshot = layoutSnapshot;
+      } else {
+        return;
+      }
     }
-    if (snapshot.stickToBottom) {
+    if (restoreSnapshot.stickToBottom) {
       scrollToBottomNow();
       return;
     }
-    if (restoreScrollAnchor(snapshot)) {
+    if (restoreScrollAnchor(restoreSnapshot)) {
       return;
     }
     const root = scrollingRoot();
     const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    root.scrollTop = Math.min(snapshot.scrollTop, maxTop);
+    root.scrollTop = Math.min(restoreSnapshot.scrollTop, maxTop);
   });
 }
 
@@ -2704,6 +2723,12 @@ function stopAutoRefresh() {
 
 function markUserScrollIntent() {
   state.userScrollVersion += 1;
+  state.latestLayoutScrollSnapshot = null;
+}
+
+function markLayoutScrollIntent() {
+  state.userScrollVersion += 1;
+  state.latestLayoutScrollSnapshot = captureScrollSnapshot();
 }
 
 function renderTimelinePreservingScroll() {
