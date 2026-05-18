@@ -2675,9 +2675,18 @@ async function loadRun(id, options = {}) {
   state.events = data.events ?? [];
   state.shapeUsage = normalizeShapeUsage(data.shapeUsage);
   state.raw = state.events.slice();
-  renderSummary(state.events);
-  const scrollSnapshot = options.scrollSnapshot
+  let scrollSnapshot = options.scrollSnapshot
     ?? (options.stickToBottom ? captureScrollSnapshot({ forceStickToBottom: true }) : null);
+  if (scrollSnapshot && scrollSnapshot.userScrollVersion !== state.userScrollVersion) {
+    const staleScrollSnapshot = scrollSnapshot;
+    scrollSnapshot = captureScrollSnapshot();
+    scrollDebug("load-run-refresh-stale-scroll-snapshot", {
+      staleScrollSnapshot,
+      scrollSnapshot,
+      currentUserScrollVersion: state.userScrollVersion,
+    });
+  }
+  renderSummary(state.events);
   scrollDebug("load-run-before-render", {
     id,
     eventCount: state.events.length,
