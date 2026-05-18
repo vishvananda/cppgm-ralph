@@ -17,6 +17,7 @@ const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const SCROLL_JUMP_LOG_PX = 80;
 const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
+const SCROLL_DEBUG_DEFAULT = true;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -39,6 +40,7 @@ const state = {
   stickToBottomAfterLayout: false,
   preferScrollTopAfterLayout: false,
   scrollDebugEnabled: initialScrollDebugEnabled(),
+  scrollDebugPageId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   scrollDebugSeq: 0,
   lastObservedScrollTop: null,
   lastUserScrollAt: 0,
@@ -87,9 +89,9 @@ function initialScrollDebugEnabled() {
     return false;
   }
   try {
-    return window.localStorage.getItem(SCROLL_DEBUG_STORAGE_KEY) === "1";
+    return window.localStorage.getItem(SCROLL_DEBUG_STORAGE_KEY) === "1" || SCROLL_DEBUG_DEFAULT;
   } catch (_) {
-    return false;
+    return SCROLL_DEBUG_DEFAULT;
   }
 }
 
@@ -2901,6 +2903,7 @@ function scrollDebug(label, extra = {}) {
   const payload = {
     label,
     clientAt: new Date().toISOString(),
+    pageId: state.scrollDebugPageId,
     seq: ++state.scrollDebugSeq,
     selectedRun: state.selectedRun,
     userScrollVersion: state.userScrollVersion,
@@ -2926,10 +2929,19 @@ function scrollDebug(label, extra = {}) {
     extra,
   };
   console.debug("[ralph-viz scroll]", payload);
+  const body = JSON.stringify(payload);
+  if (navigator.sendBeacon) {
+    try {
+      const blob = new Blob([body], { type: "application/json" });
+      if (navigator.sendBeacon("/api/debug-scroll", blob)) {
+        return;
+      }
+    } catch (_) {}
+  }
   fetch("/api/debug-scroll", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body,
     keepalive: true,
   }).catch(() => {});
 }
@@ -3083,6 +3095,11 @@ if (autoRefreshToggle) {
     }
   });
 }
+
+scrollDebug("app-loaded", {
+  userAgent: navigator.userAgent,
+  debugEnabled: state.scrollDebugEnabled,
+});
 
 loadRuns().catch(err => {
   summaryEl.innerHTML = `<div><strong>error</strong>${err.message}</div>`;
