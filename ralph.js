@@ -66,6 +66,7 @@ let CHECK_LOG_DIR_PATH = null;
 let EVENTS_DIR_PATH = null;
 let PROMPT_PARTIALS = {};
 let TEST_STAGE_NAMES = [];
+let STAGE_COUNT_HINTS = new Map();
 
 async function main() {
   CONFIG = await loadConfig();
@@ -102,6 +103,7 @@ async function main() {
   if (TEST_STAGE_NAMES.length > 0) {
     log(`Discovered test stages: ${TEST_STAGE_NAMES.join(", ")}`);
   }
+  STAGE_COUNT_HINTS = await loadStageCountHints(state);
 
   log(
     `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
@@ -828,6 +830,7 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
   applyPreviousStageCounts(stages, previousStages, reportSummary);
   for (const stage of stages) {
     const previous = previousStages.get(stage.name);
+    const hint = getStageCountHint(stage.name);
     if (stage.status === "unknown" && previous?.status === "pass" && hasStageCounts(previous)) {
       setStageStatus(stage, "pass", previous.passed, previous.total);
     } else if (
@@ -838,6 +841,13 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
       Number.isFinite(stage.failed)
     ) {
       setStageStatus(stage, "fail", Math.max(0, previous.total - stage.failed), previous.total);
+    } else if (
+      stage.status === "fail" &&
+      !hasStageCounts(stage) &&
+      hint &&
+      Number.isFinite(stage.failed)
+    ) {
+      setStageStatus(stage, "fail", Math.max(0, hint.total - stage.failed), hint.total);
     }
   }
   inferEmptyReportStagesPassed(stages);
@@ -890,7 +900,8 @@ function applyReportSummaryToStages(stages, previousStatus, reportSummary) {
 function inferEmptyReportStagesPassed(stages) {
   for (const stage of stages) {
     if (isEmptyUnknownStageReport(stage)) {
-      setStageStatus(stage, "pass", stage.passed, stage.total);
+      const hint = getStageCountHint(stage.name);
+      setStageStatus(stage, "pass", hint?.passed ?? stage.passed, hint?.total ?? stage.total);
     }
   }
 }
@@ -901,6 +912,11 @@ function isEmptyUnknownStageReport(stage) {
     (stage.timeouts ?? 0) === 0 &&
     (stage.timeoutExpectations ?? 0) === 0 &&
     (stage.targets?.length ?? 0) === 0;
+}
+
+function getStageCountHint(stageName) {
+  const hint = STAGE_COUNT_HINTS.get(stageName);
+  return hasStageCounts(hint) ? hint : null;
 }
 
 function applyPreviousStageCounts(stages, previousStages, reportSummary) {
@@ -2929,6 +2945,79 @@ async function appendRalphEventRecord(record) {
   }
 
   await appendJsonLine(buildEventLogPath(record.threadId), record);
+}
+
+async function loadStageCountHints(state) {
+  const hints = new Map();
+  addStageCountHintsFromTestStatus(hints, state?.lastTestStatus);
+
+  let files = [];
+  try {
+    files = await fs.readdir(EVENTS_DIR_PATH, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return hints;
+    }
+    throw error;
+  }
+
+  for (const file of files) {
+    if (!file.isFile() || !file.name.endsWith(".jsonl")) {
+      continue;
+    }
+    const filePath = path.join(EVENTS_DIR_PATH, file.name);
+    const raw = await fs.readFile(filePath, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      let record = null;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      for (const testStatus of extractTestStatusesFromEventRecord(record)) {
+        addStageCountHintsFromTestStatus(hints, testStatus);
+      }
+    }
+  }
+
+  return hints;
+}
+
+function extractTestStatusesFromEventRecord(record) {
+  const event = record?.event;
+  const statuses = [];
+  if (event?.testStatus) {
+    statuses.push(event.testStatus);
+  }
+  if (event?.phaseStatus?.testStatus) {
+    statuses.push(event.phaseStatus.testStatus);
+  }
+  for (const check of event?.phaseStatus?.checks ?? []) {
+    if (check?.testStatus) {
+      statuses.push(check.testStatus);
+    }
+  }
+  return statuses;
+}
+
+function addStageCountHintsFromTestStatus(hints, testStatus) {
+  for (const stage of testStatus?.stages ?? []) {
+    if (stage?.status !== "pass" || !hasStageCounts(stage) || stage.passed !== stage.total) {
+      continue;
+    }
+    const previous = hints.get(stage.name);
+    if (!previous || stage.total > previous.total) {
+      hints.set(stage.name, {
+        name: stage.name,
+        status: "pass",
+        passed: stage.total,
+        total: stage.total,
+      });
+    }
+  }
 }
 
 async function loadState() {
