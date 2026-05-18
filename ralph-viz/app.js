@@ -14,6 +14,9 @@ const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
 const COMPACT_TURN_CARD_LIMIT = 50;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
+const SCROLL_JUMP_LOG_PX = 80;
+const SCROLL_DEBUG_PARAM = "scrollDebug";
+const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -35,6 +38,12 @@ const state = {
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
   preferScrollTopAfterLayout: false,
+  scrollDebugEnabled: initialScrollDebugEnabled(),
+  scrollDebugSeq: 0,
+  lastObservedScrollTop: null,
+  lastUserScrollAt: 0,
+  lastProgrammaticScrollAt: 0,
+  lastProgrammaticScrollReason: null,
 };
 
 // Noise event types that clutter the view
@@ -61,6 +70,27 @@ function fmtShort(time) {
   return time
     ? new Date(time).toLocaleString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : "";
+}
+
+function initialScrollDebugEnabled() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get(SCROLL_DEBUG_PARAM) === "1") {
+    try {
+      window.localStorage.setItem(SCROLL_DEBUG_STORAGE_KEY, "1");
+    } catch (_) {}
+    return true;
+  }
+  if (params.get(SCROLL_DEBUG_PARAM) === "0") {
+    try {
+      window.localStorage.removeItem(SCROLL_DEBUG_STORAGE_KEY);
+    } catch (_) {}
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(SCROLL_DEBUG_STORAGE_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
 }
 
 function formatBytes(value) {
@@ -461,6 +491,13 @@ function createAccordion(root, options = {}) {
   header.addEventListener("click", () => {
     const scrollSnapshot = captureScrollSnapshot();
     const open = !root.classList.contains("is-open");
+    scrollDebug("accordion-click-before", {
+      open,
+      key,
+      root: describeElementForScroll(root),
+      header: describeElementForScroll(header),
+      snapshot: scrollSnapshot,
+    });
     setOpen(open);
     if (key) {
       if (open) {
@@ -473,6 +510,12 @@ function createAccordion(root, options = {}) {
       onToggle(open);
     }
     markLayoutScrollIntent(scrollSnapshot);
+    scrollDebug("accordion-click-after", {
+      open,
+      key,
+      root: describeElementForScroll(root),
+      header: describeElementForScroll(header),
+    });
   });
 
   root.append(header, body);
@@ -2412,6 +2455,10 @@ function usageText(usage) {
 }
 
 function renderTimeline(records) {
+  scrollDebug("render-timeline-before", {
+    recordCount: records.length,
+    childCount: timelineEl.children.length,
+  });
   const options = renderTimeline.pendingOptions ?? {};
   renderTimeline.pendingOptions = {};
   rememberOpenEntryKeys();
@@ -2511,6 +2558,11 @@ function renderTimeline(records) {
     fragment.append(turnEl);
   }
   timelineEl.replaceChildren(fragment);
+  scrollDebug("render-timeline-after", {
+    recordCount: records.length,
+    childCount: timelineEl.children.length,
+    sortedTurns,
+  });
 }
 
 function turnScrollKey(turn) {
@@ -2546,7 +2598,9 @@ function setUrlParam(key, value) {
   if (value == null || value === "") p.delete(key);
   else p.set(key, value);
   const qs = p.toString();
+  scrollDebug("url-replace-before", { key, value, qs });
   history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+  scrollDebug("url-replace-after", { key, value, qs });
 }
 
 function syncOpenTurnsToUrl() {
@@ -2608,6 +2662,7 @@ async function loadRuns(options = {}) {
 
 async function loadRun(id, options = {}) {
   if (!id) return;
+  scrollDebug("load-run-start", { id, hasScrollSnapshot: Boolean(options.scrollSnapshot) });
   state.selectedRun = id;
   setUrlParam("run", id);
   const data = await fetch(`/api/run/${encodeURIComponent(id)}`).then(r => {
@@ -2621,9 +2676,15 @@ async function loadRun(id, options = {}) {
   renderSummary(state.events);
   const scrollSnapshot = options.scrollSnapshot
     ?? (options.stickToBottom ? captureScrollSnapshot({ forceStickToBottom: true }) : null);
+  scrollDebug("load-run-before-render", {
+    id,
+    eventCount: state.events.length,
+    scrollSnapshot,
+  });
   renderTimeline.pendingOptions = { openLatestTurn: scrollSnapshot?.stickToBottom ?? false };
   renderTimeline(state.events);
   restoreScrollAfterRender(scrollSnapshot);
+  scrollDebug("load-run-after-render", { id, eventCount: state.events.length });
 }
 
 function isAutoRefreshEnabled() {
@@ -2650,7 +2711,9 @@ function restoreScrollAfterRender(snapshot) {
   if (!snapshot) {
     return;
   }
+  scrollDebug("restore-scroll-scheduled", { snapshot });
   afterNextPaint(() => {
+    scrollDebug("restore-scroll-before-apply", { snapshot });
     if (applyScrollRestoration(snapshot)) {
       window.setTimeout(() => applyScrollRestoration(snapshot), 50);
       window.setTimeout(() => applyScrollRestoration(snapshot), 150);
@@ -2661,8 +2724,10 @@ function restoreScrollAfterRender(snapshot) {
 function applyScrollRestoration(snapshot) {
   const restoreSnapshot = resolveScrollSnapshot(snapshot);
   if (!restoreSnapshot) {
+    scrollDebug("restore-scroll-skipped", { snapshot });
     return false;
   }
+  scrollDebug("restore-scroll-apply", { restoreSnapshot });
   if (restoreSnapshot.stickToBottom) {
     scrollToBottomNow();
     return true;
@@ -2670,7 +2735,7 @@ function applyScrollRestoration(snapshot) {
   if (!restoreSnapshot.preferScrollTop && restoreScrollAnchor(restoreSnapshot)) {
     return true;
   }
-  setScrollTop(restoreSnapshot.scrollTop);
+  setScrollTop(restoreSnapshot.scrollTop, "restore-scroll-snapshot");
   return true;
 }
 
@@ -2733,9 +2798,23 @@ function restoreScrollAnchor(snapshot) {
       const targetTop = root.scrollTop + delta;
       const maxExpectedShift = Math.max(1000, root.clientHeight * 2);
       if (Math.abs(targetTop - snapshot.scrollTop) > maxExpectedShift) {
+        scrollDebug("restore-anchor-rejected", {
+          anchor,
+          targetTop,
+          maxExpectedShift,
+          element: describeElementForScroll(element),
+          rect: { top: rect.top, bottom: rect.bottom, height: rect.height },
+          snapshotScrollTop: snapshot.scrollTop,
+        });
         continue;
       }
-      setScrollTop(targetTop);
+      scrollDebug("restore-anchor-selected", {
+        anchor,
+        targetTop,
+        element: describeElementForScroll(element),
+        rect: { top: rect.top, bottom: rect.bottom, height: rect.height },
+      });
+      setScrollTop(targetTop, "restore-scroll-anchor");
       return true;
     }
   }
@@ -2760,18 +2839,32 @@ function afterNextPaint(callback) {
 function scrollToBottomNow() {
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
-  setScrollTop(maxTop);
+  setScrollTop(maxTop, "scrollToBottomNow");
 }
 
-function setScrollTop(value) {
+function setScrollTop(value, reason = "setScrollTop") {
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
   const top = Math.min(Math.max(0, value), maxTop);
+  const before = root.scrollTop;
+  state.lastProgrammaticScrollAt = performance.now();
+  state.lastProgrammaticScrollReason = reason;
+  scrollDebug("set-scroll-top-before", { reason, requested: value, top, before, maxTop });
   if (typeof root.scrollTo === "function") {
     root.scrollTo({ top, behavior: "auto" });
   } else {
     root.scrollTop = top;
   }
+  state.lastObservedScrollTop = top;
+  window.setTimeout(() => {
+    scrollDebug("set-scroll-top-after", {
+      reason,
+      requested: value,
+      top,
+      before,
+      after: scrollingRoot().scrollTop,
+    });
+  }, 0);
 }
 
 function getScrollMetrics() {
@@ -2798,6 +2891,88 @@ function scrollViewportBottom() {
   return root.clientHeight || window.innerHeight || document.documentElement.clientHeight || 0;
 }
 
+function scrollDebug(label, extra = {}) {
+  if (!state.scrollDebugEnabled) {
+    return;
+  }
+  const root = scrollingRoot();
+  const metrics = getScrollMetrics();
+  const active = document.activeElement;
+  const payload = {
+    label,
+    clientAt: new Date().toISOString(),
+    seq: ++state.scrollDebugSeq,
+    selectedRun: state.selectedRun,
+    userScrollVersion: state.userScrollVersion,
+    url: window.location.href,
+    metrics,
+    rawScrollTop: root.scrollTop,
+    viewport: {
+      innerHeight: window.innerHeight,
+      clientHeight: root.clientHeight,
+      scrollHeight: root.scrollHeight,
+    },
+    activeElement: active ? {
+      tag: active.tagName,
+      id: active.id || "",
+      className: typeof active.className === "string" ? active.className : "",
+      text: truncate(cleanText(active.textContent), 120),
+    } : null,
+    openTurns: [...timelineEl.querySelectorAll(".turn.is-open")]
+      .map(el => el.dataset.turn)
+      .filter(Boolean),
+    openEntries: timelineEl.querySelectorAll(".accordion.is-open[data-entry-key]").length,
+    timelineChildren: timelineEl.children.length,
+    extra,
+  };
+  console.debug("[ralph-viz scroll]", payload);
+  fetch("/api/debug-scroll", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function describeElementForScroll(element) {
+  if (!element) {
+    return null;
+  }
+  return {
+    tag: element.tagName,
+    id: element.id || "",
+    className: typeof element.className === "string" ? element.className : "",
+    scrollKey: element.dataset?.scrollKey ?? "",
+    entryKey: element.dataset?.entryKey ?? "",
+    turn: element.dataset?.turn ?? "",
+    text: truncate(cleanText(element.textContent), 120),
+  };
+}
+
+function handleObservedScroll() {
+  if (!state.scrollDebugEnabled) {
+    return;
+  }
+  const metrics = getScrollMetrics();
+  const previous = state.lastObservedScrollTop;
+  state.lastObservedScrollTop = metrics.scrollTop;
+  if (previous == null) {
+    scrollDebug("scroll-observed-initial", { metrics });
+    return;
+  }
+  const delta = metrics.scrollTop - previous;
+  if (Math.abs(delta) >= SCROLL_JUMP_LOG_PX) {
+    scrollDebug("scroll-observed-jump", {
+      previous,
+      delta,
+      sinceUserMs: Math.round(performance.now() - state.lastUserScrollAt),
+      sinceProgrammaticMs: Math.round(performance.now() - state.lastProgrammaticScrollAt),
+      lastProgrammaticScrollReason: state.lastProgrammaticScrollReason,
+      metrics,
+    });
+  }
+}
+
 function startAutoRefresh() {
   stopAutoRefresh();
   if (!isAutoRefreshEnabled()) {
@@ -2813,11 +2988,13 @@ function stopAutoRefresh() {
   }
 }
 
-function markUserScrollIntent() {
+function markUserScrollIntent(source = "unknown") {
+  state.lastUserScrollAt = performance.now();
   state.userScrollVersion += 1;
   state.latestLayoutScrollSnapshot = null;
   state.stickToBottomAfterLayout = false;
   state.preferScrollTopAfterLayout = false;
+  scrollDebug("user-scroll-intent", { source });
 }
 
 function markLayoutScrollIntent(preLayoutSnapshot = null) {
@@ -2829,28 +3006,40 @@ function markLayoutScrollIntent(preLayoutSnapshot = null) {
     forceStickToBottom: state.stickToBottomAfterLayout,
     preferScrollTop: true,
   });
+  scrollDebug("layout-scroll-intent", {
+    preLayoutSnapshot,
+    latestLayoutScrollSnapshot: state.latestLayoutScrollSnapshot,
+  });
 }
 
 function renderTimelinePreservingScroll() {
   const scrollSnapshot = captureScrollSnapshot();
+  scrollDebug("render-preserving-scroll", { scrollSnapshot });
   renderTimeline(state.events);
   restoreScrollAfterRender(scrollSnapshot);
 }
 
 async function refreshActiveRun() {
   if (!isAutoRefreshEnabled() || state.refreshInFlight) {
+    scrollDebug("refresh-skipped", {
+      autoRefresh: isAutoRefreshEnabled(),
+      refreshInFlight: state.refreshInFlight,
+    });
     return;
   }
   state.refreshInFlight = true;
   try {
     const scrollSnapshot = captureScrollSnapshot();
+    scrollDebug("refresh-start", { scrollSnapshot });
     if (state.selectedRun) {
       await loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
     } else {
       await loadRuns({ scrollSnapshot });
     }
+    scrollDebug("refresh-complete", { scrollSnapshot });
   } catch (error) {
     console.error("auto-refresh failed", error);
+    scrollDebug("refresh-error", { message: error?.message ?? String(error) });
   } finally {
     state.refreshInFlight = false;
   }
@@ -2871,12 +3060,16 @@ hideNoiseToggle.addEventListener("change", renderTimelinePreservingScroll);
 if (fullViewToggle) {
   fullViewToggle.addEventListener("change", renderTimelinePreservingScroll);
 }
-window.addEventListener("wheel", markUserScrollIntent, { passive: true });
-window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
-window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+window.addEventListener("scroll", handleObservedScroll, { passive: true });
+window.addEventListener("focusin", (event) => {
+  scrollDebug("focusin", { target: describeElementForScroll(event.target) });
+}, { passive: true });
+window.addEventListener("wheel", () => markUserScrollIntent("wheel"), { passive: true });
+window.addEventListener("touchmove", () => markUserScrollIntent("touchmove"), { passive: true });
+window.addEventListener("pointerdown", () => markUserScrollIntent("pointerdown"), { passive: true });
 window.addEventListener("keydown", (event) => {
   if (SCROLL_KEYS.has(event.key)) {
-    markUserScrollIntent();
+    markUserScrollIntent(`keydown:${event.key}`);
   }
 });
 if (autoRefreshToggle) {

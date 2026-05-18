@@ -13,6 +13,7 @@ const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
+const SCROLL_DEBUG_LOG_PATH = path.join(RALPH_DIR, "viz-scroll-debug.jsonl");
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -1051,6 +1052,29 @@ async function sendJson(res, payload, status = 200) {
   res.end(body);
 }
 
+async function readJsonBody(req, maxBytes = 256 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      throw new Error("Request body too large");
+    }
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function appendScrollDebugEvent(event) {
+  await fs.mkdir(RALPH_DIR, { recursive: true });
+  await fs.appendFile(
+    SCROLL_DEBUG_LOG_PATH,
+    `${JSON.stringify({ serverAt: new Date().toISOString(), ...event })}\n`,
+    "utf8",
+  );
+}
+
 function sendStaticFile(res, filePath, contentType, fallback = "Not found") {
   return fs
     .readFile(filePath, "utf8")
@@ -1086,6 +1110,28 @@ async function requestHandler(req, res) {
   if (pathname === "/api/state") {
     const currentThread = await currentRunId();
     return sendJson(res, { currentThread });
+  }
+
+  if (pathname === "/api/debug-scroll") {
+    if (req.method === "POST") {
+      const event = await readJsonBody(req);
+      await appendScrollDebugEvent(event && typeof event === "object" ? event : { value: event });
+      return sendJson(res, { ok: true });
+    }
+    if (req.method === "GET") {
+      let raw = "";
+      try {
+        raw = await fs.readFile(SCROLL_DEBUG_LOG_PATH, "utf8");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      const limit = Math.max(1, Math.min(1000, Number.parseInt(url.searchParams.get("limit") ?? "200", 10)));
+      const lines = raw.split(/\r?\n/).filter(Boolean).slice(-limit);
+      return sendJson(res, { path: SCROLL_DEBUG_LOG_PATH, lines });
+    }
+    res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Method not allowed");
+    return;
   }
 
   if (pathname === "/api/runs") {
