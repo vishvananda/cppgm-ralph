@@ -11,6 +11,10 @@
 
 * { box-sizing: border-box; margin: 0; }
 
+html {
+  overflow-anchor: none;
+}
+
 body {
   font-family: system-ui, -apple-system, sans-serif;
   background: var(--bg);
@@ -18,6 +22,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
   padding-bottom: 3.1rem;
+  overflow-anchor: none;
 }
 
 .page {
@@ -122,7 +127,15 @@ button:hover { background: #252525; }
 }
 
 /* Timeline */
-.timeline { display: grid; gap: 0.2rem; }
+.timeline {
+  display: grid;
+  gap: 0.2rem;
+  overflow-anchor: none;
+}
+
+.timeline * {
+  overflow-anchor: none;
+}
 
 .accordion-body[hidden] { display: none !important; }
 

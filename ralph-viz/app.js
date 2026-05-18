@@ -511,7 +511,8 @@ function createAccordion(root, options = {}) {
     if (onToggle) {
       onToggle(open);
     }
-    markLayoutScrollIntent(scrollSnapshot);
+    const layoutSnapshot = markLayoutScrollIntent(scrollSnapshot);
+    restoreScrollAfterRender(layoutSnapshot, { immediate: true });
     scrollDebug("accordion-click-after", {
       open,
       key,
@@ -2694,7 +2695,7 @@ async function loadRun(id, options = {}) {
   });
   renderTimeline.pendingOptions = { openLatestTurn: scrollSnapshot?.stickToBottom ?? false };
   renderTimeline(state.events);
-  restoreScrollAfterRender(scrollSnapshot);
+  restoreScrollAfterRender(scrollSnapshot, { immediate: true });
   scrollDebug("load-run-after-render", { id, eventCount: state.events.length });
 }
 
@@ -2718,9 +2719,13 @@ function captureScrollSnapshot(options = {}) {
   };
 }
 
-function restoreScrollAfterRender(snapshot) {
+function restoreScrollAfterRender(snapshot, options = {}) {
   if (!snapshot) {
     return;
+  }
+  if (options.immediate) {
+    scrollDebug("restore-scroll-immediate", { snapshot });
+    applyScrollRestoration(snapshot);
   }
   scrollDebug("restore-scroll-scheduled", { snapshot });
   afterNextPaint(() => {
@@ -3031,13 +3036,14 @@ function markLayoutScrollIntent(preLayoutSnapshot = null) {
     preLayoutSnapshot,
     latestLayoutScrollSnapshot: state.latestLayoutScrollSnapshot,
   });
+  return state.latestLayoutScrollSnapshot;
 }
 
 function renderTimelinePreservingScroll() {
   const scrollSnapshot = captureScrollSnapshot();
   scrollDebug("render-preserving-scroll", { scrollSnapshot });
   renderTimeline(state.events);
-  restoreScrollAfterRender(scrollSnapshot);
+  restoreScrollAfterRender(scrollSnapshot, { immediate: true });
 }
 
 async function refreshActiveRun() {
