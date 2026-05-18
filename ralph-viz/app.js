@@ -34,6 +34,7 @@ const state = {
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
+  preferScrollTopAfterLayout: false,
 };
 
 // Noise event types that clutter the view
@@ -2632,10 +2633,12 @@ function captureScrollSnapshot(options = {}) {
     options.forceStickToBottom ||
     state.stickToBottomAfterLayout ||
     metrics.distanceFromBottom <= BOTTOM_STICKY_PX;
+  const preferScrollTop = options.preferScrollTop === true || state.preferScrollTopAfterLayout;
   return {
     scrollTop: metrics.scrollTop,
     stickToBottom,
-    anchors: stickToBottom ? [] : captureScrollAnchors(),
+    preferScrollTop,
+    anchors: stickToBottom || preferScrollTop ? [] : captureScrollAnchors(),
     userScrollVersion: state.userScrollVersion,
   };
 }
@@ -2662,7 +2665,7 @@ function restoreScrollAfterRender(snapshot) {
       scrollToBottomNow();
       return;
     }
-    if (restoreScrollAnchor(restoreSnapshot)) {
+    if (!restoreSnapshot.preferScrollTop && restoreScrollAnchor(restoreSnapshot)) {
       return;
     }
     setScrollTop(restoreSnapshot.scrollTop);
@@ -2797,14 +2800,17 @@ function markUserScrollIntent() {
   state.userScrollVersion += 1;
   state.latestLayoutScrollSnapshot = null;
   state.stickToBottomAfterLayout = false;
+  state.preferScrollTopAfterLayout = false;
 }
 
 function markLayoutScrollIntent(preLayoutSnapshot = null) {
   state.userScrollVersion += 1;
   state.stickToBottomAfterLayout =
     state.stickToBottomAfterLayout || preLayoutSnapshot?.stickToBottom === true;
+  state.preferScrollTopAfterLayout = true;
   state.latestLayoutScrollSnapshot = captureScrollSnapshot({
     forceStickToBottom: state.stickToBottomAfterLayout,
+    preferScrollTop: true,
   });
 }
 
