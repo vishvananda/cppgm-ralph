@@ -271,18 +271,18 @@ sub check_includes {
     if (@inline_sites) {
         my $first = $inline_sites[0];
         add_finding($fatal, 'bad-division', $rel, 1,
-            "file is included from inside code at $first->{from}:$first->{line}; make it a cohesive .cpp/.h module");
+            "included as an implementation fragment from $first->{from}:$first->{line}; refactor the owned code into self-contained modules under the file/function limits instead of splitting implementation with inline includes");
     }
     if (!@inline_sites && @include_sites && !has_header_preamble($text) && contains_function_definition($text)) {
         my $first = $include_sites[0];
         add_finding($fatal, 'bad-division', $rel, 1,
-            "included file contains implementation bodies but is not a guarded header; included from $first->{from}:$first->{line}");
+            "included file contains implementation bodies but is not a guarded header; refactor ownership into cohesive modules rather than sharing implementation by include");
     }
 
     for my $include (find_include_records($text)) {
         if ($include->{after_code}) {
             add_finding($fatal, 'bad-division', $rel, $include->{line},
-                "include appears after code; includes must stay in the file preamble");
+                "inline include appears after code; remove the include-as-code-split pattern and refactor the affected responsibilities into self-contained modules under the audit limits");
         }
         if ($include->{delimiter} eq '"' && $include->{target} =~ /\.(?:c|cc|cpp|cxx)$/) {
             add_finding($fatal, 'bad-division', $rel, $include->{line},
