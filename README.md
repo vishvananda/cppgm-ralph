@@ -1,28 +1,34 @@
 # Ralph Runner
 
-A small outer loop around the Codex SDK for per-run checkouts under `/work`.
+A small outer loop around coding agents for per-run checkouts under `/work`.
 
-It persists a Codex thread id in `.ralph/<run-name>/state.json`, runs the
+It persists a provider thread id in `.ralph/<run-name>/state.json`, runs the
 configured test command in `/work/<run-name>`, and if the suite still fails it
-resumes the same Codex thread with the latest failure output until the suite
+resumes the same thread with the latest failure output until the suite
 passes, the worktree is clean, or the max turn count is hit.
 
-Each Codex thread also gets an append-only JSONL event log in
+Each thread also gets an append-only JSONL event log in
 `.ralph/<run-name>/events/`.
 If Ralph resumes the same thread later, it appends Ralph prompt events plus new
-streamed Codex events to the same file so each run can be visualized from one
+streamed provider events to the same file so each run can be visualized from one
 timeline.
 
 Ralph now also enforces a clean repository handoff:
 
-- after each completed phase, Codex should commit its intended changes
+- after each completed phase, the agent should commit its intended changes
 - Ralph checks `git status --short`
-- if the worktree is dirty, Ralph sends Codex back instead of accepting the handoff
+- if the worktree is dirty, Ralph sends the agent back instead of accepting the handoff
 
 For Codex runs, Ralph can also turn each outer loop into a persisted Codex goal.
 Before each Codex turn it starts or resumes the thread through `codex app-server`,
 clears any previous loop goal, sets a fresh active goal for the current blocker,
 and then resumes that same thread through the Codex SDK.
+
+For Antigravity runs, Ralph uses portable goals instead. It writes the same loop
+objective to `.ralph/<run-name>/current-goal.json`, appends it to the turn
+prompt, exposes Ralph-owned goal tools through the Antigravity SDK bridge, and
+records `ralph.goal` events in the same visualization stream. Ralph still
+advances only after its own configured checks pass and the worktree is clean.
 
 The first-turn default prompt can be customized with a Markdown sidecar file next
 to the config file. For a config named `goals-2026-05-14.config.json`, Ralph
@@ -92,11 +98,33 @@ with `--through-ref <commit>`.
 Default config lives in `ralph.config.json`.
 Environment variables still override file settings.
 
-The script expects a working Codex CLI environment. In practice that means:
+The default `codex` provider expects a working Codex CLI environment. In practice
+that means:
 
 - `codex` is on `PATH`
 - an API key is already configured for Codex, such as `OPENAI_API_KEY` or
   `CODEX_API_KEY`
+
+### Antigravity provider
+
+Set `provider` to `antigravity` to run turns through the Google Antigravity SDK
+bridge in `scripts/antigravity-turn.py`:
+
+```json
+{
+  "provider": "antigravity",
+  "model": "gemini-3.5-flash",
+  "antigravityPython": "/path/to/python",
+  "antigravitySdkPath": "/home/vishvananda/antigravity-research/pypi/wheel-unpacked",
+  "antigravityHarnessPath": "/home/vishvananda/antigravity-research/pypi/wheel-unpacked/google/antigravity/bin/localharness",
+  "antigravityRequestDelayMs": 65000
+}
+```
+
+The configured Python environment must be able to import `google-antigravity`
+and its dependencies, and `GEMINI_API_KEY` must be set for real SDK runs. The
+bridge accepts `RALPH_ANTIGRAVITY_MOCK_RESPONSE=...` for local plumbing tests
+without SDK dependencies or auth.
 
 ### Example CPPGM run config
 
@@ -115,7 +143,10 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 ## Config
 
 - `model`
-  Default: `gpt-5.3-codex`
+  Default: `gpt-5.3-codex` for `codex`, `gemini-3.5-flash` for
+  `antigravity`.
+- `provider`
+  Default: `codex`. Supported values: `codex`, `antigravity`.
 - `reasoningEffort`
   Default: `high`
 - `name`
@@ -140,16 +171,40 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `checks` (defaults to all checks), optional `promptTemplate` (defaults to the
   phase name), optional `goalTemplate` (defaults to `<phase>-goal`), and optional
   `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
-  the old behavior. A phase with `runWhenChecksPass: true` sends Codex one turn
-  even when checks already pass, which is useful for audit/cleanup phases.
+  the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
+  turn even when checks already pass, which is useful for audit/cleanup phases.
 - `maxTurns`
   Default: `1000`
 - `webSearchEnabled`
   Default: `false`
 - `codexPath`
   Default: `codex`
+- `antigravityPython`
+  Default: `python3`
+- `antigravityScriptPath`
+  Default: `scripts/antigravity-turn.py`
+- `antigravitySdkPath`
+  Optional path prepended to `PYTHONPATH`, useful for an unpacked
+  `google-antigravity` wheel.
+- `antigravityHarnessPath`
+  Optional path passed as `ANTIGRAVITY_HARNESS_PATH`.
+- `antigravitySaveDir`
+  Default: `<stateDir>/antigravity-save`
+- `antigravityAppDataDir`
+  Default: `<stateDir>/antigravity-app-data`
+- `antigravitySkillsPaths`
+  Optional array or colon-delimited list of Antigravity skills paths.
+- `antigravityAllowAll`
+  Default: `true`. Allows autonomous Antigravity tool use, including shell
+  commands, inside the configured workspaces.
+- `antigravityStructuredFinish`
+  Default: `true`. Enables a structured Ralph turn report finish schema.
+- `antigravityRequestDelayMs`
+  Default: `0`. Sleeps before the initial Antigravity request and after each
+  Antigravity tool call, useful for conservative free-tier quota tests.
 - `loopGoalsEnabled`
-  Default: `true`
+  Default: `true`. Uses native Codex goals for `codex` and portable Ralph goals
+  for `antigravity`.
 - `goalTokenBudget`
   Default: `null`
 - `workdir`
@@ -184,6 +239,8 @@ under `stateBaseDir`.
   Optional explicit thread id override
 - `RALPH_MODEL`
   Override `model`
+- `RALPH_PROVIDER`
+  Override `provider`
 - `RALPH_REASONING_EFFORT`
   Override `reasoningEffort`: `minimal`, `low`, `medium`, `high`, `xhigh`
 - `RALPH_SANDBOX_MODE`
@@ -198,8 +255,30 @@ under `stateBaseDir`.
   Optional colon-delimited list passed through to the thread options
 - `RALPH_CODEX_PATH`
   Override the Codex executable used by both app-server goal setup and the SDK
+- `RALPH_ANTIGRAVITY_PYTHON`
+  Override `antigravityPython`
+- `RALPH_ANTIGRAVITY_SCRIPT_PATH`
+  Override `antigravityScriptPath`
+- `RALPH_ANTIGRAVITY_SDK_PATH`
+  Override `antigravitySdkPath`
+- `RALPH_ANTIGRAVITY_HARNESS_PATH`
+  Override `antigravityHarnessPath`
+- `RALPH_ANTIGRAVITY_SAVE_DIR`
+  Override `antigravitySaveDir`
+- `RALPH_ANTIGRAVITY_APP_DATA_DIR`
+  Override `antigravityAppDataDir`
+- `RALPH_ANTIGRAVITY_SKILLS_PATHS`
+  Override `antigravitySkillsPaths`
+- `RALPH_ANTIGRAVITY_ALLOW_ALL`
+  Override `antigravityAllowAll`
+- `RALPH_ANTIGRAVITY_STRUCTURED_FINISH`
+  Override `antigravityStructuredFinish`
+- `RALPH_ANTIGRAVITY_MOCK_RESPONSE`
+  Bypass the SDK and emit a mock Antigravity turn response for smoke tests
+- `RALPH_ANTIGRAVITY_REQUEST_DELAY_MS`
+  Override `antigravityRequestDelayMs`
 - `RALPH_LOOP_GOALS`
-  Set to `0`, `false`, `no`, or `off` to disable per-loop Codex goals
+  Set to `0`, `false`, `no`, or `off` to disable per-loop goals
 - `RALPH_GOAL_TOKEN_BUDGET`
   Optional positive token budget for each loop goal
 - `RALPH_USE_EXISTING_WORKDIR`

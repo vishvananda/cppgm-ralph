@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,7 @@ Commit cohesive progress as you go rather than waiting for a single end-of-assig
 const DEFAULT_CONFIG = {
   baseDir: "/work",
   name: "cppgm",
+  provider: "codex",
   testCommand: "make test",
   checks: null,
   phases: null,
@@ -50,6 +52,18 @@ const DEFAULT_CONFIG = {
   additionalDirectories: [],
   outputTailChars: 20000,
   codexPath: "codex",
+  antigravityPython: "python3",
+  antigravityScriptPath: path.join(RALPH_DIR, "scripts", "antigravity-turn.py"),
+  antigravitySdkPath: null,
+  antigravityHarnessPath: null,
+  antigravitySaveDir: null,
+  antigravityAppDataDir: null,
+  antigravitySkillsPaths: [],
+  antigravityAllowAll: true,
+  antigravityStructuredFinish: true,
+  antigravityMockResponse: null,
+  antigravityDefaultModel: "gemini-3.5-flash",
+  antigravityRequestDelayMs: 0,
   loopGoalsEnabled: true,
   goalTokenBudget: null,
   useExistingWorkdir: false,
@@ -106,7 +120,7 @@ async function main() {
   STAGE_COUNT_HINTS = await loadStageCountHints(state);
 
   log(
-    `Config: model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
+    `Config: provider=${CONFIG.provider} model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
       `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
       `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
@@ -127,8 +141,9 @@ async function main() {
   };
 
   let activeThreadId = process.env.RALPH_THREAD_ID ?? state.threadId ?? null;
-  let codex = null;
+  let backend = null;
   let thread = null;
+  const providerLabel = formatProviderLabel(CONFIG.provider);
 
   let turnNumber = state.turnsCompleted;
   while (turnNumber < CONFIG.maxTurns) {
@@ -241,12 +256,12 @@ async function main() {
 
     if (shouldRunRequiredPhaseTurn) {
       log(
-        `Required checks pass; handing control to Codex for phase ${phase.name} ` +
+        `Required checks pass; handing control to ${providerLabel} for phase ${phase.name} ` +
           `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
       );
     } else {
       log(
-        `Required phase checks are not complete. Handing control back to Codex ` +
+        `Required phase checks are not complete. Handing control back to ${providerLabel} ` +
           `(turn ${turnNumber + 1}/${CONFIG.maxTurns}).`,
       );
     }
@@ -293,21 +308,22 @@ async function main() {
     }
 
     if (!thread) {
-      codex = new Codex(buildCodexOptions());
+      backend = createAgentBackend();
       thread = activeThreadId
-        ? codex.resumeThread(activeThreadId, threadOptions)
-        : codex.startThread(threadOptions);
+        ? backend.resumeThread(activeThreadId, threadOptions)
+        : backend.startThread(threadOptions);
       if (activeThreadId) {
-        log(`Resuming Codex thread ${activeThreadId}`);
+        log(`Resuming ${providerLabel} thread ${activeThreadId}`);
       } else {
-        log("Starting a new Codex thread");
+        log(`Starting a new ${providerLabel} thread`);
       }
     }
 
-    log(`Ralph prompt: ${previewText(prompt)}`);
-    const { events } = await thread.runStreamed(prompt);
+    const turnPrompt = attachPortableGoalPrompt(prompt, loopGoalEventRecord?.event?.goal);
+    log(`Ralph prompt: ${previewText(turnPrompt)}`);
+    const { events } = await thread.runStreamed(turnPrompt);
     const turn = await collectStreamedTurn(events, {
-      prompt,
+      prompt: turnPrompt,
       preTurnEventRecords: [
         buildRalphPhaseStatusEventRecord({
           phaseStatus,
@@ -360,7 +376,7 @@ async function main() {
       log(`Token usage: ${formatUsage(turn.usage)}`);
     }
     if (turn.finalResponse.trim()) {
-      log(`Codex response: ${previewText(turn.finalResponse)}`);
+      log(`${providerLabel} response: ${previewText(turn.finalResponse)}`);
     }
   }
 
@@ -694,6 +710,23 @@ function normalizeRenderedPrompt(value) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function attachPortableGoalPrompt(prompt, goal) {
+  if (!goal || CONFIG.provider === "codex") {
+    return prompt;
+  }
+
+  return normalizeRenderedPrompt([
+    prompt,
+    "",
+    "## Ralph Portable Goal",
+    "",
+    "This is the active Ralph loop goal. Treat it as mandatory state for this turn.",
+    "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
+    "",
+    goal.objective,
+  ].join("\n"));
 }
 
 function analyzeTestProgress(output, previousStatus = null, options = {}) {
@@ -1506,6 +1539,10 @@ async function getGitStatus(cwd) {
 }
 
 async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
+  if (CONFIG.provider !== "codex") {
+    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  }
+
   return withCodexAppServer(async (client) => {
     let activeThreadId = threadId;
     let startedThread = false;
@@ -1545,6 +1582,11 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
     return;
   }
 
+  if (CONFIG.provider !== "codex") {
+    await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
+    return;
+  }
+
   try {
     await withCodexAppServer(async (client) => {
       const current = await client.request("thread/goal/get", { threadId });
@@ -1569,6 +1611,76 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
   } catch (error) {
     log(`Failed to mark Codex loop goal complete: ${formatErrorMessage(error)}`);
   }
+}
+
+async function preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
+  const activeThreadId = threadId ?? (CONFIG.provider === "antigravity" ? null : generateProviderThreadId(CONFIG.provider));
+  const startedThread = !threadId;
+  const now = new Date().toISOString();
+  const goal = {
+    id: `ralph-goal-${turnNumber}`,
+    provider: "ralph-portable",
+    threadId: activeThreadId,
+    objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+    ...(CONFIG.goalTokenBudget != null ? { tokenBudget: CONFIG.goalTokenBudget } : {}),
+  };
+  await writePortableGoalState(goal);
+  log(`Set portable loop goal: ${previewText(goal.objective)}`);
+  return { threadId: activeThreadId, goal, startedThread };
+}
+
+async function completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber) {
+  try {
+    const goal = await readPortableGoalState(threadId);
+    if (!goal || goal.status === "complete") {
+      return;
+    }
+    const completedGoal = {
+      ...goal,
+      threadId: goal.threadId ?? threadId,
+      status: "complete",
+      updatedAt: new Date().toISOString(),
+    };
+    await writePortableGoalState(completedGoal);
+    await appendRalphEventRecord(buildRalphGoalEventRecord({
+      action: "complete",
+      goal: completedGoal,
+      threadId,
+      turnNumber,
+      testStatus,
+    }));
+    log(`Marked portable loop goal complete: ${previewText(completedGoal.objective)}`);
+  } catch (error) {
+    log(`Failed to mark portable loop goal complete: ${formatErrorMessage(error)}`);
+  }
+}
+
+async function writePortableGoalState(goal) {
+  await fs.mkdir(CONFIG.stateDir, { recursive: true });
+  await fs.writeFile(getPortableGoalPath(), JSON.stringify(goal, null, 2), "utf8");
+}
+
+async function readPortableGoalState(threadId) {
+  try {
+    const raw = await fs.readFile(getPortableGoalPath(), "utf8");
+    const goal = JSON.parse(raw);
+    if (goal?.threadId && threadId && goal.threadId !== threadId) {
+      return null;
+    }
+    return goal;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function getPortableGoalPath() {
+  return path.join(CONFIG.stateDir, "current-goal.json");
 }
 
 function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = null, phaseStatus = null }) {
@@ -1887,6 +1999,32 @@ function buildCodexOptions() {
   };
 }
 
+function createAgentBackend() {
+  if (CONFIG.provider === "codex") {
+    return new Codex(buildCodexOptions());
+  }
+  if (CONFIG.provider === "antigravity") {
+    return new Antigravity(buildAntigravityOptions());
+  }
+  throw new Error(`Unsupported provider ${CONFIG.provider}`);
+}
+
+function buildAntigravityOptions() {
+  return {
+    pythonPath: CONFIG.antigravityPython,
+    scriptPath: CONFIG.antigravityScriptPath,
+    sdkPath: CONFIG.antigravitySdkPath,
+    harnessPath: CONFIG.antigravityHarnessPath,
+    saveDir: CONFIG.antigravitySaveDir,
+    appDataDir: CONFIG.antigravityAppDataDir,
+    skillsPaths: CONFIG.antigravitySkillsPaths,
+    allowAll: CONFIG.antigravityAllowAll,
+    structuredFinish: CONFIG.antigravityStructuredFinish,
+    mockResponse: CONFIG.antigravityMockResponse,
+    requestDelayMs: CONFIG.antigravityRequestDelayMs,
+  };
+}
+
 class Codex {
   constructor(options = {}) {
     this.options = options;
@@ -2094,6 +2232,174 @@ class CodexExec {
       }
     }
   }
+}
+
+class Antigravity {
+  constructor(options = {}) {
+    this.options = options;
+    this.exec = new AntigravityExec(options);
+  }
+
+  startThread(options = {}) {
+    return new AntigravityThread(this.exec, this.options, options);
+  }
+
+  resumeThread(id, options = {}) {
+    return new AntigravityThread(this.exec, this.options, options, id);
+  }
+}
+
+class AntigravityThread {
+  constructor(exec, antigravityOptions, threadOptions, id = null) {
+    this.exec = exec;
+    this.antigravityOptions = antigravityOptions;
+    this.threadOptions = threadOptions;
+    this._id = id;
+  }
+
+  get id() {
+    return this._id;
+  }
+
+  async runStreamed(input, turnOptions = {}) {
+    return { events: this.runStreamedInternal(input, turnOptions) };
+  }
+
+  async *runStreamedInternal(input, turnOptions = {}) {
+    const { prompt } = normalizeCodexInput(input);
+    const events = this.exec.run({
+      input: prompt,
+      threadId: this._id,
+      model: this.threadOptions.model,
+      workingDirectory: this.threadOptions.workingDirectory,
+      additionalDirectories: this.threadOptions.additionalDirectories,
+      signal: turnOptions.signal,
+    });
+
+    for await (const line of events) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Failed to parse Antigravity JSON event: ${line}`, { cause: error });
+      }
+      if (event.type === "thread.started") {
+        this._id = event.thread_id;
+      }
+      yield event;
+    }
+  }
+}
+
+class AntigravityExec {
+  constructor(options = {}) {
+    this.pythonPath = options.pythonPath || "python3";
+    this.scriptPath = options.scriptPath || path.join(RALPH_DIR, "scripts", "antigravity-turn.py");
+    this.options = options;
+  }
+
+  async *run(args) {
+    const workspaces = [
+      args.workingDirectory,
+      ...(args.additionalDirectories ?? []),
+    ].filter(Boolean);
+    const config = {
+      provider: "antigravity",
+      conversationId: args.threadId,
+      model: args.model,
+      workdir: args.workingDirectory,
+      workspaces,
+      stateDir: CONFIG.stateDir,
+      runName: CONFIG.runName,
+      goalPath: getPortableGoalPath(),
+      goalProgressPath: path.join(CONFIG.stateDir, "goal-progress.jsonl"),
+      saveDir: this.options.saveDir,
+      appDataDir: this.options.appDataDir,
+      skillsPaths: this.options.skillsPaths ?? [],
+      allowAll: this.options.allowAll !== false,
+      structuredFinish: this.options.structuredFinish !== false,
+      sdkPath: this.options.sdkPath,
+      harnessPath: this.options.harnessPath,
+      mockResponse: this.options.mockResponse,
+      requestDelayMs: this.options.requestDelayMs,
+    };
+
+    const env = buildAntigravityExecEnv(this.options, config);
+    const child = spawn(this.pythonPath, [this.scriptPath], {
+      cwd: args.workingDirectory || process.cwd(),
+      env,
+      signal: args.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let spawnError = null;
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    if (!child.stdin || !child.stdout) {
+      child.kill();
+      throw new Error("Antigravity bridge did not expose stdio pipes");
+    }
+
+    const stderrChunks = [];
+    child.stderr?.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      if (stderrChunks.length > 40) {
+        stderrChunks.splice(0, stderrChunks.length - 40);
+      }
+    });
+
+    const exitPromise = new Promise((resolve) => {
+      child.once("exit", (code, signal) => {
+        resolve({ code, signal });
+      });
+    });
+    const rl = readline.createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+    });
+
+    child.stdin.write(args.input ?? "");
+    child.stdin.end();
+
+    try {
+      for await (const line of rl) {
+        if (line.trim()) {
+          yield line;
+        }
+      }
+      if (spawnError) {
+        throw spawnError;
+      }
+      const { code, signal } = await exitPromise;
+      if (code !== 0 || signal) {
+        const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+        throw new Error(`Antigravity bridge exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+      }
+    } finally {
+      rl.close();
+      child.removeAllListeners();
+      if (!child.killed) {
+        child.kill();
+      }
+    }
+  }
+}
+
+function buildAntigravityExecEnv(options, config) {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  env.RALPH_ANTIGRAVITY_CONFIG_JSON = JSON.stringify(config);
+  if (options.sdkPath) {
+    env.PYTHONPATH = env.PYTHONPATH ? `${options.sdkPath}:${env.PYTHONPATH}` : options.sdkPath;
+  }
+  if (options.harnessPath) {
+    env.ANTIGRAVITY_HARNESS_PATH = options.harnessPath;
+  }
+  return env;
 }
 
 function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
@@ -2354,7 +2660,7 @@ async function collectStreamedTurn(events, options = {}) {
       pendingEventRecords.push(eventRecord);
     }
 
-    log(`Codex event: ${summarizeEvent(event)}`);
+    log(`${formatProviderLabel(CONFIG.provider)} event: ${summarizeEvent(event)}`);
     if (event.type === "item.completed") {
       items.push(event.item);
       if (event.item.type === "agent_message") {
@@ -2392,7 +2698,11 @@ function combineOutput(stdout, stderr) {
 
 async function loadConfig() {
   const fileConfig = await loadConfigFile();
-  const model = process.env.RALPH_MODEL ?? fileConfig.model ?? DEFAULT_CONFIG.model;
+  const provider = normalizeProvider(process.env.RALPH_PROVIDER ?? fileConfig.provider ?? DEFAULT_CONFIG.provider);
+  const model =
+    process.env.RALPH_MODEL ??
+    fileConfig.model ??
+    (provider === "antigravity" ? DEFAULT_CONFIG.antigravityDefaultModel : DEFAULT_CONFIG.model);
   const reasoningEffort =
     process.env.RALPH_REASONING_EFFORT ??
     fileConfig.reasoningEffort ??
@@ -2419,14 +2729,24 @@ async function loadConfig() {
       deriveLegacyStateBaseDir(fileConfig.stateDir) ??
       DEFAULT_CONFIG.stateBaseDir,
   );
+  const stateDir = explicitStateDir
+    ? path.resolve(process.cwd(), explicitStateDir)
+    : path.join(stateBaseDir, runName);
 
   const configuredTestCommand =
     process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand;
   const checks = normalizeCheckConfig(fileConfig.checks, configuredTestCommand);
   const phases = normalizePhaseConfig(fileConfig.phases, checks);
   const primaryCheck = checks.find((check) => check.primary) ?? checks[0];
+  const antigravityScriptPath = path.resolve(
+    process.cwd(),
+    process.env.RALPH_ANTIGRAVITY_SCRIPT_PATH ??
+      fileConfig.antigravityScriptPath ??
+      DEFAULT_CONFIG.antigravityScriptPath,
+  );
 
   return {
+    provider,
     baseDir,
     name,
     runName,
@@ -2441,9 +2761,7 @@ async function loadConfig() {
       DEFAULT_CONFIG.maxTurns,
     ),
     stateBaseDir,
-    stateDir: explicitStateDir
-      ? path.resolve(process.cwd(), explicitStateDir)
-      : path.join(stateBaseDir, runName),
+    stateDir,
     model,
     reasoningEffort,
     sandboxMode:
@@ -2470,6 +2788,48 @@ async function loadConfig() {
       DEFAULT_CONFIG.outputTailChars,
     ),
     codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
+    antigravityPython:
+      process.env.RALPH_ANTIGRAVITY_PYTHON ??
+      fileConfig.antigravityPython ??
+      DEFAULT_CONFIG.antigravityPython,
+    antigravityScriptPath,
+    antigravitySdkPath: resolveOptionalPath(
+      process.env.RALPH_ANTIGRAVITY_SDK_PATH ?? fileConfig.antigravitySdkPath ?? DEFAULT_CONFIG.antigravitySdkPath,
+    ),
+    antigravityHarnessPath: resolveOptionalPath(
+      process.env.RALPH_ANTIGRAVITY_HARNESS_PATH ??
+        fileConfig.antigravityHarnessPath ??
+        DEFAULT_CONFIG.antigravityHarnessPath,
+    ),
+    antigravitySaveDir: resolveOptionalPath(
+      process.env.RALPH_ANTIGRAVITY_SAVE_DIR ??
+        fileConfig.antigravitySaveDir ??
+        path.join(stateDir, "antigravity-save"),
+    ),
+    antigravityAppDataDir: resolveOptionalPath(
+      process.env.RALPH_ANTIGRAVITY_APP_DATA_DIR ??
+        fileConfig.antigravityAppDataDir ??
+        path.join(stateDir, "antigravity-app-data"),
+    ),
+    antigravitySkillsPaths: parsePathList(
+      process.env.RALPH_ANTIGRAVITY_SKILLS_PATHS ?? fileConfig.antigravitySkillsPaths,
+    ),
+    antigravityAllowAll: parseBoolean(
+      process.env.RALPH_ANTIGRAVITY_ALLOW_ALL ?? fileConfig.antigravityAllowAll,
+      DEFAULT_CONFIG.antigravityAllowAll,
+    ),
+    antigravityStructuredFinish: parseBoolean(
+      process.env.RALPH_ANTIGRAVITY_STRUCTURED_FINISH ?? fileConfig.antigravityStructuredFinish,
+      DEFAULT_CONFIG.antigravityStructuredFinish,
+    ),
+    antigravityMockResponse:
+      process.env.RALPH_ANTIGRAVITY_MOCK_RESPONSE ??
+      fileConfig.antigravityMockResponse ??
+      DEFAULT_CONFIG.antigravityMockResponse,
+    antigravityRequestDelayMs: parseNonNegativeInt(
+      process.env.RALPH_ANTIGRAVITY_REQUEST_DELAY_MS ?? fileConfig.antigravityRequestDelayMs,
+      DEFAULT_CONFIG.antigravityRequestDelayMs,
+    ),
     loopGoalsEnabled: parseBoolean(
       process.env.RALPH_LOOP_GOALS ?? fileConfig.loopGoalsEnabled,
       DEFAULT_CONFIG.loopGoalsEnabled,
@@ -2758,7 +3118,7 @@ function summarizeEvent(event) {
     return "turn.started";
   }
   if (event.type === "turn.completed") {
-    return `turn.completed in=${event.usage.input_tokens} out=${event.usage.output_tokens}`;
+    return `turn.completed ${formatUsage(event.usage ?? {})}`;
   }
   if (event.type === "turn.failed") {
     return `turn.failed ${previewText(event.error.message)}`;
@@ -2825,7 +3185,7 @@ function buildRalphPhaseStatusEventRecord({ phaseStatus, threadId, turnNumber, a
 }
 
 function buildRalphGoalEventRecord({ action, goal, threadId, turnNumber, testStatus = null }) {
-  if (!goal || !threadId) {
+  if (!goal) {
     return null;
   }
 
@@ -2892,11 +3252,17 @@ function summarizeItem(item) {
 }
 
 function formatUsage(usage) {
+  const input = usage.input_tokens ?? usage.promptTokenCount ?? usage.prompt_token_count ?? 0;
+  const output = usage.output_tokens ?? usage.candidatesTokenCount ?? usage.candidates_token_count ?? 0;
+  const reasoning = usage.reasoning_output_tokens ?? usage.thoughtsTokenCount ?? usage.thoughts_token_count ?? 0;
+  const total = usage.total_tokens ?? usage.totalTokenCount ?? usage.total_token_count ?? input + output + reasoning;
+  const cached = usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? usage.cached_content_token_count ?? 0;
   return [
-    `total=${usage.input_tokens + usage.output_tokens}`,
-    `input=${usage.input_tokens}`,
-    `output=${usage.output_tokens}`,
-    `cached=${usage.cached_input_tokens}`,
+    `total=${total}`,
+    `input=${input}`,
+    `output=${output}`,
+    `cached=${cached}`,
+    ...(reasoning ? [`reasoning=${reasoning}`] : []),
   ].join(" ");
 }
 
@@ -3107,6 +3473,20 @@ function buildRunName({ name, model, reasoningEffort }) {
   return parts.join("-");
 }
 
+function generateProviderThreadId(provider) {
+  return `${provider}-${randomUUID()}`;
+}
+
+function formatProviderLabel(provider) {
+  if (provider === "codex") {
+    return "Codex";
+  }
+  if (provider === "antigravity") {
+    return "Antigravity";
+  }
+  return provider;
+}
+
 function sanitizeRunNamePart(value, label) {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) {
@@ -3270,6 +3650,21 @@ function sanitizeOptionalTemplateName(value) {
   return sanitizeIdentifier(value, "template name");
 }
 
+function normalizeProvider(value) {
+  const provider = String(value ?? "").trim().toLowerCase();
+  if (provider === "codex" || provider === "antigravity") {
+    return provider;
+  }
+  throw new Error("Config provider must be `codex` or `antigravity`");
+}
+
+function resolveOptionalPath(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  return path.resolve(process.cwd(), String(value));
+}
+
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
@@ -3299,6 +3694,14 @@ function parseOptionalPositiveInt(value, fallback = null) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeInt(value, fallback) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function parseBoolean(value, fallback) {
   if (value == null || value === "") {
     return fallback;
@@ -3310,6 +3713,10 @@ function parseBoolean(value, fallback) {
 }
 
 function parseAdditionalDirectories(value) {
+  return parsePathList(value);
+}
+
+function parsePathList(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry).trim()).filter(Boolean);
   }
