@@ -182,6 +182,8 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
   the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
   turn even when checks already pass, which is useful for audit/cleanup phases.
+  In slice mode, `runOnLastSubsetOnly: true` skips a phase until the final
+  subset for the active PA.
 - `driverMode`
   Default: `standard`. Set to `slice` for small-model runs that should work one
   configured test subset at a time.

@@ -197,7 +197,7 @@ async function main() {
         }),
       );
       await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
-      const nextPhase = getNextPhase(phase);
+      const nextPhase = getNextPhase(phase, state);
       if (nextPhase) {
         await saveState({
           threadId,
@@ -2038,14 +2038,35 @@ function resolveActiveTestSubset(state, stageName = null) {
 
 function resolveActivePhase(state) {
   const savedPhase = CONFIG.phases.find((phase) => phase.name === state?.activePhase);
-  return savedPhase ?? CONFIG.phases[0];
+  if (savedPhase && phaseAppliesToCurrentTarget(savedPhase, state)) {
+    return savedPhase;
+  }
+  return CONFIG.phases.find((phase) => phaseAppliesToCurrentTarget(phase, state)) ?? CONFIG.phases[0];
 }
 
-function getNextPhase(phase) {
+function getNextPhase(phase, state = null) {
   const index = CONFIG.phases.findIndex((candidate) => candidate.name === phase?.name);
-  return index >= 0 && index + 1 < CONFIG.phases.length
-    ? CONFIG.phases[index + 1]
-    : null;
+  if (index < 0) {
+    return null;
+  }
+  for (const candidate of CONFIG.phases.slice(index + 1)) {
+    if (phaseAppliesToCurrentTarget(candidate, state)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function phaseAppliesToCurrentTarget(phase, state = null) {
+  if (!phase?.runOnLastSubsetOnly) {
+    return true;
+  }
+  if (!isSliceDriverMode()) {
+    return true;
+  }
+  const stage = normalizeStageName(state?.activeStage) ?? resolveActiveTestStage(state ?? {});
+  const subset = normalizeTestSubset(state?.activeSubset) ?? resolveActiveTestSubset(state ?? {}, stage);
+  return !getNextTestSubsetName(stage, subset);
 }
 
 function shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state }) {
@@ -4018,6 +4039,7 @@ function normalizePhaseDefinition(phase, checks) {
     goalTemplate: sanitizeOptionalTemplateName(phase.goalTemplate ?? `${name}-goal`),
     checks: normalizedChecks,
     runWhenChecksPass: parseBoolean(phase.runWhenChecksPass, false),
+    runOnLastSubsetOnly: parseBoolean(phase.runOnLastSubsetOnly, false),
   };
 }
 
