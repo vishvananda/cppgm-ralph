@@ -560,7 +560,7 @@ function getDefaultPromptTemplate(phase = null) {
 }
 
 function defaultPromptHasCurrentState(phase = null) {
-  return /\{\{\s*currentState\s*\}\}/.test(getDefaultPromptTemplate(phase));
+  return /\{\{\s*(?:currentState|briefState)\s*\}\}/.test(getDefaultPromptTemplate(phase));
 }
 
 function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null }) {
@@ -604,6 +604,7 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     checkResults: checkResultLines.join("\n"),
     checkResultsBlock: checkResultLines.join("\n"),
     checkResultsJson: JSON.stringify(phaseStatus ?? null, null, 2),
+    briefState: buildBriefStateLines({ testStatus, gitStatus, phase, phaseStatus }).join("\n"),
     primaryCheckName: primaryCheck.name ?? "",
     primaryCheckCommand: primaryCheck.command ?? getTestStatusCommand(testStatus),
     testCommand: primaryCheck.command ?? getTestStatusCommand(testStatus),
@@ -658,6 +659,18 @@ function renderTemplateContent(template, context) {
       context[key] == null ? "" : String(context[key]),
     ),
   );
+}
+
+function buildBriefStateLines({ testStatus, gitStatus, phase = null, phaseStatus = null }) {
+  const stage = phaseStatus?.stage ?? testStatus?.targetStage ?? "";
+  const subset = phaseStatus?.subset ?? testStatus?.targetSubset ?? null;
+  const primaryCommand = phaseStatus?.primaryCheck?.command ?? getTestStatusCommand(testStatus);
+  return [
+    `- target: \`${formatTargetLabel(stage, subset)}\``,
+    `- phase: \`${phase?.name ?? ""}\``,
+    `- required check: \`${primaryCommand}\``,
+    `- git status: ${gitStatus.clean ? "clean" : "dirty"}`,
+  ];
 }
 
 function buildCurrentStateLines({
