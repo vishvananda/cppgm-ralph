@@ -20,6 +20,8 @@ my %opt = (
     duplicate_window => 28,
     duplicate_min_chars => 240,
     warnings_fail => 0,
+    follow_includes => 1,
+    include_stage_tools => 0,
     help => 0,
 );
 
@@ -37,6 +39,8 @@ GetOptions(
     'duplicate-window=i' => \$opt{duplicate_window},
     'duplicate-min-chars=i' => \$opt{duplicate_min_chars},
     'warnings-fail!' => \$opt{warnings_fail},
+    'follow-includes!' => \$opt{follow_includes},
+    'include-stage-tools!' => \$opt{include_stage_tools},
     'help|h' => \$opt{help},
 ) or die "Invalid arguments\n";
 
@@ -48,6 +52,9 @@ if ($opt{help}) {
 my $root = abs_path($opt{root}) // die "Cannot resolve root $opt{root}\n";
 my @paths = expand_path_options(@{$opt{paths}});
 @paths = ('dev') if !@paths;
+if ($opt{include_stage_tools}) {
+    push @paths, discover_stage_tool_paths($root, $opt{stage});
+}
 
 my @files;
 for my $input (@paths) {
@@ -55,8 +62,9 @@ for my $input (@paths) {
     collect_source_files($target, \@files);
 }
 my %included_by;
-discover_included_files($root, \@files, \%included_by);
-@files = sort @files;
+discover_included_files($root, \@files, \%included_by) if $opt{follow_includes};
+my %seen_file;
+@files = grep { !$seen_file{$_}++ } sort @files;
 
 my @fatal;
 my @warning;
@@ -106,7 +114,7 @@ exit($opt{warnings_fail} ? 1 : 0);
 sub print_usage {
     print <<'USAGE';
 Usage:
-  perl scripts/cppgm_file_audit.pl [--stage paN] [--paths dev]
+  perl scripts/cppgm_file_audit.pl [--stage paN] [--paths dev] [--include-stage-tools] [--no-follow-includes]
 
 Audits C/C++ implementation shape for CPPGM runs. The check is deliberately
 heuristic: high-confidence cheating and mechanical split patterns are fatal,
@@ -125,6 +133,81 @@ sub expand_path_options {
         } split /,/, $value;
     }
     return @out;
+}
+
+sub discover_stage_tool_paths {
+    my ($root, $stage) = @_;
+    die "--include-stage-tools requires --stage paN\n" if !$stage;
+    die "--stage must look like paN when --include-stage-tools is used\n"
+        if $stage !~ /\Apa\d+\z/;
+
+    my $makefile = File::Spec->catfile($root, $stage, 'Makefile');
+    return () if !-f $makefile;
+
+    my %vars;
+    my @assignments;
+    open my $fh, '<', $makefile or die "Cannot read $makefile: $!\n";
+    while (my $line = <$fh>) {
+        chomp $line;
+        $line = strip_make_comment($line);
+        next if $line !~ /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|\?=|=)\s*(.*?)\s*\z/;
+        my ($name, $value) = ($1, $2);
+        $vars{$name} = $value;
+        push @assignments, [$name, $value];
+    }
+    close $fh;
+
+    my %tools;
+    if (defined $vars{TARGET}) {
+        add_stage_tool_names(\%tools, resolve_make_value($vars{TARGET}, \%vars));
+    }
+
+    for my $assignment (@assignments) {
+        my ($name, $value) = @$assignment;
+        my $resolved = resolve_make_value($value, \%vars);
+        while ($resolved =~ m{(?:^|[\s"'])\.\./dev/([A-Za-z0-9_+.-]+)(?=$|[\s"'])}g) {
+            my $tool = $1;
+            next if $tool =~ /-ref\z/;
+            add_stage_tool_names(\%tools, $tool);
+        }
+    }
+
+    my @paths;
+    for my $tool (sort keys %tools) {
+        next if $tool !~ /\A[A-Za-z0-9_+.-]+\z/;
+        my $rel = "dev/$tool.cpp";
+        push @paths, $rel if -f File::Spec->catfile($root, $rel);
+    }
+    return @paths;
+}
+
+sub strip_make_comment {
+    my ($line) = @_;
+    $line =~ s/(?<!\\)#.*\z//;
+    return $line;
+}
+
+sub resolve_make_value {
+    my ($value, $vars) = @_;
+    for (1 .. 8) {
+        my $changed = 0;
+        $value =~ s/\$\(([A-Za-z_][A-Za-z0-9_]*)\)/
+            $changed = 1;
+            exists $vars->{$1} ? $vars->{$1} : "";
+        /gex;
+        last if !$changed;
+    }
+    return $value;
+}
+
+sub add_stage_tool_names {
+    my ($tools, $text) = @_;
+    for my $tool (split /\s+/, $text) {
+        next if $tool eq '';
+        next if $tool =~ /\$/;
+        next if $tool =~ /-ref\z/;
+        $tools->{$tool} = 1 if $tool =~ /\A[A-Za-z0-9_+.-]+\z/;
+    }
 }
 
 sub collect_source_files {
@@ -389,32 +472,44 @@ sub line_is_real_code {
 sub check_shortcut_smells {
     my ($rel, $text, $fatal, $warning) = @_;
     my @lines = split /\n/, $text;
+    my @code_lines = split /\n/, mask_comments_and_strings($text);
+    my @uncommented_lines = split /\n/, mask_comments($text);
     for my $i (0 .. $#lines) {
         my $line = $lines[$i];
+        my $code_line = $code_lines[$i] // '';
+        my $uncommented_line = $uncommented_lines[$i] // '';
         next if $line =~ m{^\s*(?://|\*)};
         if ($line =~ /cppgm\.tests|course\/pa\d+|pa\d+\/tests|\/tests\/[^"']+\.t\b|\b\d{3}-[A-Za-z0-9_.-]+\.t\b/) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
-                "source references test-suite paths or concrete test names");
+                "source references test-suite paths or concrete test names; fix by implementing the general assignment semantics and using tests only through the test runner, not by branching on fixture names or reading fixture files");
         }
-        if ($line =~ /\b(?:system|popen)\s*\(/) {
+        if (my $api = process_execution_api_from_line($code_line)) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
-                "compiler implementation shells out");
+                "compiler implementation calls process API '$api'; fix by moving the behavior into in-process compiler/runtime code or a normal linked library, not by shelling out, spawning helpers, or execing another tool");
         }
-        if ($line =~ /\bgetenv\s*\(/) {
+        if (my $marker = emitted_script_marker_from_line($uncommented_line)) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
-                "compiler implementation depends on environment variables");
+                "compiler appears to emit or embed script/interpreter trampoline '$marker'; fix by generating the assignment-required artifact directly and moving shared behavior into cohesive compiled modules instead of writing a script that dispatches to an interpreter or helper program");
+        }
+        if ($uncommented_line =~ /\b(?:import|from)\s+(?:ctypes|mmap|subprocess|os|sys)\b/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "compiler embeds a dynamic-language runtime/import block; fix by representing the semantics in typed compiler data and generated target code, not by packaging a Python/JS/shell runtime inside compiler output");
+        }
+        if ($code_line =~ /\bgetenv\s*\(/) {
+            add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
+                "compiler implementation depends on environment variables; fix by passing required configuration through explicit compiler options or normal source/program inputs, not hidden process environment state");
         }
         if ($line =~ /\bEXIT_NOT_IMPLEMENTED\b/ && !is_top_level_dev_tool($rel)) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
-                "implementation still exposes EXIT_NOT_IMPLEMENTED");
+                "implementation still exposes EXIT_NOT_IMPLEMENTED; fix by completing the owning implementation path or returning a real diagnostic for invalid user input, not by leaving assignment functionality stubbed");
         }
         if ($line =~ /\b(?:hack|cheat|test[-_ ]specific|hardcod(?:e|ed)|workaround)\b/i) {
             add_finding($warning, 'shortcut-risk', $rel, $i + 1,
-                "comment or identifier suggests a shortcut that should be reviewed");
+                "comment or identifier suggests a shortcut; review the code and either replace it with a general semantic implementation or rename it only after the shortcut has actually been removed");
         }
-        if ($line =~ /\b(?:ifstream|fopen|open)\s*\([^;\n]*(?:expected|golden|reference|cppgm\.tests|\/tests\/)/) {
+        if ($code_line =~ /\b(?:ifstream|fopen|open)\s*\([^;\n]*(?:expected|golden|reference|cppgm\.tests|\/tests\/)/) {
             add_finding($fatal, 'shortcut-risk', $rel, $i + 1,
-                "implementation appears to read expected/reference test data");
+                "implementation appears to read expected/reference test data; fix by computing the result from source semantics and remove all runtime dependency on expected, golden, reference, or test fixture files");
         }
     }
 
@@ -422,9 +517,28 @@ sub check_shortcut_smells {
         my $line = $lines[$i];
         if ($line =~ /R?"(?:\\.|[^"\\]){500,}"/) {
             add_finding($warning, 'shortcut-risk', $rel, $i + 1,
-                "very large string literal; verify it is not encoded expected output");
+                "very large string literal; if it is executable/runtime logic, split it into typed compiler code or generated target code, and if it is fixture data, remove it entirely");
         }
     }
+}
+
+sub process_execution_api_from_line {
+    my ($line) = @_;
+    my $api_re = qr/(?:std::)?system|popen|fork|vfork|execl|execle|execlp|execv|execve|execvp|execvpe|posix_spawn|posix_spawnp/;
+    return $1 if $line =~ /(?:^|[^A-Za-z0-9_:])($api_re)\s*\(/;
+    return undef;
+}
+
+sub emitted_script_marker_from_line {
+    my ($line) = @_;
+    return '#!' if $line =~ /#!/;
+    return '/usr/bin/env' if $line =~ m{/usr/bin/env};
+    return 'python interpreter' if $line =~ m{/(?:usr/)?bin/python3?\b} || $line =~ /["'`]\s*python3?\b/;
+    return 'shell interpreter' if $line =~ m{/(?:usr/)?bin/(?:ba)?sh\b} || $line =~ /["'`]\s*(?:bash|sh)\b/;
+    return 'node interpreter' if $line =~ m{/(?:usr/)?bin/node\b} || $line =~ /["'`]\s*node\b/;
+    return 'perl interpreter' if $line =~ m{/(?:usr/)?bin/perl\b} || $line =~ /["'`]\s*perl\b/;
+    return 'exec trampoline' if $line =~ /(?:^|["'`])\s*exec\s+(?:["'`\\\/\$]|[A-Za-z_.-])/;
+    return undef;
 }
 
 sub check_functions {
