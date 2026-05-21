@@ -74,6 +74,7 @@ const DEFAULT_CONFIG = {
   goalTokenBudget: null,
   freshThreadPerTurn: false,
   eventLogScope: "thread",
+  autoCommitOnPassingChecks: false,
   useExistingWorkdir: false,
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
@@ -138,6 +139,7 @@ async function main() {
       `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
       `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
       `freshThreadPerTurn=${CONFIG.freshThreadPerTurn ? "on" : "off"} ` +
+      `autoCommitOnPassingChecks=${CONFIG.autoCommitOnPassingChecks ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
   );
   const threadOptions = {
@@ -166,7 +168,10 @@ async function main() {
     const phase = resolveActivePhase(state);
     const phaseStatus = await runPhaseChecks(state, phase);
     const testStatus = phaseStatus.testStatus;
-    const gitStatus = await getGitStatus(CONFIG.workdir);
+    let gitStatus = await getGitStatus(CONFIG.workdir);
+    if (phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
+      gitStatus = await autoCommitPassingChanges({ phase, phaseStatus, gitStatus });
+    }
     const shouldRunRequiredPhaseTurn = shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
     const cleanupOnlyTurn = phaseStatus.allRequiredPassed && !gitStatus.clean;
     log(`Phase check status: ${formatPhaseCheckResults(phaseStatus)}`);
@@ -1446,6 +1451,26 @@ async function runCommand(command, cwd) {
       });
     });
   });
+}
+
+async function autoCommitPassingChanges({ phase, phaseStatus, gitStatus }) {
+  const target = formatTargetLabel(phaseStatus.stage, phaseStatus.subset);
+  const message = `Ralph ${phase.name} ${target}`;
+  log(`Auto-committing dirty worktree after passing checks: ${previewText(gitStatus.output)}`);
+  const result = await runCommand(
+    `git add -A && git commit -m ${shellEscape(message)}`,
+    CONFIG.workdir,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`Auto-commit failed: ${trimmedOutput(result.output)}`);
+  }
+  log(`Auto-commit created: ${previewText(result.output)}`);
+  try {
+    await pushCurrentBranch(CONFIG.workdir);
+  } catch (error) {
+    log(`Failed to push auto-commit: ${formatErrorMessage(error)}`);
+  }
+  return getGitStatus(CONFIG.workdir);
 }
 
 async function runPhaseChecks(state, phase) {
@@ -3161,6 +3186,10 @@ async function loadConfig() {
     ),
     eventLogScope: normalizeEventLogScope(
       process.env.RALPH_EVENT_LOG_SCOPE ?? fileConfig.eventLogScope ?? DEFAULT_CONFIG.eventLogScope,
+    ),
+    autoCommitOnPassingChecks: parseBoolean(
+      process.env.RALPH_AUTO_COMMIT_ON_PASSING_CHECKS ?? fileConfig.autoCommitOnPassingChecks,
+      DEFAULT_CONFIG.autoCommitOnPassingChecks,
     ),
     useExistingWorkdir: parseBoolean(
       process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
