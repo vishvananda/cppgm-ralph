@@ -43,6 +43,8 @@ const DEFAULT_CONFIG = {
   phases: null,
   driverMode: "standard",
   testSubsets: null,
+  autoTestSubsets: false,
+  autoTestSubsetThreshold: 20,
   initialStage: null,
   initialSubset: null,
   maxTurns: 1000,
@@ -85,6 +87,7 @@ let EVENTS_DIR_PATH = null;
 let PROMPT_PARTIALS = {};
 let TEST_STAGE_NAMES = [];
 let STAGE_COUNT_HINTS = new Map();
+let AUTO_TEST_SUBSETS = new Map();
 
 async function main() {
   CONFIG = await loadConfig();
@@ -120,6 +123,10 @@ async function main() {
   TEST_STAGE_NAMES = await discoverStageNames(CONFIG.workdir);
   if (TEST_STAGE_NAMES.length > 0) {
     log(`Discovered test stages: ${TEST_STAGE_NAMES.join(", ")}`);
+  }
+  AUTO_TEST_SUBSETS = await discoverAutoTestSubsets(CONFIG.workdir);
+  if (AUTO_TEST_SUBSETS.size > 0) {
+    log(`Discovered auto test subsets: ${formatAutoTestSubsetSummary(AUTO_TEST_SUBSETS)}`);
   }
   STAGE_COUNT_HINTS = await loadStageCountHints(state);
 
@@ -619,6 +626,9 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     testSubsetOrFullShell: shellEscape(activeSubset ?? "full-stage"),
     testSubsetStage: activeStage && activeSubset ? `${activeStage}/${activeSubset}` : "",
     testSubsetStageShell: shellEscape(activeStage && activeSubset ? `${activeStage}/${activeSubset}` : ""),
+    testSubsetStageMakeArg: activeStage && activeSubset
+      ? `GLOB=${shellEscape(`${activeStage}/${activeSubset}`)}`
+      : "",
     testSubsetLabel: formatSubsetLabel(activeSubset),
     targetLabel: formatTargetLabel(activeStage, activeSubset),
     targetLabelShell: shellEscape(formatTargetLabel(activeStage, activeSubset)),
@@ -1934,8 +1944,8 @@ function hasTestCommandStagePlaceholder(command) {
 }
 
 function hasTestCommandSubsetPlaceholder(command) {
-  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel|targetLabelShell)\s*\}\}/.test(command) ||
-    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel|targetLabelShell)\}/.test(command);
+  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell)\s*\}\}/.test(command) ||
+    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell)\}/.test(command);
 }
 
 function renderTestCommandTemplate(command, stageName, subset = null) {
@@ -1952,6 +1962,7 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
   const subsetOrFullShellText = shellEscape(subsetOrFullText);
   const subsetStageText = normalizedStage && normalizedSubset ? `${normalizedStage}/${normalizedSubset}` : "";
   const subsetStageShellText = shellEscape(subsetStageText);
+  const subsetStageMakeArgText = subsetStageText ? `GLOB=${subsetStageShellText}` : "";
   const subsetLabel = formatSubsetLabel(normalizedSubset);
   const targetLabel = formatTargetLabel(normalizedStage, normalizedSubset);
   const targetLabelShellText = shellEscape(targetLabel);
@@ -1965,6 +1976,7 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
     .replace(/\{\{\s*testSubsetOrFullShell\s*\}\}/g, subsetOrFullShellText)
     .replace(/\{\{\s*testSubsetStage\s*\}\}/g, subsetStageText)
     .replace(/\{\{\s*testSubsetStageShell\s*\}\}/g, subsetStageShellText)
+    .replace(/\{\{\s*testSubsetStageMakeArg\s*\}\}/g, subsetStageMakeArgText)
     .replace(/\{\{\s*testSubsetLabel\s*\}\}/g, subsetLabel)
     .replace(/\{\{\s*targetLabel\s*\}\}/g, targetLabel)
     .replace(/\{\{\s*targetLabelShell\s*\}\}/g, targetLabelShellText)
@@ -1975,6 +1987,7 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
     .replace(/\{testSubsetOrFullShell\}/g, subsetOrFullShellText)
     .replace(/\{testSubsetStage\}/g, subsetStageText)
     .replace(/\{testSubsetStageShell\}/g, subsetStageShellText)
+    .replace(/\{testSubsetStageMakeArg\}/g, subsetStageMakeArgText)
     .replace(/\{testSubsetLabel\}/g, subsetLabel)
     .replace(/\{targetLabel\}/g, targetLabel)
     .replace(/\{targetLabelShell\}/g, targetLabelShellText);
@@ -2147,7 +2160,16 @@ function getStageTestSubsets(stageName) {
   if (!stage) {
     return [];
   }
-  return CONFIG.testSubsets?.stages?.[stage] ?? CONFIG.testSubsets?.default ?? [];
+  if (CONFIG.testSubsets?.stages && Object.hasOwn(CONFIG.testSubsets.stages, stage)) {
+    return CONFIG.testSubsets.stages[stage] ?? [];
+  }
+  if (CONFIG.testSubsets?.default?.length > 0) {
+    return CONFIG.testSubsets.default;
+  }
+  if (CONFIG.autoTestSubsets) {
+    return AUTO_TEST_SUBSETS.get(stage) ?? [];
+  }
+  return [];
 }
 
 function getFirstTestSubsetName(stageName) {
@@ -3008,6 +3030,14 @@ async function loadConfig() {
     checks,
     phases,
     testSubsets: normalizeTestSubsets(fileConfig.testSubsets),
+    autoTestSubsets: parseBoolean(
+      process.env.RALPH_AUTO_TEST_SUBSETS ?? fileConfig.autoTestSubsets,
+      DEFAULT_CONFIG.autoTestSubsets,
+    ),
+    autoTestSubsetThreshold: parseNonNegativeInt(
+      process.env.RALPH_AUTO_TEST_SUBSET_THRESHOLD ?? fileConfig.autoTestSubsetThreshold,
+      DEFAULT_CONFIG.autoTestSubsetThreshold,
+    ),
     initialStage: normalizeStageName(process.env.RALPH_INITIAL_STAGE ?? fileConfig.initialStage),
     initialSubset: normalizeTestSubset(process.env.RALPH_INITIAL_SUBSET ?? fileConfig.initialSubset),
     maxTurns: parsePositiveInt(
@@ -3698,6 +3728,106 @@ async function discoverStageNames(workdir) {
   return stages
     .filter((stage) => !experimentalStages.has(stage))
     .sort(compareStageNames);
+}
+
+async function discoverAutoTestSubsets(workdir) {
+  const subsets = new Map();
+  if (!isSliceDriverMode() || !CONFIG.autoTestSubsets) {
+    return subsets;
+  }
+
+  for (const stage of TEST_STAGE_NAMES) {
+    const stageSubsets = await discoverStageAutoTestSubsets(workdir, stage);
+    if (stageSubsets.length > 0) {
+      subsets.set(stage, stageSubsets);
+    }
+  }
+  return subsets;
+}
+
+async function discoverStageAutoTestSubsets(workdir, stage) {
+  const stageDir = path.join(workdir, stage);
+  const testsDir = path.join(stageDir, "tests");
+  const testPaths = await listTestFiles(testsDir);
+  const courseDir = path.join(stageDir, "course", stage);
+  const coursePaths = await listTestFiles(courseDir);
+  const total = testPaths.length + coursePaths.length;
+  if (total <= CONFIG.autoTestSubsetThreshold) {
+    return [];
+  }
+
+  const groups = new Map();
+  for (const filePath of testPaths) {
+    const relative = path.relative(testsDir, filePath).split(path.sep).join("/");
+    const directory = path.dirname(relative).replace(/^\.$/, "");
+    const basename = path.basename(relative);
+    const prefix = getTestFilePrefix(basename);
+    const groupPath = directory ? `tests/${directory}/${prefix}-*.t` : `tests/${prefix}-*.t`;
+    groups.set(groupPath, (groups.get(groupPath) ?? 0) + 1);
+  }
+
+  const result = Array.from(groups.keys()).sort(compareTestSubsetNames);
+  if (coursePaths.length > 0) {
+    result.push(`course/${stage}/*.t`);
+  }
+  return result;
+}
+
+async function listTestFiles(root) {
+  try {
+    const stat = await fs.stat(root);
+    if (!stat.isDirectory()) {
+      return [];
+    }
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  const result = [];
+  await collectTestFilesRecursive(root, result);
+  return result.sort();
+}
+
+async function collectTestFilesRecursive(directory, result) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await collectTestFilesRecursive(entryPath, result);
+    } else if (entry.isFile() && entry.name.endsWith(".t")) {
+      result.push(entryPath);
+    }
+  }
+}
+
+function getTestFilePrefix(fileName) {
+  const match = fileName.match(/^([0-9]+)-/);
+  return match ? match[1] : "misc";
+}
+
+function compareTestSubsetNames(left, right) {
+  const leftKey = testSubsetSortKey(left);
+  const rightKey = testSubsetSortKey(right);
+  if (leftKey.prefix !== rightKey.prefix) {
+    return leftKey.prefix - rightKey.prefix;
+  }
+  return left.localeCompare(right);
+}
+
+function testSubsetSortKey(name) {
+  const match = String(name).match(/\/([0-9]+)-\*\.t$/);
+  return {
+    prefix: match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER,
+  };
+}
+
+function formatAutoTestSubsetSummary(subsets) {
+  return Array.from(subsets.entries())
+    .map(([stage, stageSubsets]) => `${stage}:${stageSubsets.length}`)
+    .join(", ");
 }
 
 async function readExperimentalStageNames(workdir) {
