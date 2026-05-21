@@ -45,6 +45,7 @@ const DEFAULT_CONFIG = {
   testSubsets: null,
   autoTestSubsets: false,
   autoTestSubsetThreshold: 20,
+  autoTestSubsetMaxFiles: 0,
   initialStage: null,
   initialSubset: null,
   maxTurns: 1000,
@@ -3096,6 +3097,10 @@ async function loadConfig() {
       process.env.RALPH_AUTO_TEST_SUBSET_THRESHOLD ?? fileConfig.autoTestSubsetThreshold,
       DEFAULT_CONFIG.autoTestSubsetThreshold,
     ),
+    autoTestSubsetMaxFiles: parseNonNegativeInt(
+      process.env.RALPH_AUTO_TEST_SUBSET_MAX_FILES ?? fileConfig.autoTestSubsetMaxFiles,
+      DEFAULT_CONFIG.autoTestSubsetMaxFiles,
+    ),
     initialStage: normalizeStageName(process.env.RALPH_INITIAL_STAGE ?? fileConfig.initialStage),
     initialSubset: normalizeTestSubset(process.env.RALPH_INITIAL_SUBSET ?? fileConfig.initialSubset),
     maxTurns: parsePositiveInt(
@@ -3839,10 +3844,22 @@ async function discoverStageAutoTestSubsets(workdir, stage) {
     const basename = path.basename(relative);
     const prefix = getTestFilePrefix(basename);
     const groupPath = directory ? `tests/${directory}/${prefix}-*.t` : `tests/${prefix}-*.t`;
-    groups.set(groupPath, (groups.get(groupPath) ?? 0) + 1);
+    const groupFiles = groups.get(groupPath) ?? [];
+    groupFiles.push(directory ? `tests/${directory}/${basename}` : `tests/${basename}`);
+    groups.set(groupPath, groupFiles);
   }
 
-  const result = Array.from(groups.keys()).sort(compareTestSubsetNames);
+  const result = [];
+  const maxFiles = CONFIG.autoTestSubsetMaxFiles;
+  for (const [groupPath, groupFiles] of groups.entries()) {
+    const sortedGroupFiles = groupFiles.sort(compareTestSubsetNames);
+    if (maxFiles > 0 && sortedGroupFiles.length > 1 && sortedGroupFiles.length <= maxFiles) {
+      result.push(...sortedGroupFiles);
+    } else {
+      result.push(groupPath);
+    }
+  }
+  result.sort(compareTestSubsetNames);
   if (coursePaths.length > 0) {
     result.push(`course/${stage}/*.t`);
   }
@@ -3894,7 +3911,7 @@ function compareTestSubsetNames(left, right) {
 }
 
 function testSubsetSortKey(name) {
-  const match = String(name).match(/\/([0-9]+)-\*\.t$/);
+  const match = String(name).match(/\/([0-9]+)-(?:\*|[^/]+)\.t$/);
   return {
     prefix: match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER,
   };

@@ -191,11 +191,13 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Optional array or object used only by `slice` mode. An array applies to every
   stage. An object can define `default` and/or per-stage arrays such as
   `"pa22": ["tests/general/100-*.t", "tests/spec/100-*.t"]`.
-- `autoTestSubsets`, `autoTestSubsetThreshold`
+- `autoTestSubsets`, `autoTestSubsetThreshold`, `autoTestSubsetMaxFiles`
   Optional slice-mode auto-discovery. When enabled, stages with more than the
   threshold number of `.t` files are split into `tests/<prefix>-*.t` or
   `tests/<dir>/<prefix>-*.t` groups; symlinked course tests are kept as one
-  `course/paN/*.t` slice.
+  `course/paN/*.t` slice. Set `autoTestSubsetMaxFiles` to split small groups
+  into exact-file slices, such as `tests/200-basic-floating.t`, while leaving
+  larger groups as prefix globs.
 - `initialStage`, `initialSubset`
   Optional starting target for a new run, useful for slice experiments that
   should begin at a later PA such as `pa22`.
