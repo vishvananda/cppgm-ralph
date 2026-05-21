@@ -41,6 +41,10 @@ const DEFAULT_CONFIG = {
   testCommand: "make test",
   checks: null,
   phases: null,
+  driverMode: "standard",
+  testSubsets: null,
+  initialStage: null,
+  initialSubset: null,
   maxTurns: 1000,
   stateBaseDir: ".ralph",
   model: "gpt-5.3-codex",
@@ -121,6 +125,7 @@ async function main() {
 
   log(
     `Config: provider=${CONFIG.provider} model=${CONFIG.model} reasoning=${CONFIG.reasoningEffort} ` +
+      `driver=${CONFIG.driverMode} ` +
       `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
       `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
@@ -194,6 +199,7 @@ async function main() {
           lastExitCode: 0,
           lastTestStatus: testStatus,
           activeStage: getStateActiveStageAfterTest(testStatus),
+          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           activePhase: nextPhase.name,
           phaseAttempted: false,
           updatedAt: new Date().toISOString(),
@@ -202,14 +208,15 @@ async function main() {
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
         state.activeStage = getStateActiveStageAfterTest(testStatus);
+        state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
         state.activePhase = nextPhase.name;
         state.phaseAttempted = false;
         log(`Phase ${phase.name} completed. Advancing to phase ${nextPhase.name}.`);
         continue;
       }
 
-      const nextStage = getNextStageAfterCompletedPhase(testStatus);
-      if (nextStage) {
+      const nextTarget = getNextTargetAfterCompletedPhase(state, testStatus);
+      if (nextTarget) {
         const firstPhase = CONFIG.phases[0];
         await saveState({
           threadId,
@@ -217,7 +224,8 @@ async function main() {
           turnsCompleted: turnNumber,
           lastExitCode: 0,
           lastTestStatus: testStatus,
-          activeStage: nextStage,
+          activeStage: nextTarget.stage,
+          activeSubset: nextTarget.subset,
           activePhase: firstPhase.name,
           phaseAttempted: false,
           updatedAt: new Date().toISOString(),
@@ -225,10 +233,14 @@ async function main() {
         state.threadId = threadId;
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
-        state.activeStage = nextStage;
+        state.activeStage = nextTarget.stage;
+        state.activeSubset = nextTarget.subset;
         state.activePhase = firstPhase.name;
         state.phaseAttempted = false;
-        log(`Phase ${phase.name} completed for ${testStatus.targetStage}. Advancing to ${nextStage}.`);
+        log(
+          `Phase ${phase.name} completed for ${formatTargetLabel(testStatus.targetStage, testStatus.targetSubset)}. ` +
+            `Advancing to ${formatTargetLabel(nextTarget.stage, nextTarget.subset)}.`,
+        );
         continue;
       }
 
@@ -239,6 +251,7 @@ async function main() {
         lastExitCode: 0,
         lastTestStatus: testStatus,
         activeStage: null,
+        activeSubset: null,
         activePhase: null,
         phaseAttempted: false,
         updatedAt: new Date().toISOString(),
@@ -247,6 +260,7 @@ async function main() {
       state.lastExitCode = 0;
       state.lastTestStatus = testStatus;
       state.activeStage = null;
+      state.activeSubset = null;
       state.activePhase = null;
       state.phaseAttempted = false;
       state.turnsCompleted = turnNumber;
@@ -300,6 +314,7 @@ async function main() {
           lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
           lastTestStatus: testStatus,
           activeStage: getStateActiveStageAfterTest(testStatus),
+          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           activePhase: phase.name,
           phaseAttempted: state.phaseAttempted === true,
           updatedAt: new Date().toISOString(),
@@ -351,6 +366,7 @@ async function main() {
       lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
       lastTestStatus: testStatus,
       activeStage: getStateActiveStageAfterTest(testStatus),
+      activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
       activePhase: phase.name,
       phaseAttempted: phaseAttemptedAfterTurn,
       updatedAt: new Date().toISOString(),
@@ -359,6 +375,7 @@ async function main() {
     state.lastExitCode = phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode;
     state.lastTestStatus = testStatus;
     state.activeStage = getStateActiveStageAfterTest(testStatus);
+    state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
     state.activePhase = phase.name;
     state.phaseAttempted = phaseAttemptedAfterTurn;
     turnNumber += 1;
@@ -452,8 +469,9 @@ function buildGitStatusLines(gitStatus) {
 function buildContinueObjectiveLines(testStatus, phase = null, phaseStatus = null) {
   const lines = [];
   const targetStage = getObjectiveTargetStage(testStatus);
+  const targetSubset = testStatus?.targetSubset ?? phaseStatus?.subset ?? null;
   const reportTarget = targetStage
-    ? buildTestCommandForStage(targetStage)
+    ? buildTestCommandForStage(targetStage, targetSubset)
     : getTestStatusCommand(testStatus);
 
   if (phaseStatus?.allRequiredPassed && phase?.runWhenChecksPass) {
@@ -552,6 +570,11 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     activeStage: testStatus?.targetStage,
     lastTestStatus: testStatus,
   });
+  const activeSubset = phaseStatus?.subset ?? testStatus?.targetSubset ?? resolveActiveTestSubset({
+    activeStage,
+    activeSubset: testStatus?.targetSubset,
+    lastTestStatus: testStatus,
+  }, activeStage);
   const testStatusLines = buildTestStatusLines(testStatus);
   const checkResultLines = phaseStatus ? buildCheckResultLines(phaseStatus) : [];
   const gitStatusLines = buildGitStatusLines(gitStatus);
@@ -577,7 +600,7 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     stateDir: CONFIG.stateDir,
     phaseName: phase.name,
     activePhase: phase.name,
-    phaseChecks: formatPhaseChecksForTemplate(phase, activeStage),
+    phaseChecks: formatPhaseChecksForTemplate(phase, activeStage, activeSubset),
     checkResults: checkResultLines.join("\n"),
     checkResultsBlock: checkResultLines.join("\n"),
     checkResultsJson: JSON.stringify(phaseStatus ?? null, null, 2),
@@ -587,6 +610,14 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     testCommandTemplate: primaryCheck.commandTemplate ?? CONFIG.testCommand,
     testStage: activeStage ?? "",
     stageNumber: activeStage?.slice(2) ?? "",
+    testSubset: activeSubset ?? "",
+    subset: activeSubset ?? "",
+    testSubsetShell: shellEscape(activeSubset ?? ""),
+    subsetShell: shellEscape(activeSubset ?? ""),
+    testSubsetStage: activeStage && activeSubset ? `${activeStage}/${activeSubset}` : "",
+    testSubsetStageShell: shellEscape(activeStage && activeSubset ? `${activeStage}/${activeSubset}` : ""),
+    testSubsetLabel: formatSubsetLabel(activeSubset),
+    targetLabel: formatTargetLabel(activeStage, activeSubset),
     turnNumber: turnNumber == null ? "" : String(turnNumber),
     exitCode: String(testStatus?.exitCode ?? ""),
     failingStage: testStatus?.failingStage ?? "",
@@ -654,6 +685,12 @@ function buildCurrentStateLines({
   if (testStatus?.targetStage) {
     lines.push(`- Current stage: \`${testStatus.targetStage}\``);
   }
+  const activeSubset = testStatus?.targetSubset ?? phaseStatus?.subset ?? null;
+  if (activeSubset) {
+    lines.push(`- Current test subset: \`${activeSubset}\``);
+  } else if (isSliceDriverMode()) {
+    lines.push("- Current test subset: full stage");
+  }
   lines.push("", "Required checks:");
   if (phaseStatus?.checks?.length) {
     for (const check of phaseStatus.checks) {
@@ -662,7 +699,7 @@ function buildCurrentStateLines({
       );
     }
   } else if (phase) {
-    lines.push(...formatPhaseChecksForTemplate(phase, testStatus?.targetStage).split("\n"));
+    lines.push(...formatPhaseChecksForTemplate(phase, testStatus?.targetStage, testStatus?.targetSubset).split("\n"));
   } else {
     lines.push(`- ${getPrimaryCheck().name}: \`${getTestStatusCommand(testStatus)}\` (required, primary)`);
   }
@@ -738,11 +775,17 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   }));
   const firstFailureLine = findFirstFailureLine(normalizedOutput);
 
-  const stages = stageHeaders.map((stage, index) => {
+  let stages = stageHeaders.map((stage, index) => {
     const start = stage.index;
     const end = index + 1 < stageHeaders.length ? stageHeaders[index + 1].index : normalizedOutput.length;
     return parseStageStatus(stage.name, normalizedOutput.slice(start, end));
   });
+  if (stages.length === 0 && options.targetStage) {
+    const syntheticStage = parseStageStatus(options.targetStage, normalizedOutput);
+    if (syntheticStage.status !== "unknown" || syntheticStage.targets.length > 0) {
+      stages = [syntheticStage];
+    }
+  }
   const reportSummary = parseReportSummary(normalizedOutput);
   applyReportSummaryToStages(stages, previousStatus, reportSummary);
 
@@ -783,7 +826,9 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     command: options.command ?? getPrimaryCheck().command,
     commandTemplate: options.commandTemplate ?? getPrimaryCheck().command,
     targetStage: options.targetStage ?? null,
+    targetSubset: normalizeTestSubset(options.targetSubset) ?? null,
     usesStageTemplate: Boolean(options.usesStageTemplate),
+    usesSubsetTemplate: Boolean(options.usesSubsetTemplate),
     exitCode: options.exitCode ?? null,
     allTestsPassed:
       reportSummary?.allPassed ||
@@ -1196,13 +1241,13 @@ function formatPhaseCheckResults(phaseStatus) {
     .join("; ");
 }
 
-function formatPhaseChecksForTemplate(phase, stage) {
+function formatPhaseChecksForTemplate(phase, stage, subset = null) {
   return phase.checks
     .map((name) => {
       const check = getCheckByName(name);
       const required = check.required ? "required" : "optional";
       const primary = check.primary ? ", primary" : "";
-      return `- ${check.name}: \`${buildCheckCommandForStage(check, stage)}\` (${required}${primary})`;
+      return `- ${check.name}: \`${buildCheckCommandForStage(check, stage, subset)}\` (${required}${primary})`;
     })
     .join("\n");
 }
@@ -1216,6 +1261,9 @@ function formatTestStatusSummary(testStatus) {
     `${testStatus.testsPassed}/${testStatus.testsTotal} tests passing`,
     `${testStatus.stagesPassed}/${testStatus.stageCount} stages passing`,
   ];
+  if (testStatus.targetSubset) {
+    parts.push(`target subset: ${testStatus.targetSubset}`);
+  }
 
   if (testStatus.failingStage) {
     parts.push(`first failing stage: ${testStatus.failingStage}`);
@@ -1364,13 +1412,14 @@ async function runCommand(command, cwd) {
 
 async function runPhaseChecks(state, phase) {
   const stage = resolveActiveTestStage(state);
+  const subset = resolveActiveTestSubset(state, stage);
   const checks = phase.checks.map((name) => getCheckByName(name));
   const results = [];
   let primaryTestStatus = null;
   let previousTestStatus = state.lastTestStatus;
 
   for (const check of checks) {
-    const context = buildCheckCommandContext(check, stage);
+    const context = buildCheckCommandContext(check, stage, subset);
     log(`Running ${phase.name} check ${check.name}: ${context.command}`);
     const run = await runCommand(context.command, CONFIG.workdir);
     const outputPath = await writeCheckLog(check.name, run.output);
@@ -1382,7 +1431,9 @@ async function runPhaseChecks(state, phase) {
       command: context.command,
       commandTemplate: context.template,
       usesStageTemplate: context.usesStageTemplate,
+      usesSubsetTemplate: context.usesSubsetTemplate,
       targetStage: context.stage,
+      targetSubset: context.subset,
       exitCode: run.exitCode,
       passed: run.exitCode === 0,
       outputPath,
@@ -1395,7 +1446,9 @@ async function runPhaseChecks(state, phase) {
         commandTemplate: context.template,
         exitCode: run.exitCode,
         targetStage: context.stage,
+        targetSubset: context.subset,
         usesStageTemplate: context.usesStageTemplate,
+        usesSubsetTemplate: context.usesSubsetTemplate,
       });
       result.testStatus = testStatus;
       previousTestStatus = testStatus;
@@ -1413,9 +1466,10 @@ async function runPhaseChecks(state, phase) {
   return {
     phase: phase.name,
     stage,
+    subset,
     checks: results,
     primaryCheck: results.find((result) => result.primary) ?? results[0] ?? null,
-    testStatus: primaryTestStatus ?? buildGenericTestStatus(results[0], stage),
+    testStatus: primaryTestStatus ?? buildGenericTestStatus(results[0], stage, subset),
     allRequiredPassed: failedRequired.length === 0,
     failedRequiredChecks: failedRequired,
   };
@@ -1429,13 +1483,15 @@ async function writeCheckLog(checkName, output) {
   return filePath;
 }
 
-function buildGenericTestStatus(result, stage) {
+function buildGenericTestStatus(result, stage, subset = null) {
   return {
     recordedAt: new Date().toISOString(),
     command: result?.command ?? "",
     commandTemplate: result?.commandTemplate ?? "",
     targetStage: stage ?? null,
+    targetSubset: normalizeTestSubset(subset) ?? null,
     usesStageTemplate: Boolean(result?.usesStageTemplate),
+    usesSubsetTemplate: Boolean(result?.usesSubsetTemplate),
     exitCode: result?.exitCode ?? null,
     allTestsPassed: Boolean(result?.passed),
     stageCount: 0,
@@ -1694,8 +1750,9 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
   }
 
   const stage = getObjectiveTargetStage(testStatus) ?? "";
+  const subset = testStatus?.targetSubset ?? phaseStatus?.subset ?? "";
   const primaryCommand = phaseStatus?.primaryCheck?.command ??
-    (stage ? buildTestCommandForStage(stage) : getTestStatusCommand(testStatus));
+    (stage ? buildTestCommandForStage(stage, subset) : getTestStatusCommand(testStatus));
   const lines = [
     `Ralph loop ${turnNumber} ${phase.name} phase for ${CONFIG.runName}.`,
     "",
@@ -1705,6 +1762,11 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
 
   if (stage) {
     lines.push(`Current stage: ${stage}.`);
+  }
+  if (subset) {
+    lines.push(`Current test subset: ${subset}.`);
+  } else if (isSliceDriverMode()) {
+    lines.push("Current test subset: full stage.");
   }
   lines.push(`Current phase: ${phase.name}.`);
 
@@ -1720,7 +1782,7 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
   } else {
     lines.push(
       "- All required phase checks pass:",
-      ...formatPhaseChecksForTemplate(phase, stage).split("\n").map((line) => `  ${line}`),
+      ...formatPhaseChecksForTemplate(phase, stage, subset).split("\n").map((line) => `  ${line}`),
       `- Primary verification command: \`${primaryCommand}\`.`,
       "- Previous stages do not regress.",
       "- All explicit requirements in the accompanying turn prompt are satisfied, including any requested planning, review, cleanup, documentation, or retrospective work.",
@@ -1766,7 +1828,7 @@ function buildLoopGoalTaskLines({ testStatus, gitStatus, phase = null, phaseStat
   if (testStatus.passingThrough && testStatus.failingStage) {
     const targetStage = getObjectiveTargetStage(testStatus);
     const reportTarget = targetStage
-      ? buildTestCommandForStage(targetStage)
+      ? buildTestCommandForStage(targetStage, testStatus?.targetSubset ?? phaseStatus?.subset)
       : getTestStatusCommand(testStatus);
     lines.push(
       `Assignments through \`${testStatus.passingThrough}\` pass.`,
@@ -1776,7 +1838,7 @@ function buildLoopGoalTaskLines({ testStatus, gitStatus, phase = null, phaseStat
       lines.push(`The first blocking regression is in \`${testStatus.failingStage}\`.`);
     }
   } else if (testStatus.failingStage) {
-    const reportTarget = buildTestCommandForStage(testStatus.failingStage);
+    const reportTarget = buildTestCommandForStage(testStatus.failingStage, testStatus?.targetSubset ?? phaseStatus?.subset);
     lines.push(`Make \`${reportTarget}\` fully pass before returning and continue toward the full suite.`);
   } else {
     lines.push(
@@ -1797,33 +1859,42 @@ function getTestStatusCommand(testStatus) {
   return testStatus?.command ?? getPrimaryCheck().command;
 }
 
-function buildTestCommandForStage(stageName) {
-  return buildCheckCommandForStage(getPrimaryCheck(), stageName);
+function buildTestCommandForStage(stageName, subset = null) {
+  return buildCheckCommandForStage(getPrimaryCheck(), stageName, subset);
 }
 
-function buildCheckCommandForStage(check, stageName) {
+function buildCheckCommandForStage(check, stageName, subset = null) {
   const normalizedStage = normalizeStageName(stageName);
-  if (normalizedStage && hasTestCommandStagePlaceholder(check.command)) {
-    return renderTestCommandTemplate(check.command, normalizedStage);
+  const normalizedSubset = normalizeTestSubset(subset);
+  if (
+    (normalizedStage && hasTestCommandStagePlaceholder(check.command)) ||
+    hasTestCommandSubsetPlaceholder(check.command)
+  ) {
+    return renderTestCommandTemplate(check.command, normalizedStage, normalizedSubset);
   }
   return check.command;
 }
 
 function buildTestCommandContext(state) {
-  return buildCheckCommandContext(getPrimaryCheck(), resolveActiveTestStage(state));
+  const stage = resolveActiveTestStage(state);
+  return buildCheckCommandContext(getPrimaryCheck(), stage, resolveActiveTestSubset(state, stage));
 }
 
-function buildCheckCommandContext(check, activeStage) {
+function buildCheckCommandContext(check, activeStage, activeSubset = null) {
   const usesStageTemplate = hasTestCommandStagePlaceholder(check.command);
+  const usesSubsetTemplate = hasTestCommandSubsetPlaceholder(check.command);
   const stage = usesStageTemplate ? normalizeStageName(activeStage) : null;
+  const subset = usesSubsetTemplate ? normalizeTestSubset(activeSubset) : null;
   return {
     checkName: check.name,
     template: check.command,
-    command: usesStageTemplate
-      ? renderTestCommandTemplate(check.command, stage)
+    command: usesStageTemplate || usesSubsetTemplate
+      ? renderTestCommandTemplate(check.command, stage, subset)
       : check.command,
     stage,
+    subset,
     usesStageTemplate,
+    usesSubsetTemplate,
   };
 }
 
@@ -1846,18 +1917,42 @@ function hasTestCommandStagePlaceholder(command) {
     /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command);
 }
 
-function renderTestCommandTemplate(command, stageName) {
+function hasTestCommandSubsetPlaceholder(command) {
+  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel)\s*\}\}/.test(command) ||
+    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel)\}/.test(command);
+}
+
+function renderTestCommandTemplate(command, stageName, subset = null) {
   const normalizedStage = normalizeStageName(stageName);
-  if (!normalizedStage) {
+  if (!normalizedStage && hasTestCommandStagePlaceholder(command)) {
     throw new Error(`Cannot render test command template without a pa stage: ${command}`);
   }
 
-  const stageNumberText = normalizedStage.slice(2);
+  const normalizedSubset = normalizeTestSubset(subset);
+  const stageNumberText = normalizedStage?.slice(2) ?? "";
+  const subsetText = normalizedSubset ?? "";
+  const subsetShellText = shellEscape(subsetText);
+  const subsetStageText = normalizedStage && normalizedSubset ? `${normalizedStage}/${normalizedSubset}` : "";
+  const subsetStageShellText = shellEscape(subsetStageText);
+  const subsetLabel = formatSubsetLabel(normalizedSubset);
+  const targetLabel = formatTargetLabel(normalizedStage, normalizedSubset);
   return command
-    .replace(/\bpaX\b/g, normalizedStage)
-    .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage)
+    .replace(/\bpaX\b/g, normalizedStage ?? "")
+    .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage ?? "")
     .replace(/\{\{\s*stageNumber\s*\}\}/g, stageNumberText)
-    .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage);
+    .replace(/\{\{\s*(?:subset|testSubset)\s*\}\}/g, subsetText)
+    .replace(/\{\{\s*(?:subsetShell|testSubsetShell)\s*\}\}/g, subsetShellText)
+    .replace(/\{\{\s*testSubsetStage\s*\}\}/g, subsetStageText)
+    .replace(/\{\{\s*testSubsetStageShell\s*\}\}/g, subsetStageShellText)
+    .replace(/\{\{\s*testSubsetLabel\s*\}\}/g, subsetLabel)
+    .replace(/\{\{\s*targetLabel\s*\}\}/g, targetLabel)
+    .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage ?? "")
+    .replace(/\{(?:subset|testSubset)\}/g, subsetText)
+    .replace(/\{(?:subsetShell|testSubsetShell)\}/g, subsetShellText)
+    .replace(/\{testSubsetStage\}/g, subsetStageText)
+    .replace(/\{testSubsetStageShell\}/g, subsetStageShellText)
+    .replace(/\{testSubsetLabel\}/g, subsetLabel)
+    .replace(/\{targetLabel\}/g, targetLabel);
 }
 
 function resolveActiveTestStage(state) {
@@ -1878,6 +1973,29 @@ function resolveActiveTestStage(state) {
     return nextStage;
   }
   return getFirstStageName();
+}
+
+function resolveActiveTestSubset(state, stageName = null) {
+  if (!isSliceDriverMode()) {
+    return null;
+  }
+  const stage = normalizeStageName(stageName) ?? resolveActiveTestStage(state);
+  const configuredSubsets = getStageTestSubsets(stage);
+  if (configuredSubsets.length === 0) {
+    return null;
+  }
+
+  const savedSubset = normalizeTestSubset(state?.activeSubset);
+  if (savedSubset && configuredSubsets.includes(savedSubset)) {
+    return savedSubset;
+  }
+
+  const statusSubset = normalizeTestSubset(state?.lastTestStatus?.targetSubset);
+  if (statusSubset && configuredSubsets.includes(statusSubset)) {
+    return statusSubset;
+  }
+
+  return configuredSubsets[0] ?? null;
 }
 
 function resolveActivePhase(state) {
@@ -1917,6 +2035,39 @@ function getNextStageAfterCompletedPhase(testStatus) {
   return getNextStageName(completedStage);
 }
 
+function getNextTargetAfterCompletedPhase(state, testStatus) {
+  if (!isSliceDriverMode()) {
+    const nextStage = getNextStageAfterCompletedPhase(testStatus);
+    return nextStage ? { stage: nextStage, subset: null } : null;
+  }
+
+  const completedStage =
+    normalizeStageName(testStatus?.targetStage) ??
+    normalizeStageName(state?.activeStage) ??
+    normalizeStageName(testStatus?.passingThrough);
+  if (!completedStage || testStatus?.exitCode !== 0) {
+    return null;
+  }
+
+  const completedSubset =
+    normalizeTestSubset(testStatus?.targetSubset) ??
+    normalizeTestSubset(state?.activeSubset) ??
+    resolveActiveTestSubset(state, completedStage);
+  const nextSubset = getNextTestSubsetName(completedStage, completedSubset);
+  if (nextSubset) {
+    return { stage: completedStage, subset: nextSubset };
+  }
+
+  const nextStage = getNextStageName(completedStage);
+  if (!nextStage) {
+    return null;
+  }
+  return {
+    stage: nextStage,
+    subset: getFirstTestSubsetName(nextStage),
+  };
+}
+
 function getStateActiveStageAfterTest(testStatus) {
   if (!testStatus?.usesStageTemplate) {
     return null;
@@ -1925,6 +2076,21 @@ function getStateActiveStageAfterTest(testStatus) {
     normalizeStageName(testStatus.targetStage) ??
     normalizeStageName(testStatus.failingStage) ??
     getNextStageName(testStatus.passingThrough)
+  );
+}
+
+function getStateActiveSubsetAfterTest(testStatus, state = null) {
+  if (!isSliceDriverMode()) {
+    return null;
+  }
+  const stage =
+    getStateActiveStageAfterTest(testStatus) ??
+    normalizeStageName(state?.activeStage) ??
+    resolveActiveTestStage(state ?? {});
+  return (
+    normalizeTestSubset(testStatus?.targetSubset) ??
+    normalizeTestSubset(state?.activeSubset) ??
+    resolveActiveTestSubset(state ?? {}, stage)
   );
 }
 
@@ -1951,8 +2117,64 @@ function getNextStageName(stageName) {
     : null;
 }
 
+function getStageTestSubsets(stageName) {
+  const stage = normalizeStageName(stageName);
+  if (!stage) {
+    return [];
+  }
+  return CONFIG.testSubsets?.stages?.[stage] ?? CONFIG.testSubsets?.default ?? [];
+}
+
+function getFirstTestSubsetName(stageName) {
+  return isSliceDriverMode() ? getStageTestSubsets(stageName)[0] ?? null : null;
+}
+
+function getNextTestSubsetName(stageName, subsetName) {
+  const subsets = getStageTestSubsets(stageName);
+  if (subsets.length === 0) {
+    return null;
+  }
+  const subset = normalizeTestSubset(subsetName);
+  const index = subset ? subsets.indexOf(subset) : -1;
+  return index >= 0 && index + 1 < subsets.length
+    ? subsets[index + 1]
+    : null;
+}
+
 function normalizeStageName(stageName) {
   return typeof stageName === "string" && /^pa\d+$/.test(stageName) ? stageName : null;
+}
+
+function normalizeTestSubset(subsetName) {
+  if (subsetName == null) {
+    return null;
+  }
+  const text = String(subsetName).trim();
+  if (!text) {
+    return null;
+  }
+  if (/[\r\n\0]/.test(text)) {
+    throw new Error(`Config test subset must not contain newline or NUL characters: ${JSON.stringify(text)}`);
+  }
+  return text;
+}
+
+function isSliceDriverMode() {
+  return CONFIG?.driverMode === "slice";
+}
+
+function formatSubsetLabel(subsetName) {
+  const subset = normalizeTestSubset(subsetName);
+  if (!subset) {
+    return "full-stage";
+  }
+  return subset.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "subset";
+}
+
+function formatTargetLabel(stageName, subsetName = null) {
+  const stage = normalizeStageName(stageName) ?? "unknown-stage";
+  const subset = normalizeTestSubset(subsetName);
+  return subset ? `${stage} ${subset}` : `${stage} full-stage`;
 }
 
 function truncateGoalObjective(objective) {
@@ -2738,6 +2960,9 @@ async function loadConfig() {
   const checks = normalizeCheckConfig(fileConfig.checks, configuredTestCommand);
   const phases = normalizePhaseConfig(fileConfig.phases, checks);
   const primaryCheck = checks.find((check) => check.primary) ?? checks[0];
+  const driverMode = normalizeDriverMode(
+    process.env.RALPH_DRIVER_MODE ?? fileConfig.driverMode ?? DEFAULT_CONFIG.driverMode,
+  );
   const antigravityScriptPath = path.resolve(
     process.cwd(),
     process.env.RALPH_ANTIGRAVITY_SCRIPT_PATH ??
@@ -2747,6 +2972,7 @@ async function loadConfig() {
 
   return {
     provider,
+    driverMode,
     baseDir,
     name,
     runName,
@@ -2756,6 +2982,9 @@ async function loadConfig() {
     testCommand: primaryCheck?.command ?? configuredTestCommand,
     checks,
     phases,
+    testSubsets: normalizeTestSubsets(fileConfig.testSubsets),
+    initialStage: normalizeStageName(process.env.RALPH_INITIAL_STAGE ?? fileConfig.initialStage),
+    initialSubset: normalizeTestSubset(process.env.RALPH_INITIAL_SUBSET ?? fileConfig.initialSubset),
     maxTurns: parsePositiveInt(
       process.env.RALPH_MAX_TURNS ?? fileConfig.maxTurns,
       DEFAULT_CONFIG.maxTurns,
@@ -3402,6 +3631,7 @@ async function loadState() {
           ? parsed.lastTestStatus
           : null,
       activeStage: normalizeStageName(parsed.activeStage),
+      activeSubset: normalizeTestSubset(parsed.activeSubset),
       activePhase: typeof parsed.activePhase === "string" ? parsed.activePhase : null,
       phaseAttempted: parsed.phaseAttempted === true,
     };
@@ -3413,7 +3643,8 @@ async function loadState() {
         turnsCompleted: 0,
         lastExitCode: null,
         lastTestStatus: null,
-        activeStage: null,
+        activeStage: CONFIG.initialStage,
+        activeSubset: CONFIG.initialSubset,
         activePhase: null,
         phaseAttempted: false,
       };
@@ -3648,6 +3879,54 @@ function sanitizeOptionalTemplateName(value) {
     return null;
   }
   return sanitizeIdentifier(value, "template name");
+}
+
+function normalizeDriverMode(value) {
+  const mode = String(value ?? "").trim().toLowerCase();
+  if (mode === "standard" || mode === "slice") {
+    return mode;
+  }
+  throw new Error("Config driverMode must be `standard` or `slice`");
+}
+
+function normalizeTestSubsets(value) {
+  const empty = { default: [], stages: {} };
+  if (value == null || value === "") {
+    return empty;
+  }
+  if (Array.isArray(value)) {
+    return {
+      default: normalizeTestSubsetList(value, "default testSubsets"),
+      stages: {},
+    };
+  }
+  if (typeof value !== "object") {
+    throw new Error("Config testSubsets must be an array or object");
+  }
+
+  const normalized = { default: [], stages: {} };
+  for (const [key, rawList] of Object.entries(value)) {
+    const list = normalizeTestSubsetList(rawList, `testSubsets.${key}`);
+    if (key === "default" || key === "*") {
+      normalized.default = list;
+      continue;
+    }
+    const stage = normalizeStageName(key);
+    if (!stage) {
+      throw new Error(`Config testSubsets stage key must be a pa stage or default: ${key}`);
+    }
+    normalized.stages[stage] = list;
+  }
+  return normalized;
+}
+
+function normalizeTestSubsetList(value, label) {
+  if (!Array.isArray(value)) {
+    throw new Error(`Config ${label} must be an array`);
+  }
+  return value
+    .map((entry) => normalizeTestSubset(entry))
+    .filter(Boolean);
 }
 
 function normalizeProvider(value) {

@@ -40,6 +40,14 @@ can use its own prompt and goal sidecars, for example
 `goals-2026-05-14.implement.md`, `goals-2026-05-14.implement-goal.md`,
 `goals-2026-05-14.audit.md`, and `goals-2026-05-14.audit-goal.md`.
 
+For highly constrained models, Ralph can run in `slice` driver mode. Slice mode
+keeps the normal phase/check system but adds a current test subset alongside the
+current PA stage. Prompt and check templates can use `{{testSubset}}`,
+`{{testSubsetShell}}`, `{{testSubsetStage}}`, `{{testSubsetStageShell}}`,
+`{{testSubsetLabel}}`, and `{{targetLabel}}`. After the final phase for one
+subset passes, Ralph advances to the next configured subset for that stage
+before moving to the next PA.
+
 ## Usage
 
 ```bash
@@ -173,6 +181,16 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
   the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
   turn even when checks already pass, which is useful for audit/cleanup phases.
+- `driverMode`
+  Default: `standard`. Set to `slice` for small-model runs that should work one
+  configured test subset at a time.
+- `testSubsets`
+  Optional array or object used only by `slice` mode. An array applies to every
+  stage. An object can define `default` and/or per-stage arrays such as
+  `"pa22": ["tests/general/100-*.t", "tests/spec/100-*.t"]`.
+- `initialStage`, `initialSubset`
+  Optional starting target for a new run, useful for slice experiments that
+  should begin at a later PA such as `pa22`.
 - `maxTurns`
   Default: `1000`
 - `webSearchEnabled`
