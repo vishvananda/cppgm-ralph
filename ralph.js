@@ -72,6 +72,8 @@ const DEFAULT_CONFIG = {
   antigravityRequestDelayMs: 0,
   loopGoalsEnabled: true,
   goalTokenBudget: null,
+  freshThreadPerTurn: false,
+  eventLogScope: "thread",
   useExistingWorkdir: false,
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
@@ -135,6 +137,7 @@ async function main() {
       `driver=${CONFIG.driverMode} ` +
       `workdir=${CONFIG.workdir} branch=${CONFIG.runName} ` +
       `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
+      `freshThreadPerTurn=${CONFIG.freshThreadPerTurn ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
   );
   const threadOptions = {
@@ -152,14 +155,14 @@ async function main() {
       : {}),
   };
 
-  let activeThreadId = process.env.RALPH_THREAD_ID ?? state.threadId ?? null;
+  const configuredThreadId = process.env.RALPH_THREAD_ID ?? null;
+  let activeThreadId = configuredThreadId ?? state.threadId ?? null;
   let backend = null;
   let thread = null;
   const providerLabel = formatProviderLabel(CONFIG.provider);
 
   let turnNumber = state.turnsCompleted;
   while (turnNumber < CONFIG.maxTurns) {
-    const hadExistingThread = Boolean(activeThreadId);
     const phase = resolveActivePhase(state);
     const phaseStatus = await runPhaseChecks(state, phase);
     const testStatus = phaseStatus.testStatus;
@@ -288,6 +291,15 @@ async function main() {
     }
 
     PROMPT_PARTIALS = await loadPromptPartials();
+    const freshThreadForTurn = CONFIG.freshThreadPerTurn && !configuredThreadId;
+    if (freshThreadForTurn) {
+      if (activeThreadId) {
+        log(`Starting a fresh ${providerLabel} thread for this turn; previous thread was ${activeThreadId}`);
+      }
+      activeThreadId = null;
+      thread = null;
+    }
+    const hadExistingThread = Boolean(activeThreadId);
     const prompt =
       cleanupOnlyTurn
         ? buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber + 1, phase, phaseStatus)
@@ -3143,6 +3155,13 @@ async function loadConfig() {
       process.env.RALPH_GOAL_TOKEN_BUDGET ?? fileConfig.goalTokenBudget,
       DEFAULT_CONFIG.goalTokenBudget,
     ),
+    freshThreadPerTurn: parseBoolean(
+      process.env.RALPH_FRESH_THREAD_PER_TURN ?? fileConfig.freshThreadPerTurn,
+      DEFAULT_CONFIG.freshThreadPerTurn,
+    ),
+    eventLogScope: normalizeEventLogScope(
+      process.env.RALPH_EVENT_LOG_SCOPE ?? fileConfig.eventLogScope ?? DEFAULT_CONFIG.eventLogScope,
+    ),
     useExistingWorkdir: parseBoolean(
       process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
       DEFAULT_CONFIG.useExistingWorkdir,
@@ -3590,6 +3609,9 @@ function getEventThreadId(event) {
 }
 
 function buildEventLogPath(threadId) {
+  if (CONFIG?.eventLogScope === "run") {
+    return path.join(EVENTS_DIR_PATH, "run.jsonl");
+  }
   if (!threadId) {
     return null;
   }
@@ -3611,11 +3633,15 @@ async function appendJsonLine(filePath, record) {
 }
 
 async function appendRalphEventRecord(record) {
-  if (!record?.threadId) {
+  if (!record) {
     return;
   }
 
-  await appendJsonLine(buildEventLogPath(record.threadId), record);
+  const eventLogPath = buildEventLogPath(record.threadId);
+  if (!eventLogPath) {
+    return;
+  }
+  await appendJsonLine(eventLogPath, record);
 }
 
 async function loadStageCountHints(state) {
@@ -4112,6 +4138,14 @@ function normalizeProvider(value) {
     return provider;
   }
   throw new Error("Config provider must be `codex` or `antigravity`");
+}
+
+function normalizeEventLogScope(value) {
+  const scope = String(value ?? "").trim().toLowerCase();
+  if (scope === "thread" || scope === "run") {
+    return scope;
+  }
+  throw new Error("Config eventLogScope must be `thread` or `run`");
 }
 
 function resolveOptionalPath(value) {

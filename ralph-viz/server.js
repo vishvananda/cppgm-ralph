@@ -1028,10 +1028,16 @@ async function currentRunId() {
       try {
         const raw = await fs.readFile(statePath, "utf8");
         const parsed = JSON.parse(raw);
-        if (typeof parsed.threadId === "string") {
+        const eventLogPath = typeof parsed.eventLogPath === "string" ? parsed.eventLogPath : null;
+        const fileBase = eventLogPath && eventLogPath.endsWith(".jsonl")
+          ? path.basename(eventLogPath, ".jsonl")
+          : typeof parsed.threadId === "string"
+            ? parsed.threadId
+            : null;
+        if (fileBase) {
           const stat = await fs.stat(statePath);
           candidates.push({
-            id: `${dir.name}/${parsed.threadId}`,
+            id: `${dir.name}/${fileBase}`,
             mtimeMs: stat.mtimeMs,
           });
         }
