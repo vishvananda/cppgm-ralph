@@ -614,10 +614,13 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
     subset: activeSubset ?? "",
     testSubsetShell: shellEscape(activeSubset ?? ""),
     subsetShell: shellEscape(activeSubset ?? ""),
+    testSubsetOrFull: activeSubset ?? "full-stage",
+    testSubsetOrFullShell: shellEscape(activeSubset ?? "full-stage"),
     testSubsetStage: activeStage && activeSubset ? `${activeStage}/${activeSubset}` : "",
     testSubsetStageShell: shellEscape(activeStage && activeSubset ? `${activeStage}/${activeSubset}` : ""),
     testSubsetLabel: formatSubsetLabel(activeSubset),
     targetLabel: formatTargetLabel(activeStage, activeSubset),
+    targetLabelShell: shellEscape(formatTargetLabel(activeStage, activeSubset)),
     turnNumber: turnNumber == null ? "" : String(turnNumber),
     exitCode: String(testStatus?.exitCode ?? ""),
     failingStage: testStatus?.failingStage ?? "",
@@ -1918,8 +1921,8 @@ function hasTestCommandStagePlaceholder(command) {
 }
 
 function hasTestCommandSubsetPlaceholder(command) {
-  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel)\s*\}\}/.test(command) ||
-    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel)\}/.test(command);
+  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel|targetLabelShell)\s*\}\}/.test(command) ||
+    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetLabel|targetLabel|targetLabelShell)\}/.test(command);
 }
 
 function renderTestCommandTemplate(command, stageName, subset = null) {
@@ -1932,27 +1935,36 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
   const stageNumberText = normalizedStage?.slice(2) ?? "";
   const subsetText = normalizedSubset ?? "";
   const subsetShellText = shellEscape(subsetText);
+  const subsetOrFullText = normalizedSubset ?? "full-stage";
+  const subsetOrFullShellText = shellEscape(subsetOrFullText);
   const subsetStageText = normalizedStage && normalizedSubset ? `${normalizedStage}/${normalizedSubset}` : "";
   const subsetStageShellText = shellEscape(subsetStageText);
   const subsetLabel = formatSubsetLabel(normalizedSubset);
   const targetLabel = formatTargetLabel(normalizedStage, normalizedSubset);
+  const targetLabelShellText = shellEscape(targetLabel);
   return command
     .replace(/\bpaX\b/g, normalizedStage ?? "")
     .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage ?? "")
     .replace(/\{\{\s*stageNumber\s*\}\}/g, stageNumberText)
     .replace(/\{\{\s*(?:subset|testSubset)\s*\}\}/g, subsetText)
     .replace(/\{\{\s*(?:subsetShell|testSubsetShell)\s*\}\}/g, subsetShellText)
+    .replace(/\{\{\s*testSubsetOrFull\s*\}\}/g, subsetOrFullText)
+    .replace(/\{\{\s*testSubsetOrFullShell\s*\}\}/g, subsetOrFullShellText)
     .replace(/\{\{\s*testSubsetStage\s*\}\}/g, subsetStageText)
     .replace(/\{\{\s*testSubsetStageShell\s*\}\}/g, subsetStageShellText)
     .replace(/\{\{\s*testSubsetLabel\s*\}\}/g, subsetLabel)
     .replace(/\{\{\s*targetLabel\s*\}\}/g, targetLabel)
+    .replace(/\{\{\s*targetLabelShell\s*\}\}/g, targetLabelShellText)
     .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage ?? "")
     .replace(/\{(?:subset|testSubset)\}/g, subsetText)
     .replace(/\{(?:subsetShell|testSubsetShell)\}/g, subsetShellText)
+    .replace(/\{testSubsetOrFull\}/g, subsetOrFullText)
+    .replace(/\{testSubsetOrFullShell\}/g, subsetOrFullShellText)
     .replace(/\{testSubsetStage\}/g, subsetStageText)
     .replace(/\{testSubsetStageShell\}/g, subsetStageShellText)
     .replace(/\{testSubsetLabel\}/g, subsetLabel)
-    .replace(/\{targetLabel\}/g, targetLabel);
+    .replace(/\{targetLabel\}/g, targetLabel)
+    .replace(/\{targetLabelShell\}/g, targetLabelShellText);
 }
 
 function resolveActiveTestStage(state) {

@@ -43,8 +43,9 @@ can use its own prompt and goal sidecars, for example
 For highly constrained models, Ralph can run in `slice` driver mode. Slice mode
 keeps the normal phase/check system but adds a current test subset alongside the
 current PA stage. Prompt and check templates can use `{{testSubset}}`,
-`{{testSubsetShell}}`, `{{testSubsetStage}}`, `{{testSubsetStageShell}}`,
-`{{testSubsetLabel}}`, and `{{targetLabel}}`. After the final phase for one
+`{{testSubsetShell}}`, `{{testSubsetOrFull}}`, `{{testSubsetOrFullShell}}`,
+`{{testSubsetStage}}`, `{{testSubsetStageShell}}`, `{{testSubsetLabel}}`,
+`{{targetLabel}}`, and `{{targetLabelShell}}`. After the final phase for one
 subset passes, Ralph advances to the next configured subset for that stage
 before moving to the next PA.
 
