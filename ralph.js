@@ -1294,7 +1294,12 @@ function formatPhaseChecksForTemplate(phase, stage, subset = null) {
       const check = getCheckByName(name);
       const required = check.required ? "required" : "optional";
       const primary = check.primary ? ", primary" : "";
-      return `- ${check.name}: \`${buildCheckCommandForStage(check, stage, subset)}\` (${required}${primary})`;
+      const command = buildCheckCommandForStage(check, stage, subset);
+      const internalCheck = parseInternalCheckCommand(command);
+      if (internalCheck === "prior-stage-subsets") {
+        return `- ${check.name}: Ralph internal prior same-stage subset gate (${required}${primary}; not a shell command)`;
+      }
+      return `- ${check.name}: \`${command}\` (${required}${primary})`;
     })
     .join("\n");
 }
