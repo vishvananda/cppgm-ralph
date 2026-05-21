@@ -606,6 +606,7 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
   const continueObjectiveLines = buildContinueObjectiveLines(testStatus, phase, phaseStatus);
   const failureSummaryLines = buildFailureSummaryLines(testStatus, phaseStatus);
   const goalTaskLines = buildLoopGoalTaskLines({ testStatus, gitStatus, phase, phaseStatus });
+  const priorStageSubsets = getPriorTestSubsetNames(activeStage, activeSubset);
   const currentStateLines = buildCurrentStateLines({
     testStatus,
     gitStatus,
@@ -648,6 +649,8 @@ function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase 
       ? `GLOB=${shellEscape(`${activeStage}/${activeSubset}`)}`
       : "",
     testSubsetLabel: formatSubsetLabel(activeSubset),
+    priorStageSubsetsCount: String(priorStageSubsets.length),
+    priorStageSubsetsTestCommand: buildPriorStageSubsetsCheckCommand(activeStage, activeSubset),
     targetLabel: formatTargetLabel(activeStage, activeSubset),
     targetLabelShell: shellEscape(formatTargetLabel(activeStage, activeSubset)),
     turnNumber: turnNumber == null ? "" : String(turnNumber),
@@ -1485,7 +1488,9 @@ async function runPhaseChecks(state, phase) {
   for (const check of checks) {
     const context = buildCheckCommandContext(check, stage, subset);
     log(`Running ${phase.name} check ${check.name}: ${context.command}`);
-    const run = await runCommand(context.command, CONFIG.workdir);
+    const run = context.internalCheck
+      ? await runInternalCheck(context)
+      : await runCommand(context.command, CONFIG.workdir);
     const outputPath = await writeCheckLog(check.name, run.output);
     const result = {
       name: check.name,
@@ -1949,12 +1954,14 @@ function buildCheckCommandContext(check, activeStage, activeSubset = null) {
   const usesSubsetTemplate = hasTestCommandSubsetPlaceholder(check.command);
   const stage = usesStageTemplate ? normalizeStageName(activeStage) : null;
   const subset = usesSubsetTemplate ? normalizeTestSubset(activeSubset) : null;
+  const command = usesStageTemplate || usesSubsetTemplate
+    ? renderTestCommandTemplate(check.command, stage, subset)
+    : check.command;
   return {
     checkName: check.name,
     template: check.command,
-    command: usesStageTemplate || usesSubsetTemplate
-      ? renderTestCommandTemplate(check.command, stage, subset)
-      : check.command,
+    command,
+    internalCheck: parseInternalCheckCommand(command),
     stage,
     subset,
     usesStageTemplate,
@@ -1978,12 +1985,14 @@ function hasTestCommandStagePlaceholder(command) {
   return /\bpaX\b/.test(command) ||
     /\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/.test(command) ||
     /\{\{\s*stageNumber\s*\}\}/.test(command) ||
-    /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command);
+    /\{\{\s*priorStageSubsetsTestCommand\s*\}\}/.test(command) ||
+    /\{(?:stage|pa|paStage|testStage|failingStage)\}/.test(command) ||
+    /\{priorStageSubsetsTestCommand\}/.test(command);
 }
 
 function hasTestCommandSubsetPlaceholder(command) {
-  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell)\s*\}\}/.test(command) ||
-    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell)\}/.test(command);
+  return /\{\{\s*(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell|priorStageSubsetsTestCommand|priorStageSubsetsCount)\s*\}\}/.test(command) ||
+    /\{(?:subset|testSubset|testSubsetShell|subsetShell|testSubsetOrFull|testSubsetOrFullShell|testSubsetStage|testSubsetStageShell|testSubsetStageMakeArg|testSubsetLabel|targetLabel|targetLabelShell|priorStageSubsetsTestCommand|priorStageSubsetsCount)\}/.test(command);
 }
 
 function renderTestCommandTemplate(command, stageName, subset = null) {
@@ -2004,6 +2013,9 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
   const subsetLabel = formatSubsetLabel(normalizedSubset);
   const targetLabel = formatTargetLabel(normalizedStage, normalizedSubset);
   const targetLabelShellText = shellEscape(targetLabel);
+  const priorStageSubsets = getPriorTestSubsetNames(normalizedStage, normalizedSubset);
+  const priorStageSubsetsCountText = String(priorStageSubsets.length);
+  const priorStageSubsetsTestCommandText = buildPriorStageSubsetsCheckCommand(normalizedStage, normalizedSubset);
   return command
     .replace(/\bpaX\b/g, normalizedStage ?? "")
     .replace(/\{\{\s*(?:stage|pa|paStage|testStage|failingStage)\s*\}\}/g, normalizedStage ?? "")
@@ -2018,6 +2030,8 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
     .replace(/\{\{\s*testSubsetLabel\s*\}\}/g, subsetLabel)
     .replace(/\{\{\s*targetLabel\s*\}\}/g, targetLabel)
     .replace(/\{\{\s*targetLabelShell\s*\}\}/g, targetLabelShellText)
+    .replace(/\{\{\s*priorStageSubsetsTestCommand\s*\}\}/g, priorStageSubsetsTestCommandText)
+    .replace(/\{\{\s*priorStageSubsetsCount\s*\}\}/g, priorStageSubsetsCountText)
     .replace(/\{(?:stage|pa|paStage|testStage|failingStage)\}/g, normalizedStage ?? "")
     .replace(/\{(?:subset|testSubset)\}/g, subsetText)
     .replace(/\{(?:subsetShell|testSubsetShell)\}/g, subsetShellText)
@@ -2028,7 +2042,69 @@ function renderTestCommandTemplate(command, stageName, subset = null) {
     .replace(/\{testSubsetStageMakeArg\}/g, subsetStageMakeArgText)
     .replace(/\{testSubsetLabel\}/g, subsetLabel)
     .replace(/\{targetLabel\}/g, targetLabel)
-    .replace(/\{targetLabelShell\}/g, targetLabelShellText);
+    .replace(/\{targetLabelShell\}/g, targetLabelShellText)
+    .replace(/\{priorStageSubsetsTestCommand\}/g, priorStageSubsetsTestCommandText)
+    .replace(/\{priorStageSubsetsCount\}/g, priorStageSubsetsCountText);
+}
+
+function parseInternalCheckCommand(command) {
+  if (typeof command !== "string") {
+    return null;
+  }
+  if (command.startsWith("ralph:prior-stage-subsets")) {
+    return "prior-stage-subsets";
+  }
+  return null;
+}
+
+async function runInternalCheck(context) {
+  if (context.internalCheck === "prior-stage-subsets") {
+    return runPriorStageSubsetsCheck(context);
+  }
+  throw new Error(`Unknown internal check ${context.internalCheck}`);
+}
+
+async function runPriorStageSubsetsCheck(context) {
+  const stage = normalizeStageName(context.stage);
+  const subset = normalizeTestSubset(context.subset);
+  const priorSubsets = getPriorTestSubsetNames(stage, subset);
+  if (!stage || !subset || priorSubsets.length === 0) {
+    return {
+      exitCode: 0,
+      output: [
+        `No prior stage subsets to check before ${formatTargetLabel(stage, subset)}.`,
+        "===== ALL TESTS PASSED SUCCESSFULLY! =====",
+      ].join("\n"),
+    };
+  }
+
+  const outputs = [
+    `Ralph prior stage subset check for ${formatTargetLabel(stage, subset)}.`,
+  ];
+  for (const priorSubset of priorSubsets) {
+    const command = `make test-report ACTIVE_TEST_REPORT_PAS=${shellEscape(stage)} GLOB=${shellEscape(`${stage}/${priorSubset}`)}`;
+    outputs.push("", `===== Ralph prior subset ${stage}/${priorSubset} =====`, `$ ${command}`);
+    const run = await runCommand(command, CONFIG.workdir);
+    outputs.push(sanitizePriorSubsetOutput(run.output));
+    if (run.exitCode !== 0) {
+      return {
+        exitCode: run.exitCode,
+        output: outputs.join("\n").trim(),
+      };
+    }
+  }
+
+  outputs.push("", "===== ALL TESTS PASSED SUCCESSFULLY! =====");
+  return {
+    exitCode: 0,
+    output: outputs.join("\n").trim(),
+  };
+}
+
+function sanitizePriorSubsetOutput(output) {
+  return String(output ?? "")
+    .replace(/^===== ALL TESTS PASSED SUCCESSFULLY!(?: \([^)]+\))? =====$/gm, "===== PRIOR SUBSET TESTS PASSED =====")
+    .trim();
 }
 
 function resolveActiveTestStage(state) {
@@ -2245,6 +2321,24 @@ function getNextTestSubsetName(stageName, subsetName) {
   return index >= 0 && index + 1 < subsets.length
     ? subsets[index + 1]
     : null;
+}
+
+function getPriorTestSubsetNames(stageName, subsetName) {
+  const subsets = getStageTestSubsets(stageName);
+  if (subsets.length === 0) {
+    return [];
+  }
+  const subset = normalizeTestSubset(subsetName);
+  const index = subset ? subsets.indexOf(subset) : -1;
+  return index > 0 ? subsets.slice(0, index) : [];
+}
+
+function buildPriorStageSubsetsCheckCommand(stageName, subsetName) {
+  const stage = normalizeStageName(stageName);
+  const subset = normalizeTestSubset(subsetName);
+  return stage && subset
+    ? `ralph:prior-stage-subsets ${stage} ${shellEscape(subset)}`
+    : "ralph:prior-stage-subsets";
 }
 
 function normalizeStageName(stageName) {
