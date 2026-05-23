@@ -7,7 +7,8 @@
     "start": "node ralph.js",
     "ralph": "node ralph.js",
     "ralph-viz": "node ralph-viz/server.js",
-    "fork-run": "node scripts/fork-run.js"
+    "fork-run": "node scripts/fork-run.js",
+    "compare-pa-costs": "node scripts/compare-pa-costs.js"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.116.0"

@@ -19,21 +19,31 @@
         <button id="refreshRuns">Refresh</button>
         <button id="reloadRun">Reload</button>
         <div class="toolbar-sep"></div>
+        <label for="codexDetail">Detail</label>
+        <select id="codexDetail">
+          <option value="tail:2" selected>Last 2 turns</option>
+          <option value="tail:5">Last 5 turns</option>
+          <option value="open">Open turns</option>
+          <option value="none">Ralph only</option>
+          <option value="all">All Codex (slow)</option>
+        </select>
+        <div class="toolbar-sep"></div>
         <input id="eventFilter" placeholder="filter events..." style="width:140px" />
         <span id="eventCount" class="muted" style="font-size:0.75rem"></span>
         <div class="toolbar-sep"></div>
-        <label class="toggle-label"><input type="checkbox" id="hideNoise" checked /> Hide noise</label>
-        <label class="toggle-label"><input type="checkbox" id="autoRefresh" checked /> Auto-refresh</label>
-        <label class="toggle-label"><input type="checkbox" id="fullView" /> Full view</label>
+        <label class="toggle-label hide-noise-toggle"><input type="checkbox" id="hideNoise" checked /> Hide noise</label>
+        <label class="toggle-label auto-refresh-toggle"><input type="checkbox" id="autoRefresh" checked /> Auto-refresh</label>
+        <label class="toggle-label combined-view-toggle"><input type="checkbox" id="combinedView" checked /> Combined</label>
+        <label class="toggle-label full-view-toggle"><input type="checkbox" id="fullView" /> Full view</label>
       </section>
 
-      <section class="card">
-        <h2>Summary</h2>
+      <section class="card summary-card">
+        <h2 id="summaryTitle">Summary</h2>
         <div id="summary" class="summary"></div>
       </section>
 
-      <section class="card">
-        <h2>Turns</h2>
+      <section class="card timeline-card">
+        <h2 id="timelineTitle">Turns</h2>
         <div id="timeline" class="timeline"></div>
       </section>
     </main>

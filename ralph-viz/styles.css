@@ -7,6 +7,7 @@
   --ok: #4c4;
   --bad: #e55;
   --dim: #666;
+  --progress-dock-space: 3.5rem;
 }
 
 * { box-sizing: border-box; margin: 0; }
@@ -21,7 +22,7 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
-  padding-bottom: 3.1rem;
+  padding-bottom: calc(var(--progress-dock-space) + env(safe-area-inset-bottom));
   overflow-anchor: none;
 }
 
@@ -137,6 +138,58 @@ button:hover { background: #252525; }
   overflow-anchor: none;
 }
 
+.combined-run {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.35rem 0 0.55rem;
+  border-bottom: 1px solid #222;
+}
+
+.combined-run-header {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.combined-run-title {
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.combined-run-title:hover {
+  color: #ffd071;
+  text-decoration: underline;
+}
+
+.combined-run-details {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.combined-run-meta {
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.combined-run-feed {
+  display: grid;
+  gap: 1px;
+  padding-left: 0.75rem;
+  border-left: 2px solid #252525;
+}
+
+.combined-empty,
+.combined-run-empty {
+  padding: 0.35rem 0;
+  font-size: 0.8rem;
+}
+
 .accordion-body[hidden] { display: none !important; }
 
 .accordion-header {
@@ -195,7 +248,9 @@ button:hover { background: #252525; }
 }
 
 @media (max-width: 800px) {
-  body { padding-bottom: 6.25rem; }
+  body {
+    padding-bottom: calc(var(--progress-dock-space) + env(safe-area-inset-bottom));
+  }
 
   .page {
     padding: 0.6rem 0.7rem;
@@ -259,11 +314,25 @@ button:hover { background: #252525; }
     margin-left: 0;
   }
 
+  .combined-run-details {
+    align-items: flex-start;
+  }
+
+  .combined-run-meta {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
   .dock-turn,
   .dock-usage,
   .dock-phase,
   .dock-main,
-  .dock-tests {
+  .dock-tests,
+  .combined-run-details .dock-turn,
+  .combined-run-details .dock-usage,
+  .combined-run-details .dock-phase,
+  .combined-run-details .dock-main,
+  .combined-run-details .dock-tests {
     flex-basis: 100%;
     min-width: 0;
     overflow-wrap: anywhere;
@@ -292,6 +361,158 @@ button:hover { background: #252525; }
     text-align: left;
     overflow-wrap: anywhere;
     white-space: normal;
+  }
+
+  body.is-combined-view {
+    font-size: 12px;
+  }
+
+  body.is-combined-view .page {
+    padding: 0.35rem 0.45rem;
+    gap: 0.25rem;
+  }
+
+  body.is-combined-view header,
+  body.is-combined-view .summary-card {
+    display: none;
+  }
+
+  body.is-combined-view .toolbar {
+    gap: 0.25rem;
+  }
+
+  body.is-combined-view .toolbar label[for="runSelect"],
+  body.is-combined-view #runSelect,
+  body.is-combined-view #refreshRuns,
+  body.is-combined-view #reloadRun,
+  body.is-combined-view .toolbar label[for="codexDetail"],
+  body.is-combined-view #codexDetail,
+  body.is-combined-view #eventFilter,
+  body.is-combined-view #eventCount,
+  body.is-combined-view .full-view-toggle {
+    display: none;
+  }
+
+  body.is-combined-view .card {
+    margin-bottom: 0;
+  }
+
+  body.is-combined-view .card h2 {
+    display: none;
+  }
+
+  body.is-combined-view .timeline {
+    gap: 0.18rem;
+  }
+
+  body.is-combined-view .combined-run {
+    gap: 0.08rem;
+    padding: 0.12rem 0 0.22rem;
+  }
+
+  body.is-combined-view .combined-run-header {
+    gap: 0.08rem;
+  }
+
+  body.is-combined-view .combined-run-title {
+    font-size: 0.76rem;
+    line-height: 1.1;
+  }
+
+  body.is-combined-view .combined-run-details {
+    gap: 0.08rem 0.45rem;
+    font-size: 0.64rem;
+    line-height: 1.15;
+  }
+
+  body.is-combined-view .combined-run-meta {
+    flex-basis: auto;
+    margin-left: 0;
+  }
+
+  body.is-combined-view .combined-run-feed {
+    gap: 0;
+    padding-left: 0.45rem;
+    border-left-width: 1px;
+  }
+
+  body.is-combined-view .combined-run-details .dock-turn,
+  body.is-combined-view .combined-run-details .dock-usage,
+  body.is-combined-view .combined-run-details .dock-phase,
+  body.is-combined-view .combined-run-details .dock-main,
+  body.is-combined-view .combined-run-details .dock-tests {
+    flex: 0 1 auto;
+    line-height: 1.15;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  body.is-combined-view .ev {
+    font-size: 0.66rem;
+  }
+
+  body.is-combined-view .ev-cmd > .accordion-header,
+  body.is-combined-view .ev-file > .accordion-header,
+  body.is-combined-view .ev-todo > .accordion-header {
+    gap: 0.25rem;
+    padding: 0.02rem 0;
+  }
+
+  body.is-combined-view .cmd-inline,
+  body.is-combined-view .file-title,
+  body.is-combined-view .phase-check-command {
+    font-size: 0.66rem;
+  }
+
+  body.is-combined-view .pill,
+  body.is-combined-view .ts,
+  body.is-combined-view .cmd-lines {
+    font-size: 0.58rem;
+    padding-block: 0;
+  }
+
+  body.is-combined-view .ev-msg,
+  body.is-combined-view .ev-prompt,
+  body.is-combined-view .ev-goal,
+  body.is-combined-view .ev-phase,
+  body.is-combined-view .ev-thought {
+    margin: 0;
+    padding: 0.03rem 0 0.03rem 0.35rem;
+    border-left-width: 2px;
+  }
+
+  body.is-combined-view .msg-body,
+  body.is-combined-view .prompt-body,
+  body.is-combined-view .goal-body,
+  body.is-combined-view .thought-body {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    font-size: 0.66rem;
+    line-height: 1.15;
+    white-space: normal;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  body.is-combined-view .prompt-label,
+  body.is-combined-view .goal-label,
+  body.is-combined-view .phase-label,
+  body.is-combined-view .thought-subject {
+    display: inline;
+    font-size: 0.56rem;
+    margin: 0 0.25rem 0 0;
+  }
+
+  body.is-combined-view .phase-checks {
+    display: none;
+  }
+
+  body.is-combined-view .progress-dock {
+    display: none;
   }
 
 }

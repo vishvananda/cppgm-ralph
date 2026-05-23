@@ -1,6 +1,9 @@
 const runSelect = document.getElementById("runSelect");
 const refreshRuns = document.getElementById("refreshRuns");
 const reloadRun = document.getElementById("reloadRun");
+const codexDetail = document.getElementById("codexDetail");
+const summaryTitle = document.getElementById("summaryTitle");
+const timelineTitle = document.getElementById("timelineTitle");
 const summaryEl = document.getElementById("summary");
 const timelineEl = document.getElementById("timeline");
 const progressDock = document.getElementById("progressDock");
@@ -8,16 +11,20 @@ const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
+const combinedViewToggle = document.getElementById("combinedView");
 const fullViewToggle = document.getElementById("fullView");
 
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
 const COMPACT_TURN_CARD_LIMIT = 50;
+const COMBINED_RUN_CARD_LIMIT = 3;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const SCROLL_JUMP_LOG_PX = 80;
+const MOBILE_SCROLL_REFRESH_PAUSE_MS = AUTO_REFRESH_MS;
 const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
 const SCROLL_DEBUG_DEFAULT = false;
+const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -30,23 +37,31 @@ const state = {
   selectedRun: null,
   currentRun: null,
   shapeUsage: null,
+  codexDetail: null,
   events: [],
+  combinedRuns: [],
   raw: [],
   autoRefreshTimer: null,
+  openTurnReloadTimer: null,
   refreshInFlight: false,
   openEntryKeys: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
+  followLiveTail: false,
   preferScrollTopAfterLayout: false,
+  progressDockSpacePx: 0,
   scrollDebugEnabled: initialScrollDebugEnabled(),
   scrollDebugPageId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   scrollDebugSeq: 0,
   lastObservedScrollTop: null,
   lastUserScrollAt: 0,
+  mobileScrollPauseUntil: 0,
   lastProgrammaticScrollAt: 0,
   lastProgrammaticScrollReason: null,
 };
+
+let progressDockSpaceFrame = 0;
 
 // Noise event types that clutter the view
 const NOISE_TYPES = new Set([
@@ -131,7 +146,7 @@ function truncate(text, max = 120) {
   return text.slice(0, max) + "...";
 }
 
-function buildSummary(events, shapeUsage = null) {
+function buildSummary(events, shapeUsage = null, run = null) {
   const turnSet = new Set();
   for (const r of events) {
     const turn = displayTurnForRecord(r);
@@ -139,7 +154,7 @@ function buildSummary(events, shapeUsage = null) {
   }
   const first = events.at(0)?.recordedAt ?? null;
   const last = events.at(-1)?.recordedAt ?? null;
-  const priceModel = inferPriceModel();
+  const priceModel = inferPriceModel(run);
 
   const typeCounts = new Map();
   for (const r of events) {
@@ -187,14 +202,111 @@ function latestNumericTurn(events) {
 }
 
 function displayTurnForRecord(record) {
+  if (Number.isInteger(record?._displayTurn) && record._displayTurn > 0) {
+    return record._displayTurn;
+  }
   if (Number.isInteger(record.turnNumber) && record.turnNumber > 0) {
     return record.turnNumber;
   }
   return "setup";
 }
 
+function annotateDisplayTurns(records) {
+  const sorted = [...records].sort((a, b) =>
+    String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+  let maxDisplayTurn = 0;
+  let active = null;
+  let lastChecked = null;
+
+  for (const record of sorted) {
+    const sourceTurn = Number.isInteger(record.turnNumber) && record.turnNumber > 0
+      ? record.turnNumber
+      : null;
+    if (!sourceTurn) {
+      record._displayTurn = null;
+      continue;
+    }
+
+    const phaseStatus = record.eventType === "ralph.phase-status"
+      ? record.event?.phaseStatus
+      : null;
+    const action = record.event?.action ?? null;
+
+    if (phaseStatus && action === "turn-start") {
+      const replayedSourceTurn = sourceTurn <= maxDisplayTurn && active?.sourceTurn !== sourceTurn;
+      const displayTurn = replayedSourceTurn ? maxDisplayTurn + 1 : sourceTurn;
+      maxDisplayTurn = Math.max(maxDisplayTurn, displayTurn);
+      active = {
+        sourceTurn,
+        displayTurn,
+        phase: phaseStatus.phase ?? null,
+        stage: phaseStatus.stage ?? null,
+        subset: phaseStatus.subset ?? null,
+      };
+      lastChecked = null;
+      record._displayTurn = displayTurn;
+      continue;
+    }
+
+    if (phaseStatus && action === "checked" && active && phaseStatusMatchesActive(phaseStatus, active)) {
+      record._displayTurn = active.displayTurn;
+      lastChecked = {
+        displayTurn: active.displayTurn,
+        stage: phaseStatus.stage ?? null,
+        subset: phaseStatus.subset ?? null,
+        recordedAt: record.recordedAt ?? null,
+      };
+      continue;
+    }
+
+    if (record.eventType === "ralph.test-status" && lastChecked) {
+      const testStatus = record.event?.testStatus;
+      if (testStatusMatchesCheckedTurn(testStatus, lastChecked, record.recordedAt)) {
+        record._displayTurn = lastChecked.displayTurn;
+        continue;
+      }
+    }
+
+    if (active && sourceTurn === active.sourceTurn) {
+      record._displayTurn = active.displayTurn;
+      continue;
+    }
+
+    record._displayTurn = sourceTurn;
+    maxDisplayTurn = Math.max(maxDisplayTurn, sourceTurn);
+  }
+
+  return records;
+}
+
+function phaseStatusMatchesActive(phaseStatus, active) {
+  return (
+    phaseStatus?.phase === active.phase &&
+    phaseStatus?.stage === active.stage &&
+    normalizeOptionalText(phaseStatus?.subset) === normalizeOptionalText(active.subset)
+  );
+}
+
+function testStatusMatchesCheckedTurn(testStatus, checked, recordedAt) {
+  if (!testStatus || testStatus.targetStage !== checked.stage) {
+    return false;
+  }
+  if (normalizeOptionalText(testStatus.targetSubset) !== normalizeOptionalText(checked.subset)) {
+    return false;
+  }
+  const checkedAt = Date.parse(checked.recordedAt ?? "");
+  const eventAt = Date.parse(recordedAt ?? "");
+  return !Number.isFinite(checkedAt) ||
+    !Number.isFinite(eventAt) ||
+    Math.abs(eventAt - checkedAt) <= 60_000;
+}
+
+function normalizeOptionalText(value) {
+  return value == null || value === "" ? "" : String(value);
+}
+
 function renderSummary(events) {
-  const s = buildSummary(events, state.shapeUsage);
+  const s = buildSummary(events, state.shapeUsage, selectedRunMeta());
   const chips = s.typeStats.slice(0, 8)
     .map(([type, count]) => `<span class="pill">${type}: ${count}</span>`)
     .join(" ");
@@ -206,6 +318,7 @@ function renderSummary(events) {
         suffix: usage.suffix,
       })
     : '<span class="muted">n/a</span>';
+  const detailText = codexDetailSummaryHtml(state.codexDetail);
   const progressText = latestProgressSummaryHtml(s.testProgress.latest);
   const phaseText = s.latestPhaseStatus
     ? latestPhaseStatusHtml(s.latestPhaseStatus.status)
@@ -217,6 +330,7 @@ function renderSummary(events) {
     <div><strong>turns</strong>${s.turns}</div>
     <div><strong>started</strong>${fmt(s.first)}</div>
     <div><strong>latest</strong>${fmt(s.last)}</div>
+    <div><strong>detail</strong>${detailText}</div>
     <div class="summary-wide"><strong>phase</strong>${phaseText}</div>
     <div class="summary-wide"><strong>test progress</strong>${progressText}</div>
     <div class="summary-wide"><strong>usage</strong>${usageText}</div>
@@ -225,17 +339,46 @@ function renderSummary(events) {
   renderProgressDock(s);
 }
 
+function codexDetailSummaryHtml(detail) {
+  if (!detail?.mode) {
+    return '<span class="muted">n/a</span>';
+  }
+  if (detail.mode === "none") {
+    return "Ralph only";
+  }
+  if (detail.mode === "all") {
+    return "All Codex";
+  }
+  if (detail.mode === "turns") {
+    const turns = Array.isArray(detail.turns) ? detail.turns.join(", ") : "";
+    return turns ? `Turns ${escapeHtml(turns)}` : '<span class="muted">No detail turns</span>';
+  }
+  if (detail.mode === "tail") {
+    return `Last ${fmtInt(detail.tailTurns ?? 2)} turns`;
+  }
+  return escapeHtml(detail.mode);
+}
+
 function renderProgressDock(summary) {
   if (!progressDock) {
     return;
   }
   const run = selectedRunMeta();
+  const details = runDetailHtml(summary, run, { includeName: true, metaClass: "dock-meta" });
+  progressDock.innerHTML = details || '<span class="muted">No run</span>';
+  updateProgressDockSpace();
+}
+
+function runDetailHtml(summary, run, options = {}) {
   const progress = summary?.testProgress?.latest ?? null;
   const testStatus = summary?.latestTestStatus?.status ?? null;
   const phaseStatus = summary?.latestPhaseStatus?.status ?? null;
   const latestTurn = summary?.latestTurn ?? null;
   const usage = preferredUsageSummary(summary);
   const latest = summary?.last ? fmtShort(summary.last) : "";
+  const nameHtml = options.includeName
+    ? `<strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>`
+    : "";
   const phaseHtml = phaseStatus
     ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
     : '<span class="muted">phase n/a</span>';
@@ -251,9 +394,10 @@ function renderProgressDock(summary) {
   const usageHtml = usage
     ? `<span class="dock-usage">${escapeHtml(dockUsageText(usage, summary.priceModel))}</span>`
     : "";
-  const updatedHtml = latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : "";
-  progressDock.innerHTML = `
-    <strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>
+  const metaClass = options.metaClass ?? "dock-meta";
+  const updatedHtml = latest ? `<span class="${escapeHtml(metaClass)}">updated ${escapeHtml(latest)}</span>` : "";
+  return `
+    ${nameHtml}
     ${turnHtml}
     ${usageHtml}
     ${phaseHtml}
@@ -261,6 +405,33 @@ function renderProgressDock(summary) {
     ${testHtml}
     ${updatedHtml}
   `;
+}
+
+function scheduleProgressDockSpaceUpdate() {
+  if (!progressDock) {
+    return;
+  }
+  if (progressDockSpaceFrame) {
+    window.cancelAnimationFrame(progressDockSpaceFrame);
+  }
+  progressDockSpaceFrame = window.requestAnimationFrame(() => {
+    progressDockSpaceFrame = 0;
+    updateProgressDockSpace();
+  });
+}
+
+function updateProgressDockSpace() {
+  if (!progressDock) {
+    return;
+  }
+  const wasSticky = shouldFollowLiveTail(getScrollMetrics());
+  const height = Math.ceil(progressDock.getBoundingClientRect().height || 0);
+  const space = Math.max(56, height + PROGRESS_DOCK_EXTRA_SPACE_PX);
+  state.progressDockSpacePx = space;
+  document.documentElement.style.setProperty("--progress-dock-space", `${space}px`);
+  if (wasSticky) {
+    afterNextPaint(scrollToBottomNow);
+  }
 }
 
 function dockTurnText(turn) {
@@ -1157,8 +1328,10 @@ function fmtUsd(value) {
   return `$${value.toFixed(2)}`;
 }
 
-function inferPriceModel() {
-  const text = `${state.selectedRun ?? ""} ${runSelect.selectedOptions?.[0]?.textContent ?? ""}`.toLowerCase();
+function inferPriceModel(run = null) {
+  const text = run
+    ? `${run.id ?? ""} ${run.label ?? ""}`.toLowerCase()
+    : `${state.selectedRun ?? ""} ${runSelect.selectedOptions?.[0]?.textContent ?? ""}`.toLowerCase();
   return [...API_PRICE_RATES.keys()]
     .sort((a, b) => b.length - a.length)
     .find((model) => text.includes(model)) ?? null;
@@ -1430,13 +1603,17 @@ function buildUsageMap(records) {
 
 function buildTestStatusMap(records) {
   const map = new Map();
+  const ralphStatusTurns = new Set();
+  const stageTotalAnchors = buildStageTotalAnchors(records);
   for (const r of records) {
     if (r.eventType === "ralph.test-status" && r.event?.testStatus) {
       const turn = displayTurnForRecord(r);
-      map.set(turn, r.event.testStatus);
+      map.set(turn, anchorTestStatusTotals(r.event.testStatus, stageTotalAnchors));
+      ralphStatusTurns.add(turn);
     } else if (r.eventType === "ralph.phase-status" && r.event?.phaseStatus?.testStatus) {
       const turn = displayTurnForRecord(r);
-      map.set(turn, r.event.phaseStatus.testStatus);
+      map.set(turn, anchorTestStatusTotals(r.event.phaseStatus.testStatus, stageTotalAnchors));
+      ralphStatusTurns.add(turn);
     }
   }
   for (const r of records) {
@@ -1449,7 +1626,10 @@ function buildTestStatusMap(records) {
       continue;
     }
     const turn = displayTurnForRecord(r);
-    map.set(turn, mergeTestStatus(map.get(turn), derived));
+    if (ralphStatusTurns.has(turn)) {
+      continue;
+    }
+    map.set(turn, mergeTestStatus(map.get(turn), anchorTestStatusTotals(derived, stageTotalAnchors)));
   }
   return map;
 }
@@ -1574,6 +1754,127 @@ function mergeTestStatus(existing, derived) {
     return { ...existing, ...derived };
   }
   return existing;
+}
+
+function buildStageTotalAnchors(records) {
+  const anchors = new Map();
+  for (const record of records) {
+    for (const status of testStatusesFromRecord(record)) {
+      addStageTotalAnchorsFromStatus(anchors, status);
+    }
+  }
+  return anchors;
+}
+
+function testStatusesFromRecord(record) {
+  const statuses = [];
+  if (record.event?.testStatus) {
+    statuses.push(record.event.testStatus);
+  }
+  if (record.event?.phaseStatus?.testStatus) {
+    statuses.push(record.event.phaseStatus.testStatus);
+  }
+  for (const check of record.event?.phaseStatus?.checks ?? []) {
+    if (check?.testStatus) {
+      statuses.push(check.testStatus);
+    }
+  }
+  return statuses;
+}
+
+function addStageTotalAnchorsFromStatus(anchors, status) {
+  if (!isFullStageTestStatus(status)) {
+    return;
+  }
+  const stages = Array.isArray(status?.stages) ? status.stages : [];
+  for (const stage of stages) {
+    if (stage?.status === "pass" && finitePositiveNumber(stage.total) && stage.passed === stage.total) {
+      updateStageTotalAnchor(anchors, stage.name, stage.total);
+    }
+  }
+  addInferredStageTotalAnchor(anchors, status);
+}
+
+function addInferredStageTotalAnchor(anchors, status) {
+  const stages = Array.isArray(status?.stages) ? status.stages : [];
+  const testsTotal = finitePositiveNumber(status?.testsTotal);
+  if (!stages.length || !testsTotal) {
+    return;
+  }
+  const targetStage =
+    normalizeStageName(status?.targetStage) ??
+    normalizeStageName(status?.failingStage) ??
+    stages.find((stage) => stage?.status === "fail")?.name ??
+    stages.at(-1)?.name;
+  const targetIndex = stages.findIndex((stage) => stage?.name === targetStage);
+  if (targetIndex < 0) {
+    return;
+  }
+  let knownOtherTotal = 0;
+  for (const [index, stage] of stages.entries()) {
+    if (index === targetIndex) {
+      continue;
+    }
+    const total = finitePositiveNumber(stage?.total) ?? anchors.get(stage?.name);
+    if (!total) {
+      return;
+    }
+    knownOtherTotal += total;
+  }
+  const inferredTotal = testsTotal - knownOtherTotal;
+  if (inferredTotal > 0) {
+    updateStageTotalAnchor(anchors, targetStage, Math.max(inferredTotal, stages[targetIndex]?.total ?? 0));
+  }
+}
+
+function updateStageTotalAnchor(anchors, stage, total) {
+  const normalized = normalizeStageName(stage);
+  if (!normalized || !Number.isFinite(total) || total <= 0) {
+    return;
+  }
+  const previous = anchors.get(normalized) ?? 0;
+  if (total > previous) {
+    anchors.set(normalized, total);
+  }
+}
+
+function anchorTestStatusTotals(status, anchors) {
+  if (!status || !isFullStageTestStatus(status) || !(anchors instanceof Map) || anchors.size === 0) {
+    return status;
+  }
+  const stages = Array.isArray(status.stages) ? status.stages : [];
+  let changed = false;
+  const anchoredStages = stages.map((stage) => {
+    const anchor = anchors.get(stage?.name);
+    if (!anchor || anchor <= (stage?.total ?? 0)) {
+      return stage;
+    }
+    changed = true;
+    return {
+      ...stage,
+      total: anchor,
+      passed: stage?.status === "pass" ? anchor : Math.min(stage?.passed ?? 0, anchor),
+    };
+  });
+  if (!changed) {
+    return status;
+  }
+  const stageTotal = anchoredStages.reduce((sum, stage) => sum + (stage.total ?? 0), 0);
+  const stagePassed = anchoredStages.reduce((sum, stage) => sum + (stage.passed ?? 0), 0);
+  return {
+    ...status,
+    testsPassed: Math.max(status.testsPassed ?? 0, stagePassed),
+    testsTotal: Math.max(status.testsTotal ?? 0, stageTotal),
+    stages: anchoredStages,
+  };
+}
+
+function isFullStageTestStatus(status) {
+  return !cleanText(status?.targetSubset);
+}
+
+function normalizeStageName(stage) {
+  return typeof stage === "string" && /^pa\d+$/.test(stage) ? stage : null;
 }
 
 function deriveTestStatusFromCommand(record) {
@@ -1746,15 +2047,24 @@ function stageNumber(stageName) {
 }
 
 function buildAgentTestProgressState(records) {
+  const stageTotalAnchors = buildStageTotalAnchors(records);
   const tracker = {
-    stageTotals: new Map(),
+    stageTotals: new Map(stageTotalAnchors),
     stageBest: new Map(),
+    turnTargets: buildAgentProgressTargets(records, stageTotalAnchors),
     latest: null,
   };
   const byTurn = new Map();
 
   for (const record of records) {
     seedAgentTestProgressTracker(tracker, record);
+    const seededObservation = deriveRalphTestProgress(record, tracker);
+    if (seededObservation) {
+      const progress = applyAgentTestProgressObservation(tracker, seededObservation);
+      if (progress) {
+        byTurn.set(progress.turn, progress);
+      }
+    }
 
     const item = record.event?.item;
     if (record.eventType !== "item.completed" || item?.type !== "command_execution") {
@@ -1772,10 +2082,91 @@ function buildAgentTestProgressState(records) {
     }
 
     const progress = applyAgentTestProgressObservation(tracker, observation);
+    if (!progress) {
+      continue;
+    }
     byTurn.set(progress.turn, progress);
   }
 
   return { byTurn, latest: tracker.latest };
+}
+
+function buildAgentProgressTargets(records, stageTotalAnchors = new Map()) {
+  const targets = new Map();
+  for (const record of records) {
+    const testStatus = anchorTestStatusTotals(ralphTestStatusFromRecord(record), stageTotalAnchors);
+    if (!testStatus) {
+      continue;
+    }
+    const target = progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+    if (!target) {
+      continue;
+    }
+    targets.set(progressTargetKey(displayTurnForRecord(record), target.stage), target);
+  }
+  return targets;
+}
+
+function deriveRalphTestProgress(record, tracker) {
+  const testStatus = ralphTestStatusFromRecord(record);
+  if (!testStatus) {
+    return null;
+  }
+  const turn = displayTurnForRecord(record);
+  const target = progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+  if (!target) {
+    return null;
+  }
+  const configured = tracker.turnTargets.get(progressTargetKey(turn, target.stage));
+  if (!configured) {
+    return null;
+  }
+  return {
+    stage: target.stage,
+    stageNumber: stageNumber(target.stage),
+    commandKind: "ralph",
+    commandTarget: "ralph required status",
+    turn,
+    recordedAt: testStatus.recordedAt ?? record.recordedAt,
+    status: testStatus.allTestsPassed ? "pass" : "fail",
+    passed: Math.max(0, Math.min(testStatus.testsPassed ?? 0, configured.total)),
+    total: configured.total,
+  };
+}
+
+function ralphTestStatusFromRecord(record) {
+  if (record.eventType === "ralph.test-status") {
+    return record.event?.testStatus ?? null;
+  }
+  if (record.eventType === "ralph.phase-status") {
+    return record.event?.phaseStatus?.testStatus ?? null;
+  }
+  return null;
+}
+
+function progressTargetFromTestStatus(testStatus, phaseStage = null) {
+  const total = finitePositiveNumber(testStatus?.testsTotal);
+  if (!total || (testStatus.stageCount ?? 0) > 1) {
+    return null;
+  }
+  const stage =
+    phaseStage ??
+    testStatus.targetStage ??
+    (Array.isArray(testStatus.stages) && testStatus.stages.length === 1
+      ? testStatus.stages[0]?.name
+      : null);
+  if (!stage) {
+    return null;
+  }
+  return {
+    stage,
+    total,
+    recordedAt: testStatus.recordedAt ?? null,
+  };
+}
+
+function progressTargetKey(turn, stage) {
+  return `${turn}:${stage}`;
 }
 
 function seedAgentTestProgressTracker(tracker, record) {
@@ -1783,6 +2174,9 @@ function seedAgentTestProgressTracker(tracker, record) {
     return;
   }
   const testStatus = record.event?.testStatus;
+  if (!isFullStageTestStatus(testStatus)) {
+    return;
+  }
   const stages = testStatus?.stages;
   if (!Array.isArray(stages)) {
     return;
@@ -1822,6 +2216,7 @@ function parseAgentTestCommand(command) {
       stage: `pa${number}`,
       stageNumber: number,
       target: `test-report-through-pa${number}`,
+      hasSubset: false,
     };
   }
 
@@ -1836,6 +2231,7 @@ function parseAgentTestCommand(command) {
         stageNumber: stageNumber(lastStage),
         stages,
         target: `test-report ${stages.join(" ")}`,
+        hasSubset: hasTestGlob(text),
       };
     }
   }
@@ -1850,6 +2246,7 @@ function parseAgentTestCommand(command) {
     stage: `pa${number}`,
     stageNumber: number,
     target: `test-pa${number}`,
+    hasSubset: false,
   };
 }
 
@@ -1857,6 +2254,10 @@ function parseActiveTestReportStages(text) {
   const match = text.match(/\bACTIVE_TEST_REPORT_PAS\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/);
   const raw = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
   return [...raw.matchAll(/\bpa\d+\b/g)].map((stage) => stage[0]);
+}
+
+function hasTestGlob(text) {
+  return /\bGLOB\s*=/.test(text);
 }
 
 function deriveAgentTestProgress(record, commandInfo, tracker) {
@@ -1867,10 +2268,6 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   }
 
   const stageProgress = parseStageProgressFromAgentOutput(output, commandInfo.stage);
-  for (const progress of stageProgress.values()) {
-    updateKnownStageTotal(tracker, progress.stage, progress.total);
-  }
-
   const direct = stageProgress.get(commandInfo.stage);
   if (direct?.total > 0) {
     return buildAgentTestProgressObservation(record, commandInfo, direct);
@@ -1928,7 +2325,8 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   }
 
   const passed = Math.max(0, summary.testsPassed - priorTotal);
-  const total = Math.max(passed, summary.testsTotal - priorTotal);
+  const anchoredTotal = tracker.stageTotals.get(commandInfo.stage) ?? 0;
+  const total = Math.max(passed, summary.testsTotal - priorTotal, anchoredTotal);
   if (total <= 0) {
     return null;
   }
@@ -1947,6 +2345,7 @@ function buildAgentTestProgressObservation(record, commandInfo, progress) {
     stageNumber: commandInfo.stageNumber,
     commandKind: commandInfo.kind,
     commandTarget: commandInfo.target,
+    hasSubset: commandInfo.hasSubset === true,
     turn: displayTurnForRecord(record),
     recordedAt: record.recordedAt,
     status: progress.status,
@@ -1967,10 +2366,12 @@ function inferSelectedReportSummaryProgress(output, commandInfo, tracker, exitCo
   }
 
   if (stages.length === 1) {
+    const anchoredTotal = commandInfo.hasSubset ? 0 : tracker.stageTotals.get(stages[0]) ?? 0;
+    const total = Math.max(summary.testsTotal, anchoredTotal);
     return {
       stage: stages[0],
-      passed: summary.testsPassed,
-      total: summary.testsTotal,
+      passed: Math.min(summary.testsPassed, total),
+      total,
       status: summaryProgressStatus(summary, exitCode),
     };
   }
@@ -2041,14 +2442,27 @@ function summaryProgressStatus(summary, exitCode) {
 }
 
 function applyAgentTestProgressObservation(tracker, observation) {
-  updateKnownStageTotal(tracker, observation.stage, observation.total);
+  const target = tracker.turnTargets.get(progressTargetKey(observation.turn, observation.stage));
+  if (target && observation.total !== target.total) {
+    return null;
+  }
+  if (!target && !observation.hasSubset) {
+    updateKnownStageTotal(tracker, observation.stage, observation.total);
+  }
 
-  const knownTotal = Math.max(observation.total, tracker.stageTotals.get(observation.stage) ?? 0);
+  const knownTotal =
+    target?.total ??
+    (observation.hasSubset
+      ? observation.total
+      : Math.max(observation.total, tracker.stageTotals.get(observation.stage) ?? 0));
   const current = {
     passed: Math.min(observation.passed, knownTotal || observation.passed),
     total: knownTotal,
   };
-  const previousBest = tracker.stageBest.get(observation.stage);
+  const bestKey = target
+    ? progressTargetKey(observation.turn, observation.stage)
+    : observation.stage;
+  const previousBest = tracker.stageBest.get(bestKey);
   const best =
     !previousBest || current.passed >= previousBest.passed
       ? { ...current, recordedAt: observation.recordedAt }
@@ -2058,7 +2472,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
     total: Math.max(best.total ?? 0, knownTotal),
   };
 
-  tracker.stageBest.set(observation.stage, normalizedBest);
+  tracker.stageBest.set(bestKey, normalizedBest);
   const progress = {
     ...observation,
     current,
@@ -2206,13 +2620,69 @@ function phaseStatusText(status) {
   }
   const parts = [];
   if (status.phase) parts.push(status.phase);
-  if (status.stage) parts.push(status.stage);
+  const target = phaseTargetText(status);
+  if (target) parts.push(target);
   if (status.allRequiredPassed) {
     parts.push("checks pass");
   } else {
     parts.push(phaseChecksText(status) || "checks incomplete");
   }
   return parts.join(" / ");
+}
+
+function phaseTargetText(status) {
+  const stage =
+    status?.stage ??
+    status?.testStatus?.targetStage ??
+    status?.primaryCheck?.targetStage ??
+    status?.checks?.find?.((check) => check?.targetStage)?.targetStage ??
+    "";
+  const slice = phaseSliceText(status);
+  if (stage && slice) {
+    return `${stage} ${slice}`;
+  }
+  return stage || slice;
+}
+
+function phaseSliceText(status) {
+  const index = positiveInteger(
+    status?.sliceIndex ??
+      status?.target?.sliceIndex ??
+      status?.slice?.index ??
+      status?.testStatus?.sliceIndex,
+  );
+  const count = positiveInteger(
+    status?.sliceCount ??
+      status?.observedSliceCount ??
+      status?.target?.sliceCount ??
+      status?.slice?.count ??
+      status?.testStatus?.sliceCount,
+  );
+  if (index && count) {
+    return `slice ${index}/${count}`;
+  }
+  if (index) {
+    return `slice ${index}/?`;
+  }
+  const subset = cleanText(status?.subset ?? status?.testStatus?.targetSubset);
+  const compact = compactSubsetText(subset);
+  return compact ? `slice ${compact}` : "";
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function compactSubsetText(subset) {
+  const patterns = cleanText(subset).split(/\s+/).filter(Boolean);
+  if (!patterns.length) {
+    return "";
+  }
+  const first = patterns[0]
+    .replace(/^pa\d+\//, "")
+    .replace(/^tests\//, "");
+  return patterns.length === 1 ? first : `${first} +${patterns.length - 1}`;
 }
 
 function phaseChecksText(status) {
@@ -2327,6 +2797,9 @@ function inferCurrentFullRunStatus(ts, progress) {
   const stageTotal = finitePositiveNumber(stage.total);
   const currentTotal = finitePositiveNumber(current.total);
   if (stagePassed == null || stageTotal == null || currentTotal == null) {
+    return null;
+  }
+  if (currentTotal !== stageTotal) {
     return null;
   }
 
@@ -2607,6 +3080,7 @@ function getUrlParams() {
   const p = new URLSearchParams(window.location.search);
   return {
     run: p.get("run"),
+    view: p.get("view"),
     turns: p.get("turns")?.split(",").filter(Boolean) ?? [],
   };
 }
@@ -2628,9 +3102,73 @@ function syncOpenTurnsToUrl() {
     if (t) open.push(t);
   }
   setUrlParam("turns", open.length ? open.join(",") : null);
+  scheduleOpenTurnDetailReload();
+}
+
+function scheduleOpenTurnDetailReload() {
+  if (codexDetail?.value !== "open" || !state.selectedRun) {
+    return;
+  }
+  if (state.openTurnReloadTimer) {
+    window.clearTimeout(state.openTurnReloadTimer);
+  }
+  const scrollSnapshot = captureScrollSnapshot();
+  state.openTurnReloadTimer = window.setTimeout(() => {
+    state.openTurnReloadTimer = null;
+    loadRun(state.selectedRun, { scrollSnapshot }).catch((error) => {
+      console.error("turn detail reload failed", error);
+    });
+  }, 150);
 }
 
 // --- Data loading ---
+
+function codexDetailQueryParams() {
+  const params = new URLSearchParams();
+  const value = codexDetail?.value ?? "tail:2";
+  if (value === "none") {
+    params.set("codex", "none");
+  } else if (value === "all") {
+    params.set("codex", "all");
+  } else if (value === "open") {
+    const turns = getUrlParams().turns;
+    if (turns.length) {
+      params.set("codex", "turns");
+      params.set("turns", turns.join(","));
+    } else {
+      params.set("codex", "tail");
+      params.set("tailTurns", "2");
+    }
+  } else {
+    const match = value.match(/^tail:(\d+)$/);
+    params.set("codex", "tail");
+    params.set("tailTurns", match?.[1] ?? "2");
+  }
+  return params;
+}
+
+function combinedRunQueryParams() {
+  const params = new URLSearchParams();
+  params.set("codex", "tail");
+  params.set("tailTurns", "2");
+  params.set("usage", "fast");
+  return params;
+}
+
+function requestedCombinedViewFromUrl() {
+  const view = getUrlParams().view;
+  return view !== "run" && view !== "single";
+}
+
+function initializeViewControls() {
+  if (combinedViewToggle) {
+    combinedViewToggle.checked = requestedCombinedViewFromUrl();
+  }
+}
+
+function isCombinedView() {
+  return combinedViewToggle?.checked ?? requestedCombinedViewFromUrl();
+}
 
 async function loadRuns(options = {}) {
   const [stateData, data] = await Promise.all([
@@ -2642,6 +3180,7 @@ async function loadRuns(options = {}) {
 
   runSelect.innerHTML = "";
   if (!state.runs.length) {
+    setViewTitles(isCombinedView() ? "Active Runs" : "Summary", isCombinedView() ? "Recent Cards" : "Turns");
     const opt = document.createElement("option");
     opt.textContent = "No runs found";
     runSelect.append(opt);
@@ -2651,6 +3190,7 @@ async function loadRuns(options = {}) {
     state.shapeUsage = null;
     if (progressDock) {
       progressDock.innerHTML = '<span class="muted">No runs found</span>';
+      updateProgressDockSpace();
     }
     return;
   }
@@ -2672,24 +3212,88 @@ async function loadRuns(options = {}) {
     : urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
     : state.runs[0].id;
   runSelect.value = preferred;
+  if (isCombinedView()) {
+    await loadCombinedRuns({
+      scrollSnapshot: options.scrollSnapshot,
+    });
+    return;
+  }
   await loadRun(preferred, {
     stickToBottom: options.stickToBottom,
     scrollSnapshot: options.scrollSnapshot,
   });
 }
 
+async function loadCombinedRuns(options = {}) {
+  setCombinedModeActive(true);
+  setViewTitles("Active Runs", "Recent Cards");
+  state.selectedRun = runSelect.value || state.selectedRun;
+  const activeRuns = state.runs.filter(isActiveRunMeta);
+  const query = combinedRunQueryParams().toString();
+  const loaded = await Promise.all(activeRuns.map(async (run) => {
+    try {
+      const data = await fetch(`/api/run/${encodeURIComponent(run.id)}?${query}`).then(r => {
+        if (!r.ok) throw new Error(`Load failed: ${r.status}`);
+        return r.json();
+      });
+      const events = data.events ?? [];
+      const shapeUsage = normalizeShapeUsage(data.shapeUsage);
+      return {
+        run,
+        events,
+        shapeUsage,
+        summary: buildSummary(events, shapeUsage, run),
+        error: null,
+      };
+    } catch (error) {
+      return {
+        run,
+        events: [],
+        shapeUsage: null,
+        summary: null,
+        error,
+      };
+    }
+  }));
+
+  state.combinedRuns = loaded;
+  state.events = [];
+  state.shapeUsage = null;
+  state.codexDetail = { mode: "tail", tailTurns: 2 };
+  state.raw = [];
+
+  let scrollSnapshot = options.scrollSnapshot ?? null;
+  if (scrollSnapshot && scrollSnapshot.userScrollVersion !== state.userScrollVersion) {
+    const staleScrollSnapshot = scrollSnapshot;
+    scrollSnapshot = captureScrollSnapshot();
+    scrollDebug("combined-load-refresh-stale-scroll-snapshot", {
+      staleScrollSnapshot,
+      scrollSnapshot,
+      currentUserScrollVersion: state.userScrollVersion,
+    });
+  }
+  renderCombinedRuns(loaded);
+  restoreScrollAfterRender(scrollSnapshot, { immediate: true });
+}
+
 async function loadRun(id, options = {}) {
   if (!id) return;
+  setCombinedModeActive(false);
+  setViewTitles("Summary", "Turns");
   scrollDebug("load-run-start", { id, hasScrollSnapshot: Boolean(options.scrollSnapshot) });
   state.selectedRun = id;
   setUrlParam("run", id);
-  const data = await fetch(`/api/run/${encodeURIComponent(id)}`).then(r => {
+  const detailParams = codexDetailQueryParams();
+  const detailQuery = detailParams.toString();
+  const data = await fetch(`/api/run/${encodeURIComponent(id)}${detailQuery ? `?${detailQuery}` : ""}`).then(r => {
     if (!r.ok) throw new Error(`Load failed: ${r.status}`);
     return r.json();
   });
 
   state.events = data.events ?? [];
+  state.combinedRuns = [];
   state.shapeUsage = normalizeShapeUsage(data.shapeUsage);
+  state.codexDetail = data.codexDetail ?? null;
   state.raw = state.events.slice();
   let scrollSnapshot = options.scrollSnapshot
     ?? (options.stickToBottom ? captureScrollSnapshot({ forceStickToBottom: true }) : null);
@@ -2714,6 +3318,162 @@ async function loadRun(id, options = {}) {
   scrollDebug("load-run-after-render", { id, eventCount: state.events.length });
 }
 
+function setViewTitles(summaryText, timelineText) {
+  if (summaryTitle) {
+    summaryTitle.textContent = summaryText;
+  }
+  if (timelineTitle) {
+    timelineTitle.textContent = timelineText;
+  }
+}
+
+function setCombinedModeActive(active) {
+  document.body.classList.toggle("is-combined-view", active);
+}
+
+function isActiveRunMeta(run) {
+  const runState = run?.state;
+  if (!runState) {
+    return false;
+  }
+  if (runState.matchesCurrent === false || runState.recentlyUpdated === false) {
+    return false;
+  }
+  if (run.id === state.currentRun) {
+    return Boolean(runState.activePhase);
+  }
+  return runState.active === true ||
+    (runState.matchesCurrent !== false && Boolean(runState.activePhase));
+}
+
+function renderCombinedRuns(runs) {
+  const loaded = Array.isArray(runs) ? runs : [];
+  const activeCount = loaded.length;
+  const errorCount = loaded.filter((entry) => entry.error).length;
+  const totalCards = loaded.reduce((sum, entry) => sum + latestCombinedEntries(entry.events).length, 0);
+  const latestAt = loaded
+    .map((entry) => entry.summary?.last ?? entry.run?.mtime ?? null)
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? null;
+  summaryEl.innerHTML = `
+    <div><strong>active</strong>${fmtInt(activeCount)}</div>
+    <div><strong>cards</strong>${fmtInt(totalCards)}</div>
+    <div><strong>latest</strong>${fmt(latestAt)}</div>
+    ${errorCount ? `<div class="summary-wide"><strong>errors</strong>${fmtInt(errorCount)} run${errorCount === 1 ? "" : "s"} failed to load</div>` : ""}
+  `;
+  eventCountEl.textContent = `${fmtInt(totalCards)} cards / ${fmtInt(activeCount)} active runs`;
+
+  const fragment = document.createDocumentFragment();
+  if (!loaded.length) {
+    const empty = document.createElement("div");
+    empty.className = "combined-empty muted";
+    empty.textContent = "No active runs";
+    fragment.append(empty);
+  }
+
+  for (const entry of loaded) {
+    fragment.append(renderCombinedRun(entry));
+  }
+
+  timelineEl.replaceChildren(fragment);
+  renderCombinedProgressDock(loaded);
+}
+
+function renderCombinedRun(entry) {
+  const runEl = document.createElement("section");
+  runEl.className = "combined-run";
+  runEl.dataset.runId = entry.run.id;
+
+  const header = document.createElement("div");
+  header.className = "combined-run-header";
+  const title = document.createElement("a");
+  title.className = "combined-run-title";
+  title.href = fullRunHref(entry.run.id);
+  title.textContent = entry.run.label ?? entry.run.id;
+  header.append(title);
+
+  const details = document.createElement("div");
+  details.className = "combined-run-details";
+  if (entry.error) {
+    details.innerHTML = `<span class="pill pill-bad">${escapeHtml(entry.error.message ?? String(entry.error))}</span>`;
+  } else {
+    details.innerHTML = runDetailHtml(entry.summary, entry.run, { includeName: false, metaClass: "combined-run-meta" });
+  }
+  header.append(details);
+  runEl.append(header);
+
+  const feed = document.createElement("div");
+  feed.className = "combined-run-feed";
+  const entries = latestCombinedEntries(entry.events);
+  if (!entry.error && entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted combined-run-empty";
+    empty.textContent = "No recent cards";
+    feed.append(empty);
+  }
+  entries.forEach((displayEntry, index) => {
+    const el = renderDisplayEntry(displayEntry);
+    if (!el) {
+      return;
+    }
+    const key = scrollKeyForEntry(displayEntry, index);
+    if (key) {
+      el.dataset.scrollKey = `combined:${entry.run.id}:${key}`;
+    }
+    feed.append(el);
+  });
+  runEl.append(feed);
+  return runEl;
+}
+
+function latestCombinedEntries(records, limit = COMBINED_RUN_CARD_LIMIT) {
+  const filtered = records.filter(shouldShow);
+  return buildDisplayEntries(filtered).slice(-limit);
+}
+
+function combinedUsageSummary(entries) {
+  let usage = null;
+  let durationMs = 0;
+  for (const entry of entries) {
+    const preferred = preferredUsageSummary(entry.summary);
+    if (!preferred?.usage) {
+      continue;
+    }
+    usage = addUsage(usage, preferred.usage);
+    durationMs += preferred.durationMs ?? 0;
+  }
+  return usage ? { usage, durationMs } : null;
+}
+
+function renderCombinedProgressDock(entries) {
+  if (!progressDock) {
+    return;
+  }
+  const activeCount = entries.length;
+  const latestAt = entries
+    .map((entry) => entry.summary?.last ?? entry.run?.mtime ?? null)
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? null;
+  const latest = latestAt ? fmtShort(latestAt) : "";
+  progressDock.innerHTML = `
+    <strong>Combined</strong>
+    <span class="dock-main">${fmtInt(activeCount)} active run${activeCount === 1 ? "" : "s"}</span>
+    ${latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : ""}
+  `;
+  updateProgressDockSpace();
+}
+
+function fullRunHref(runId) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("run", runId);
+  params.set("view", "run");
+  params.delete("turns");
+  const qs = params.toString();
+  return qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+}
+
 function isAutoRefreshEnabled() {
   return autoRefreshToggle?.checked ?? false;
 }
@@ -2723,7 +3483,10 @@ function captureScrollSnapshot(options = {}) {
   const stickToBottom =
     options.forceStickToBottom ||
     state.stickToBottomAfterLayout ||
-    metrics.distanceFromBottom <= BOTTOM_STICKY_PX;
+    shouldFollowLiveTail(metrics);
+  if (stickToBottom) {
+    state.followLiveTail = true;
+  }
   const preferScrollTop = options.preferScrollTop === true || state.preferScrollTopAfterLayout;
   return {
     scrollTop: metrics.scrollTop,
@@ -2870,6 +3633,7 @@ function afterNextPaint(callback) {
 function scrollToBottomNow() {
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  state.followLiveTail = true;
   setScrollTop(maxTop, "scrollToBottomNow");
 }
 
@@ -2909,6 +3673,29 @@ function getScrollMetrics() {
   };
 }
 
+function shouldFollowLiveTail(metrics = getScrollMetrics()) {
+  if (metrics.distanceFromBottom <= bottomStickyThresholdPx()) {
+    return true;
+  }
+  const recentUserIntent = performance.now() - state.lastUserScrollAt < 1000;
+  const userMayHaveMovedAway =
+    recentUserIntent && state.lastUserScrollAt > state.lastProgrammaticScrollAt;
+  return state.followLiveTail && !userMayHaveMovedAway;
+}
+
+function bottomStickyThresholdPx() {
+  return BOTTOM_STICKY_PX + bottomReservePx();
+}
+
+function bottomReservePx() {
+  const computed = window.getComputedStyle?.(document.body);
+  const paddingBottom = Number.parseFloat(computed?.paddingBottom ?? "");
+  if (Number.isFinite(paddingBottom) && paddingBottom > 0) {
+    return paddingBottom;
+  }
+  return state.progressDockSpacePx ?? 0;
+}
+
 function scrollingRoot() {
   return document.scrollingElement || document.documentElement;
 }
@@ -2920,6 +3707,33 @@ function scrollViewportTop() {
 function scrollViewportBottom() {
   const root = scrollingRoot();
   return root.clientHeight || window.innerHeight || document.documentElement.clientHeight || 0;
+}
+
+function isMobileScrollViewport() {
+  if (window.matchMedia?.("(hover: none) and (pointer: coarse)")?.matches) {
+    return true;
+  }
+  return (navigator.maxTouchPoints ?? 0) > 0 && Math.min(window.innerWidth, window.innerHeight) <= 900;
+}
+
+function markMobileScrollPause(source = "unknown", pauseMs = MOBILE_SCROLL_REFRESH_PAUSE_MS) {
+  if (!isMobileScrollViewport()) {
+    return;
+  }
+  const until = performance.now() + pauseMs;
+  state.mobileScrollPauseUntil = Math.max(state.mobileScrollPauseUntil, until);
+  scrollDebug("mobile-scroll-refresh-pause", {
+    source,
+    pauseMs,
+    remainingMs: Math.max(0, Math.round(state.mobileScrollPauseUntil - performance.now())),
+  });
+}
+
+function shouldPauseRefreshForMobileScroll() {
+  if (!isMobileScrollViewport()) {
+    return false;
+  }
+  return performance.now() < state.mobileScrollPauseUntil;
 }
 
 function scrollDebug(label, extra = {}) {
@@ -2991,10 +3805,23 @@ function describeElementForScroll(element) {
 }
 
 function handleObservedScroll() {
+  const metrics = getScrollMetrics();
+  const now = performance.now();
+  const recentProgrammatic = now - state.lastProgrammaticScrollAt < 300;
+  const recentUserIntent = now - state.lastUserScrollAt < 1000 &&
+    state.lastUserScrollAt > state.lastProgrammaticScrollAt;
+  if (isMobileScrollViewport() && recentUserIntent && !recentProgrammatic) {
+    markMobileScrollPause("scroll");
+  }
+  if (metrics.distanceFromBottom <= bottomStickyThresholdPx()) {
+    state.followLiveTail = true;
+  } else if (recentUserIntent && !recentProgrammatic) {
+    state.followLiveTail = false;
+  }
+
   if (!state.scrollDebugEnabled) {
     return;
   }
-  const metrics = getScrollMetrics();
   const previous = state.lastObservedScrollTop;
   state.lastObservedScrollTop = metrics.scrollTop;
   if (previous == null) {
@@ -3035,6 +3862,9 @@ function markUserScrollIntent(source = "unknown") {
   state.latestLayoutScrollSnapshot = null;
   state.stickToBottomAfterLayout = false;
   state.preferScrollTopAfterLayout = false;
+  if (source.startsWith("touch") || source.startsWith("pointer")) {
+    markMobileScrollPause(source);
+  }
   scrollDebug("user-scroll-intent", { source });
 }
 
@@ -3057,7 +3887,11 @@ function markLayoutScrollIntent(preLayoutSnapshot = null) {
 function renderTimelinePreservingScroll() {
   const scrollSnapshot = captureScrollSnapshot();
   scrollDebug("render-preserving-scroll", { scrollSnapshot });
-  renderTimeline(state.events);
+  if (isCombinedView()) {
+    renderCombinedRuns(state.combinedRuns);
+  } else {
+    renderTimeline(state.events);
+  }
   restoreScrollAfterRender(scrollSnapshot, { immediate: true });
 }
 
@@ -3066,6 +3900,12 @@ async function refreshActiveRun() {
     scrollDebug("refresh-skipped", {
       autoRefresh: isAutoRefreshEnabled(),
       refreshInFlight: state.refreshInFlight,
+    });
+    return;
+  }
+  if (shouldPauseRefreshForMobileScroll()) {
+    scrollDebug("refresh-skipped-mobile-scroll", {
+      remainingMs: Math.max(0, Math.round(state.mobileScrollPauseUntil - performance.now())),
     });
     return;
   }
@@ -3091,23 +3931,59 @@ async function refreshActiveRun() {
 
 refreshRuns.addEventListener("click", () => loadRuns({
   preserveSelection: true,
+  ignoreUrl: true,
   scrollSnapshot: captureScrollSnapshot(),
 }));
-reloadRun.addEventListener("click", () => loadRun(state.selectedRun, {
-  scrollSnapshot: captureScrollSnapshot(),
-}));
-runSelect.addEventListener("change", e => loadRun(e.target.value));
+reloadRun.addEventListener("click", () => {
+  const scrollSnapshot = captureScrollSnapshot();
+  if (isCombinedView()) {
+    loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
+  } else {
+    loadRun(state.selectedRun, { scrollSnapshot });
+  }
+});
+runSelect.addEventListener("change", e => {
+  if (combinedViewToggle?.checked) {
+    combinedViewToggle.checked = false;
+    setUrlParam("view", "run");
+  }
+  loadRun(e.target.value);
+});
+if (codexDetail) {
+  codexDetail.addEventListener("change", () => {
+    const scrollSnapshot = captureScrollSnapshot();
+    if (isCombinedView()) {
+      loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
+    } else {
+      loadRun(state.selectedRun, { scrollSnapshot });
+    }
+  });
+}
 eventFilter.addEventListener("input", renderTimelinePreservingScroll);
 hideNoiseToggle.addEventListener("change", renderTimelinePreservingScroll);
+if (combinedViewToggle) {
+  combinedViewToggle.addEventListener("change", () => {
+    setUrlParam("view", combinedViewToggle.checked ? null : "run");
+    loadRuns({
+      preserveSelection: true,
+      ignoreUrl: true,
+      scrollSnapshot: captureScrollSnapshot({ preferScrollTop: true }),
+    });
+  });
+}
 if (fullViewToggle) {
   fullViewToggle.addEventListener("change", renderTimelinePreservingScroll);
 }
 window.addEventListener("scroll", handleObservedScroll, { passive: true });
+window.addEventListener("resize", scheduleProgressDockSpaceUpdate, { passive: true });
 window.addEventListener("focusin", (event) => {
   scrollDebug("focusin", { target: describeElementForScroll(event.target) });
 }, { passive: true });
 window.addEventListener("wheel", () => markUserScrollIntent("wheel"), { passive: true });
+window.addEventListener("touchstart", () => markUserScrollIntent("touchstart"), { passive: true });
 window.addEventListener("touchmove", () => markUserScrollIntent("touchmove"), { passive: true });
+window.addEventListener("touchend", () => markMobileScrollPause("touchend"), { passive: true });
+window.addEventListener("touchcancel", () => markMobileScrollPause("touchcancel"), { passive: true });
 window.addEventListener("pointerdown", () => markUserScrollIntent("pointerdown"), { passive: true });
 window.addEventListener("keydown", (event) => {
   if (SCROLL_KEYS.has(event.key)) {
@@ -3130,6 +4006,8 @@ scrollDebug("app-loaded", {
   userAgent: navigator.userAgent,
   debugEnabled: state.scrollDebugEnabled,
 });
+
+initializeViewControls();
 
 loadRuns().catch(err => {
   summaryEl.innerHTML = `<div><strong>error</strong>${err.message}</div>`;
