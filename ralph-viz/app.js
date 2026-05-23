@@ -66,7 +66,8 @@ let progressDockSpaceFrame = 0;
 // Noise event types that clutter the view
 const NOISE_TYPES = new Set([
   "thread.started", "turn.started", "turn.completed", "turn.failed",
-  "item.started", "error", "codex.session.token_count", "ralph.test-status",
+  "item.started", "error", "codex.session.token_count", "codex.task_complete",
+  "codex.thread_goal_updated", "ralph.test-status",
   // Gemini streaming noise
   "content", "finished", "model_info", "tool_call_response",
 ]);
@@ -1248,6 +1249,7 @@ function buildTurnMap(events) {
 function buildTurnDurationMap(records) {
   const map = new Map();
   const spansByTurnThread = new Map();
+  const sessionTimingByTurn = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1264,6 +1266,29 @@ function buildTurnDurationMap(records) {
     threadSpan.first = Math.min(threadSpan.first, time);
     threadSpan.last = Math.max(threadSpan.last, time);
     spansByTurnThread.set(threadKey, threadSpan);
+
+    if (isCodexTimingActivity(record)) {
+      const timing = sessionTimingByTurn.get(turn) ?? {
+        durationMs: 0,
+        goalTimeUsedMs: 0,
+        sessionFirstMs: null,
+        sessionLastMs: null,
+      };
+      timing.sessionFirstMs = timing.sessionFirstMs == null ? time : Math.min(timing.sessionFirstMs, time);
+      timing.sessionLastMs = timing.sessionLastMs == null ? time : Math.max(timing.sessionLastMs, time);
+      if (record.eventType === "codex.task_complete") {
+        const durationMs = Number(record.event?.durationMs ?? 0);
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+          timing.durationMs += durationMs;
+        }
+      } else if (record.eventType === "codex.thread_goal_updated") {
+        const timeUsedSeconds = Number(record.event?.timeUsedSeconds ?? 0);
+        if (Number.isFinite(timeUsedSeconds) && timeUsedSeconds > 0) {
+          timing.goalTimeUsedMs = Math.max(timing.goalTimeUsedMs, timeUsedSeconds * 1000);
+        }
+      }
+      sessionTimingByTurn.set(turn, timing);
+    }
   }
   for (const threadSpan of spansByTurnThread.values()) {
     const span = map.get(threadSpan.turn);
@@ -1271,7 +1296,26 @@ function buildTurnDurationMap(records) {
       span.durationMs += Math.max(0, threadSpan.last - threadSpan.first);
     }
   }
+  for (const [turn, timing] of sessionTimingByTurn.entries()) {
+    const span = map.get(turn);
+    if (!span) {
+      continue;
+    }
+    if (timing.durationMs > 0) {
+      span.durationMs = timing.durationMs;
+    } else if (timing.goalTimeUsedMs > 0) {
+      span.durationMs = timing.goalTimeUsedMs;
+    } else if (timing.sessionFirstMs != null && timing.sessionLastMs != null) {
+      span.durationMs = Math.max(0, timing.sessionLastMs - timing.sessionFirstMs);
+    }
+  }
   return map;
+}
+
+function isCodexTimingActivity(record) {
+  return record.eventType === "codex.session.token_count" ||
+    record.eventType === "codex.task_complete" ||
+    record.eventType === "codex.thread_goal_updated";
 }
 
 function durationText(span) {

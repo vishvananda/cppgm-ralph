@@ -24,7 +24,7 @@ const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 3;
+const RUN_USAGE_CACHE_VERSION = 4;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
@@ -287,6 +287,7 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
 async function buildRunUsageSummary(filePath, fileBase, stat, events, precision) {
   const bounds = eventTimeBounds(events);
   const threadIds = inferThreadIdsFromRun(filePath, events);
+  const sessionTiming = await readCodexThreadTiming(threadIds, buildSessionTurnResolver(events));
   const tokenUsage = usageFromTokenEventsByThread(events);
   const threadUsages = [...tokenUsage.threadUsages];
   const coveredThreadIds = new Set(threadUsages.map((entry) => entry.threadId));
@@ -322,7 +323,7 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
     unthreadedUsage,
     firstAt: bounds.firstAt,
     lastAt: bounds.lastAt,
-    durationMs: turnExecutionDurationMs(events) || bounds.durationMs,
+    durationMs: turnExecutionDurationMs(events, sessionTiming) || bounds.durationMs,
     mtime: stat.mtime.toISOString(),
   }, stat, fileBase);
 }
@@ -560,7 +561,26 @@ function activeEventDurationMs(timedEvents) {
   return durationMs;
 }
 
-function turnExecutionDurationMs(events) {
+function turnExecutionDurationMs(events, sessionTiming = new Map()) {
+  const fallbackDurations = ralphEventTurnDurationFallbacks(events);
+  const turns = new Set([...fallbackDurations.keys(), ...sessionTiming.keys()]);
+  let durationMs = 0;
+  for (const turn of turns) {
+    const timing = sessionTiming.get(turn);
+    if (timing?.durationMs > 0) {
+      durationMs += timing.durationMs;
+    } else if (timing?.goalTimeUsedMs > 0) {
+      durationMs += timing.goalTimeUsedMs;
+    } else if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
+      durationMs += Math.max(0, timing.sessionLastMs - timing.sessionFirstMs);
+    } else {
+      durationMs += fallbackDurations.get(turn) ?? 0;
+    }
+  }
+  return durationMs;
+}
+
+function ralphEventTurnDurationFallbacks(events) {
   const spansByTurnThread = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
@@ -572,17 +592,17 @@ function turnExecutionDurationMs(events) {
       continue;
     }
     const key = `${turn}\0${event.threadId ?? ""}`;
-    const span = spansByTurnThread.get(key) ?? { first: time, last: time };
+    const span = spansByTurnThread.get(key) ?? { turn, first: time, last: time };
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
     spansByTurnThread.set(key, span);
   }
 
-  let durationMs = 0;
+  const durations = new Map();
   for (const span of spansByTurnThread.values()) {
-    durationMs += Math.max(0, span.last - span.first);
+    durations.set(span.turn, (durations.get(span.turn) ?? 0) + Math.max(0, span.last - span.first));
   }
-  return durationMs;
+  return durations;
 }
 
 function isCommandStartEvent(event) {
@@ -593,6 +613,69 @@ function isCommandStartEvent(event) {
 function isCommandEndEvent(event) {
   return event.eventType === "item.completed" &&
     event.event?.item?.type === "command_execution";
+}
+
+async function readCodexThreadTiming(threadIds, resolveTurn) {
+  const timingByTurn = new Map();
+  for (const threadId of threadIds) {
+    const files = await findCodexSessionFiles(threadId);
+    for (const filePath of files.sort()) {
+      await readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn);
+    }
+  }
+  return timingByTurn;
+}
+
+async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn) {
+  const lines = readline.createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (
+      !line.includes('"type":"token_count"') &&
+      !line.includes('"type":"task_complete"') &&
+      !line.includes('"type":"thread_goal_updated"')
+    ) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+
+    const time = Date.parse(record.timestamp ?? "");
+    const turn = resolveTurn(record.timestamp);
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const timing = timingByTurn.get(turn) ?? {
+      durationMs: 0,
+      goalTimeUsedMs: 0,
+      sessionFirstMs: null,
+      sessionLastMs: null,
+    };
+    if (Number.isFinite(time)) {
+      timing.sessionFirstMs = timing.sessionFirstMs == null ? time : Math.min(timing.sessionFirstMs, time);
+      timing.sessionLastMs = timing.sessionLastMs == null ? time : Math.max(timing.sessionLastMs, time);
+    }
+
+    if (record.type === "event_msg" && record.payload?.type === "task_complete") {
+      const durationMs = Number(record.payload.duration_ms ?? 0);
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        timing.durationMs += durationMs;
+      }
+    } else if (record.type === "event_msg" && record.payload?.type === "thread_goal_updated") {
+      const timeUsedSeconds = Number(record.payload.goal?.timeUsedSeconds ?? 0);
+      if (Number.isFinite(timeUsedSeconds) && timeUsedSeconds > 0) {
+        timing.goalTimeUsedMs = Math.max(timing.goalTimeUsedMs, timeUsedSeconds * 1000);
+      }
+    }
+    timingByTurn.set(turn, timing);
+  }
 }
 
 async function readCodexThreadUsage(threadId, mode = "full") {
@@ -2145,7 +2228,9 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
 }
 
 function isAlwaysKeptSessionEvent(event) {
-  return event.eventType === "codex.session.token_count";
+  return event.eventType === "codex.session.token_count" ||
+    event.eventType === "codex.task_complete" ||
+    event.eventType === "codex.thread_goal_updated";
 }
 
 async function findCodexSessionFiles(threadId) {
@@ -2271,6 +2356,20 @@ function convertCodexEventMessage(payload, context) {
     return buildVizRecord(context, "codex.session.token_count", {
       type: "codex.session.token_count",
       usage: payload.info.total_token_usage,
+      raw: payload,
+    });
+  }
+  if (payload.type === "task_complete") {
+    return buildVizRecord(context, "codex.task_complete", {
+      type: "codex.task_complete",
+      durationMs: Number(payload.duration_ms ?? 0),
+      raw: payload,
+    });
+  }
+  if (payload.type === "thread_goal_updated") {
+    return buildVizRecord(context, "codex.thread_goal_updated", {
+      type: "codex.thread_goal_updated",
+      timeUsedSeconds: Number(payload.goal?.timeUsedSeconds ?? 0),
       raw: payload,
     });
   }
