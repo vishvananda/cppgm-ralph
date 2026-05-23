@@ -1446,6 +1446,15 @@ function tokenCountRecords(records) {
     .sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
 }
 
+function tokenCountThreadKey(record) {
+  return record?.threadId ?? record?.event?.thread_id ?? record?.event?.threadId ?? "";
+}
+
+function isUsageBaselineRecord(record) {
+  return record?.eventType === "codex.session.token_count" &&
+    (record?.event?.baseline === true || record?._usageBaseline === true);
+}
+
 function latestCumulativeUsage(records) {
   const tokenRecords = tokenCountRecords(records);
   if (tokenRecords.length) {
@@ -1461,14 +1470,20 @@ function latestCumulativeUsage(records) {
 
 function cumulativeUsageFromTokenRecords(tokenRecords) {
   let total = emptyUsage();
-  let previous = null;
+  const previousByThread = new Map();
   for (const record of tokenRecords) {
     const current = normalizeUsage(record.event.usage);
     if (!hasTokenUsage(current)) {
       continue;
     }
+    const threadId = tokenCountThreadKey(record);
+    if (isUsageBaselineRecord(record)) {
+      previousByThread.set(threadId, current);
+      continue;
+    }
+    const previous = previousByThread.get(threadId) ?? null;
     total = addUsage(total, usageDelta(current, previous));
-    previous = current;
+    previousByThread.set(threadId, current);
   }
   return hasTokenUsage(total) ? total : null;
 }
@@ -1563,11 +1578,17 @@ function buildUsageMap(records) {
   const map = new Map();
   const tokenRecords = tokenCountRecords(records);
   if (tokenRecords.length) {
-    let previous = null;
+    const previousByThread = new Map();
     for (const record of tokenRecords) {
       const current = normalizeUsage(record.event.usage);
+      const threadId = tokenCountThreadKey(record);
+      if (isUsageBaselineRecord(record)) {
+        previousByThread.set(threadId, current);
+        continue;
+      }
+      const previous = previousByThread.get(threadId) ?? null;
       const delta = usageDelta(current, previous);
-      previous = current;
+      previousByThread.set(threadId, current);
       if (!hasTokenUsage(delta)) continue;
       const turn = displayTurnForRecord(record);
       map.set(turn, addUsage(map.get(turn), delta));

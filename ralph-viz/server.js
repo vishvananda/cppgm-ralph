@@ -361,6 +361,10 @@ function usageFromTokenEventsByThread(events) {
       continue;
     }
     const threadId = eventThreadId(record) ?? "";
+    if (isUsageBaselineRecord(record)) {
+      previousByThread.set(threadId, current);
+      continue;
+    }
     const previous = previousByThread.get(threadId) ?? null;
     const delta = usageDelta(current, previous);
     previousByThread.set(threadId, current);
@@ -713,6 +717,10 @@ function usageFromVizEvents(events) {
         continue;
       }
       const threadId = eventThreadId(record) ?? "";
+      if (isUsageBaselineRecord(record)) {
+        previousByThread.set(threadId, usage);
+        continue;
+      }
       const previous = previousByThread.get(threadId) ?? null;
       total = addUsage(total, usageDelta(usage, previous));
       previousByThread.set(threadId, usage);
@@ -1646,6 +1654,11 @@ function eventThreadId(event) {
     null;
 }
 
+function isUsageBaselineRecord(event) {
+  return event?.eventType === "codex.session.token_count" &&
+    (event?.event?.baseline === true || event?._usageBaseline === true);
+}
+
 function inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions) {
   const ids = [];
   const seen = new Set();
@@ -1850,7 +1863,8 @@ function buildSessionReadOptions(selectedWindows, detailOptions) {
     maxTime,
     maxEventsPerTurn: detailOptions.maxEventsPerTurn ?? DEFAULT_CODEX_MAX_EVENTS_PER_TURN,
     outputLimit: detailOptions.outputLimit ?? CODEX_SESSION_OUTPUT_LIMIT,
-    skipTokenCounts: true,
+    skipTokenCounts: false,
+    includeTokenBaseline: true,
   };
 }
 
@@ -1889,6 +1903,8 @@ async function readCodexSessionEvents(threadId, resolveTurnNumber, readOptions =
     commandsByCallId: new Map(),
     functionCallsByCallId: new Map(),
     commandsBySessionId: new Map(),
+    tokenBaseline: null,
+    tokenBaselineEmitted: false,
   };
   for (const filePath of files) {
     const tailLines = shouldReadCodexSessionFromTail(readOptions)
@@ -1923,7 +1939,12 @@ function processCodexSessionLine(rawLine, readOptions, context, events) {
   if (timestamp && shouldStopSessionRead(timestamp, readOptions)) {
     return "stop";
   }
-  if (readOptions.mode !== "all" && !timestampIncludedBySessionReadOptions(timestamp, readOptions)) {
+  const includedByTimestamp = readOptions.mode === "all" ||
+    timestampIncludedBySessionReadOptions(timestamp, readOptions);
+  if (
+    !includedByTimestamp &&
+    !shouldParseOutOfWindowSessionLineForUsageBaseline(line, timestamp, readOptions)
+  ) {
     return "continue";
   }
   let record;
@@ -1932,21 +1953,63 @@ function processCodexSessionLine(rawLine, readOptions, context, events) {
   } catch (_) {
     return "continue";
   }
+  const converted = convertCodexSessionRecord(record, context);
+  if (!converted) {
+    return "continue";
+  }
   if (
     readOptions.mode !== "all" &&
     !timestampIncludedBySessionReadOptions(record.timestamp, readOptions)
   ) {
-    return "continue";
-  }
-  const converted = convertCodexSessionRecord(record, context);
-  if (!converted) {
+    rememberTokenBaseline(converted, readOptions, context);
     return "continue";
   }
   if (readOptions.skipTokenCounts && converted.eventType === "codex.session.token_count") {
     return "continue";
   }
+  emitTokenBaselineIfNeeded(converted, readOptions, context, events);
   events.push(compactConvertedSessionEvent(converted, readOptions.outputLimit));
   return "continue";
+}
+
+function rememberTokenBaseline(record, readOptions, context) {
+  if (!readOptions.includeTokenBaseline || record.eventType !== "codex.session.token_count") {
+    return;
+  }
+  if (!record.event?.usage) {
+    return;
+  }
+  const time = Date.parse(record.recordedAt ?? "");
+  if (!Number.isFinite(time) || time >= readOptions.minTime) {
+    return;
+  }
+  context.tokenBaseline = {
+    ...record,
+    _usageBaseline: true,
+    event: {
+      ...record.event,
+      baseline: true,
+    },
+  };
+}
+
+function shouldParseOutOfWindowSessionLineForUsageBaseline(line, timestamp, readOptions) {
+  if (!readOptions.includeTokenBaseline || !String(line ?? "").includes('"type":"token_count"')) {
+    return false;
+  }
+  const time = Date.parse(timestamp ?? "");
+  return Number.isFinite(time) && time < readOptions.minTime;
+}
+
+function emitTokenBaselineIfNeeded(record, readOptions, context, events) {
+  if (!readOptions.includeTokenBaseline || context.tokenBaselineEmitted) {
+    return;
+  }
+  if (record.eventType !== "codex.session.token_count" || !context.tokenBaseline) {
+    return;
+  }
+  events.push(compactConvertedSessionEvent(context.tokenBaseline, readOptions.outputLimit));
+  context.tokenBaselineEmitted = true;
 }
 
 function shouldReadCodexSessionFromTail(readOptions) {
@@ -2051,6 +2114,9 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
       group.forEach((event) => keep.add(event));
       continue;
     }
+    group
+      .filter(isAlwaysKeptSessionEvent)
+      .forEach((event) => keep.add(event));
     const tail = group.slice(-maxEventsPerTurn);
     tail.forEach((event) => keep.add(event));
     const neededCommandStarts = new Set(
@@ -2075,6 +2141,10 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
   }
 
   return events.filter((event) => keep.has(event));
+}
+
+function isAlwaysKeptSessionEvent(event) {
+  return event.eventType === "codex.session.token_count";
 }
 
 async function findCodexSessionFiles(threadId) {
