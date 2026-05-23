@@ -1817,6 +1817,7 @@ async function runPhaseChecks(state, phase) {
 
 async function runCheckWithTimeoutRetries({ phase, check, context, previousTestStatus }) {
   let retryAttempts = 0;
+  await removeDevBuildLockBeforeTestCheck(check);
   let run = await runCheckCommand(context);
   let testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
 
@@ -1826,11 +1827,47 @@ async function runCheckWithTimeoutRetries({ phase, check, context, previousTestS
       `Retrying ${phase.name} check ${check.name} after timeout-only failure ` +
         `(${retryAttempts}/${CONFIG.testTimeoutRetries}): ${formatTestStatusSummary(testStatus)}`,
     );
+    await removeDevBuildLockBeforeTestCheck(check);
     run = await runCheckCommand(context);
     testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
   }
 
   return { run, testStatus, retryAttempts };
+}
+
+async function removeDevBuildLockBeforeTestCheck(check) {
+  if (check.kind !== "test") {
+    return;
+  }
+
+  const lockPath = path.join(CONFIG.workdir, "obj", ".dev-build.lock");
+  let stat;
+  try {
+    stat = await fs.lstat(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    if (stat.isDirectory()) {
+      await fs.rmdir(lockPath);
+    } else {
+      await fs.rm(lockPath, { force: true });
+    }
+    log(`Removed stale dev build lock before test check: ${lockPath}`);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    if (error?.code === "ENOTEMPTY" || error?.code === "EEXIST") {
+      log(`Dev build lock is not empty; leaving it in place: ${lockPath}`);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function runCheckCommand(context) {
