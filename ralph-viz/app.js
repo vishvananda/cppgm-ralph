@@ -1247,7 +1247,7 @@ function buildTurnMap(events) {
 
 function buildTurnDurationMap(records) {
   const map = new Map();
-  const eventsByTurnThread = new Map();
+  const spansByTurnThread = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1260,16 +1260,15 @@ function buildTurnDurationMap(records) {
     map.set(turn, span);
 
     const threadKey = `${turn}\0${record.threadId ?? ""}`;
-    const events = eventsByTurnThread.get(threadKey) ?? [];
-    events.push(record);
-    eventsByTurnThread.set(threadKey, events);
+    const threadSpan = spansByTurnThread.get(threadKey) ?? { turn, first: time, last: time };
+    threadSpan.first = Math.min(threadSpan.first, time);
+    threadSpan.last = Math.max(threadSpan.last, time);
+    spansByTurnThread.set(threadKey, threadSpan);
   }
-  for (const [key, events] of eventsByTurnThread.entries()) {
-    const turnText = key.split("\0", 1)[0];
-    const turn = turnText === "setup" ? "setup" : Number.parseInt(turnText, 10);
-    const span = map.get(turn);
+  for (const threadSpan of spansByTurnThread.values()) {
+    const span = map.get(threadSpan.turn);
     if (span) {
-      span.durationMs += activeEventDurationMs(events);
+      span.durationMs += Math.max(0, threadSpan.last - threadSpan.first);
     }
   }
   return map;

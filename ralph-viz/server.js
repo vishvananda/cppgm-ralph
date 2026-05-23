@@ -24,7 +24,7 @@ const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 2;
+const RUN_USAGE_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
@@ -561,7 +561,7 @@ function activeEventDurationMs(timedEvents) {
 }
 
 function turnExecutionDurationMs(events) {
-  const eventsByTurnThread = new Map();
+  const spansByTurnThread = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -572,14 +572,15 @@ function turnExecutionDurationMs(events) {
       continue;
     }
     const key = `${turn}\0${event.threadId ?? ""}`;
-    const timedEvents = eventsByTurnThread.get(key) ?? [];
-    timedEvents.push({ ...event, time });
-    eventsByTurnThread.set(key, timedEvents);
+    const span = spansByTurnThread.get(key) ?? { first: time, last: time };
+    span.first = Math.min(span.first, time);
+    span.last = Math.max(span.last, time);
+    spansByTurnThread.set(key, span);
   }
 
   let durationMs = 0;
-  for (const timedEvents of eventsByTurnThread.values()) {
-    durationMs += activeEventDurationMs(timedEvents);
+  for (const span of spansByTurnThread.values()) {
+    durationMs += Math.max(0, span.last - span.first);
   }
   return durationMs;
 }
