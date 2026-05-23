@@ -141,6 +141,28 @@ function resolveRunFile(spec, ralphDir) {
   throw new Error(`could not resolve run spec: ${spec}`);
 }
 
+function readRunState(filePath) {
+  const statePath = path.join(path.dirname(path.dirname(filePath)), "state.json");
+  if (!fs.existsSync(statePath)) {
+    return null;
+  }
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const activeStage = typeof state.activeStage === "string" ? state.activeStage : null;
+    return {
+      statePath,
+      activeStage,
+      activeStageNumber: stageNumber(activeStage),
+      activePhase: typeof state.activePhase === "string" ? state.activePhase : null,
+      activeSubset: typeof state.activeSubset === "string" ? state.activeSubset : null,
+      turnsCompleted: Number.isInteger(state.turnsCompleted) ? state.turnsCompleted : null,
+      phaseAttempted: state.phaseAttempted === true,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function newestJsonl(directory) {
   const files = fs
     .readdirSync(directory, { withFileTypes: true })
@@ -289,6 +311,10 @@ function buildTurnMeta(events) {
         sessionLastMs: null,
         hasTaskComplete: false,
         hasSessionActivity: false,
+        hasUsageLimitedGoal: false,
+        goalStatus: null,
+        phaseStatusComplete: null,
+        failedRequiredCheckCount: 0,
         goalTimeUsedMs: 0,
         tokenEvents: 0,
       });
@@ -314,11 +340,20 @@ function buildTurnMeta(events) {
     }
     if (event.eventType === "ralph.phase-status") {
       const status = event.event?.phaseStatus ?? {};
-      set(turn, {
+      const fields = {
         stage: status.stage,
         phase: status.phase,
         subset: status.subset,
-      });
+      };
+      if (typeof status.allRequiredPassed === "boolean") {
+        fields.phaseStatusComplete = status.allRequiredPassed;
+        fields.failedRequiredCheckCount = Array.isArray(status.failedRequiredChecks)
+          ? status.failedRequiredChecks.length
+          : status.allRequiredPassed
+            ? 0
+            : 1;
+      }
+      set(turn, fields);
     } else if (event.eventType === "ralph.prompt") {
       const prompt = String(event.event?.prompt ?? "");
       set(turn, inferPromptTarget(prompt));
@@ -498,6 +533,13 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
       if (slot && Number.isFinite(timeUsedSeconds) && timeUsedSeconds > 0) {
         slot.goalTimeUsedMs = Math.max(slot.goalTimeUsedMs, timeUsedSeconds * 1000);
       }
+      const status = record.payload.goal?.status;
+      if (slot && typeof status === "string" && status) {
+        slot.goalStatus = status;
+        if (status === "usageLimited") {
+          slot.hasUsageLimitedGoal = true;
+        }
+      }
     }
   }
 }
@@ -535,6 +577,7 @@ function fillDurationFallbacks(events, byTurn) {
 async function summarizeRun(options, side) {
   const spec = options[side];
   const filePath = resolveRunFile(spec, options.ralphDir);
+  const state = readRunState(filePath);
   const events = readJsonl(filePath);
   const byTurn = buildTurnMeta(events);
   const resolveTurn = buildTurnResolver(events);
@@ -566,6 +609,8 @@ async function summarizeRun(options, side) {
         durationMs: 0,
         cost: 0,
         activeTurns: 0,
+        incompleteTurns: 0,
+        usageLimitedTurns: 0,
       });
     }
     const row = byPa.get(pa);
@@ -577,16 +622,31 @@ async function summarizeRun(options, side) {
     if (turnInfo.hasSessionActivity && !turnInfo.hasTaskComplete) {
       row.activeTurns += 1;
     }
+    if (turnInfo.hasUsageLimitedGoal) {
+      row.usageLimitedTurns += 1;
+    }
+    if (isIncompleteTurn(turnInfo)) {
+      row.incompleteTurns += 1;
+    }
   }
 
   return {
     side,
     spec,
     filePath,
+    state,
     model,
     byTurn,
     byPa,
   };
+}
+
+function isIncompleteTurn(turnInfo) {
+  return (
+    turnInfo.phaseStatusComplete === false ||
+    turnInfo.hasUsageLimitedGoal ||
+    (turnInfo.hasSessionActivity && !turnInfo.hasTaskComplete)
+  );
 }
 
 function paSummary(run, pa) {
@@ -602,9 +662,22 @@ function paSummary(run, pa) {
       phases: "",
     };
   }
+  const number = stageNumber(pa);
+  const runAdvancedPastPa =
+    Number.isInteger(number) &&
+    Number.isInteger(run.state?.activeStageNumber) &&
+    run.state.activeStageNumber > number;
+  const activeInThisPa =
+    Number.isInteger(number) &&
+    run.state?.activeStageNumber === number &&
+    Boolean(run.state?.activePhase);
   return {
     ...row,
-    status: row.activeTurns > 0 ? "partial" : "complete",
+    status: runAdvancedPastPa
+      ? "complete"
+      : activeInThisPa || row.incompleteTurns > 0
+        ? "partial"
+        : "complete",
     phases: [...row.phases.entries()].map(([phase, count]) => `${phase}:${count}`).join(","),
   };
 }
@@ -617,8 +690,10 @@ function totalSummary(rows) {
       cost: total.cost + row.cost,
       usage: addUsage(total.usage, row.usage),
       activeTurns: total.activeTurns + (row.activeTurns ?? 0),
+      incompleteTurns: total.incompleteTurns + (row.incompleteTurns ?? 0),
+      partialRows: total.partialRows + (row.status === "partial" ? 1 : 0),
     }),
-    { turns: 0, durationMs: 0, cost: 0, usage: emptyUsage(), activeTurns: 0 },
+    { turns: 0, durationMs: 0, cost: 0, usage: emptyUsage(), activeTurns: 0, incompleteTurns: 0, partialRows: 0 },
   );
 }
 
@@ -699,12 +774,12 @@ function renderMarkdown(comparison) {
   lines.push("");
   lines.push(`Pricing: ${left}=${comparison.left.model}, ${right}=${comparison.right.model}.`);
   lines.push(`Run files: ${comparison.left.filePath}; ${comparison.right.filePath}`);
-  lines.push("Status `partial` means at least one included turn has session activity but no task_complete event yet.");
+  lines.push("Status `partial` means Ralph is currently in that PA, a required phase check is still failing, a Codex goal hit usage limits, or an included turn has session activity but no task_complete event yet.");
   return lines.join("\n");
 }
 
 function summaryRow(run) {
-  const status = run.total.activeTurns > 0 ? "partial" : "complete";
+  const status = run.total.partialRows > 0 ? "partial" : "complete";
   return `| ${run.label} | ${run.total.turns} | ${hhhmmss(run.total.durationMs)} | ${money(run.total.cost)} | ${status} |`;
 }
 
