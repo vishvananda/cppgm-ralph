@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
+const CODEX_GOAL_CONTINUATION_GRACE_MS = 60_000;
 const CODEX_SESSION_WATCH_TAIL_BYTES = 4 * 1024 * 1024;
+const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -95,8 +97,11 @@ let PROMPT_PARTIALS = {};
 let TEST_STAGE_NAMES = [];
 let STAGE_COUNT_HINTS = new Map();
 let AUTO_TEST_SUBSETS = new Map();
+const ACTIVE_CHILD_PROCESSES = new Set();
+let shutdownInProgress = false;
 
 async function main() {
+  installProcessSignalHandlers();
   CONFIG = await loadConfig();
   PROMPT_PARTIALS = await loadPromptPartials();
   STATE_PATH = path.join(CONFIG.stateDir, "state.json");
@@ -1632,9 +1637,74 @@ function trimmedOutput(output) {
   ].join("\n");
 }
 
+function installProcessSignalHandlers() {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      if (shutdownInProgress) {
+        return;
+      }
+      shutdownInProgress = true;
+      const exitCode = signal === "SIGINT" ? 130 : 143;
+      if (ACTIVE_CHILD_PROCESSES.size > 0) {
+        process.stderr.write(
+          `Ralph received ${signal}; terminating ${ACTIVE_CHILD_PROCESSES.size} child process(es).\n`,
+        );
+      }
+      for (const child of [...ACTIVE_CHILD_PROCESSES]) {
+        terminateChildProcess(child, "SIGTERM");
+      }
+      const timer = setTimeout(() => {
+        for (const child of [...ACTIVE_CHILD_PROCESSES]) {
+          terminateChildProcess(child, "SIGKILL");
+        }
+        process.exit(exitCode);
+      }, 1500);
+      timer.unref?.();
+      if (ACTIVE_CHILD_PROCESSES.size === 0) {
+        process.exit(exitCode);
+      }
+    });
+  }
+}
+
+function spawnTracked(command, args, options = {}) {
+  const child = spawn(command, args, {
+    ...options,
+    detached: process.platform !== "win32",
+  });
+  ACTIVE_CHILD_PROCESSES.add(child);
+  const remove = () => {
+    ACTIVE_CHILD_PROCESSES.delete(child);
+  };
+  child.once("exit", remove);
+  child.once("error", remove);
+  return child;
+}
+
+function terminateChildProcess(child, signal = "SIGTERM") {
+  if (!child || child.exitCode != null || child.signalCode != null) {
+    return;
+  }
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (_) {
+    // The process may have exited between the status check and the signal.
+  }
+}
+
 async function runCommand(command, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-lc", command], {
+    const child = spawnTracked("bash", ["-lc", command], {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -2983,19 +3053,23 @@ class CodexExec {
     }
 
     const env = buildCodexExecEnv(this.envOverride, args.apiKey);
-    const child = spawn(this.codexPath, commandArgs, {
+    const child = spawnTracked(this.codexPath, commandArgs, {
       env,
       signal: args.signal,
       stdio: ["pipe", "pipe", "pipe"],
     });
     const startedAtMs = Date.now();
     let expectedTaskCompleteTermination = false;
+    let codexSessionFailure = null;
     const stopTaskCompleteWatcher = args.threadId
-      ? watchCodexSessionTaskComplete(args.threadId, startedAtMs, () => {
+      ? watchCodexSessionTaskComplete(args.threadId, startedAtMs, (result) => {
           expectedTaskCompleteTermination = true;
-          if (!child.killed) {
-            child.kill("SIGTERM");
+          if (result?.status === "incomplete") {
+            codexSessionFailure = new Error(
+              result.reason ?? "Codex task ended before the loop goal completed.",
+            );
           }
+          terminateChildProcess(child, "SIGTERM");
         })
       : null;
     let spawnError = null;
@@ -3003,7 +3077,7 @@ class CodexExec {
       spawnError = error;
     });
     if (!child.stdin || !child.stdout) {
-      child.kill();
+      terminateChildProcess(child);
       throw new Error("Codex exec did not expose stdio pipes");
     }
 
@@ -3038,6 +3112,9 @@ class CodexExec {
         throw spawnError;
       }
       const { code, signal } = await exitPromise;
+      if (codexSessionFailure) {
+        throw codexSessionFailure;
+      }
       if ((code !== 0 || signal) && !expectedTaskCompleteTermination) {
         const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
         throw new Error(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
@@ -3046,9 +3123,7 @@ class CodexExec {
       stopTaskCompleteWatcher?.();
       rl.close();
       child.removeAllListeners();
-      if (!child.killed) {
-        child.kill();
-      }
+      terminateChildProcess(child);
     }
   }
 }
@@ -3144,7 +3219,7 @@ class AntigravityExec {
     };
 
     const env = buildAntigravityExecEnv(this.options, config);
-    const child = spawn(this.pythonPath, [this.scriptPath], {
+    const child = spawnTracked(this.pythonPath, [this.scriptPath], {
       cwd: args.workingDirectory || process.cwd(),
       env,
       signal: args.signal,
@@ -3155,7 +3230,7 @@ class AntigravityExec {
       spawnError = error;
     });
     if (!child.stdin || !child.stdout) {
-      child.kill();
+      terminateChildProcess(child);
       throw new Error("Antigravity bridge did not expose stdio pipes");
     }
 
@@ -3197,9 +3272,7 @@ class AntigravityExec {
     } finally {
       rl.close();
       child.removeAllListeners();
-      if (!child.killed) {
-        child.kill();
-      }
+      terminateChildProcess(child);
     }
   }
 }
@@ -3231,10 +3304,11 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
     }
     polling = true;
     try {
-      if (await hasCodexSessionTaskComplete(threadId, startedAtMs)) {
+      const result = await getCodexSessionTaskCompletion(threadId, startedAtMs);
+      if (result.status !== "pending") {
         stopped = true;
         clearInterval(timer);
-        onComplete();
+        onComplete(result);
       }
     } catch (_) {
       // Session files are best-effort; stdout remains the primary stream.
@@ -3253,9 +3327,10 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
   };
 }
 
-async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
+async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
 	const files = await findCodexSessionFiles(threadId);
 	let latestLifecycleEvent = null;
+	let latestGoalEvent = null;
 	for (const filePath of files) {
 		const raw = await readRecentText(filePath, CODEX_SESSION_WATCH_TAIL_BYTES);
 		const lines = raw.split(/\r?\n/);
@@ -3276,30 +3351,70 @@ async function hasCodexSessionTaskComplete(threadId, startedAtMs) {
 			const eventType = record?.payload?.type;
 			if (
 				record?.type !== "event_msg" ||
-				(eventType !== "task_complete" && eventType !== "task_started")
+				(
+					eventType !== "task_complete" &&
+					eventType !== "task_started" &&
+					eventType !== "thread_goal_updated"
+				)
 			) {
 				continue;
 			}
 			const timestampMs = Date.parse(record.timestamp ?? "");
-			if (!Number.isFinite(timestampMs) || timestampMs >= startedAtMs - 5000) {
+			if (!Number.isFinite(timestampMs) || timestampMs < startedAtMs - 5000) {
+				continue;
+			}
+			if (eventType === "thread_goal_updated") {
+				latestGoalEvent = {
+					status: String(record?.payload?.goal?.status ?? ""),
+					timestampMs,
+					turnId: record?.payload?.turnId ?? null,
+				};
+			} else {
 				latestLifecycleEvent = {
 					type: eventType,
 					timestampMs,
+					turnId: record?.payload?.turn_id ?? null,
+					lastAgentMessage: record?.payload?.last_agent_message ?? null,
 				};
 			}
 		}
 	}
 
 	if (latestLifecycleEvent?.type !== "task_complete") {
-		return false;
+		return { status: "pending" };
 	}
 	if (
 		Number.isFinite(latestLifecycleEvent.timestampMs) &&
 		Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
 	) {
-		return false;
+		return { status: "pending" };
 	}
-	return true;
+	const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
+	const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
+	const latestGoalStatus = latestGoalEvent?.status ?? "";
+	if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
+		const ageMs = Number.isFinite(latestLifecycleEvent.timestampMs)
+			? Date.now() - latestLifecycleEvent.timestampMs
+			: CODEX_GOAL_CONTINUATION_GRACE_MS;
+		if (latestGoalStatus === "active" && ageMs < CODEX_GOAL_CONTINUATION_GRACE_MS) {
+			return { status: "pending" };
+		}
+		return {
+			status: "incomplete",
+			reason:
+				`Codex task ended while loop goal status was ${latestGoalStatus}; ` +
+				"leaving the Ralph turn incomplete so it can be restarted.",
+		};
+	}
+	if (!hasFinalMessage && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
+		return {
+			status: "incomplete",
+			reason:
+				"Codex task_complete did not include a final agent message; " +
+				"leaving the Ralph turn incomplete so it can be restarted.",
+		};
+	}
+	return { status: "complete" };
 }
 
 async function readRecentText(filePath, maxBytes) {
@@ -3836,7 +3951,7 @@ class CodexAppServerClient {
       return;
     }
 
-    const child = spawn(this.codexPath, ["app-server", "--listen", "stdio://"], {
+    const child = spawnTracked(this.codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -3951,7 +4066,7 @@ class CodexAppServerClient {
     if (child.stdin?.writable) {
       child.stdin.end();
     }
-    child.kill();
+    terminateChildProcess(child);
 
     await new Promise((resolve) => {
       if (child.exitCode != null || child.signalCode != null) {

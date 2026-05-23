@@ -1906,18 +1906,30 @@ function buildTurnWindows(events) {
 }
 
 function selectTurnWindows(turnWindows, detailOptions) {
+  const distinctTurnWindows = latestWindowPerTurn(turnWindows);
   if (detailOptions.mode === "all") {
     return [];
   }
   if (detailOptions.mode === "turns") {
     const wanted = new Set(detailOptions.turns ?? []);
-    return turnWindows.filter((window) => wanted.has(window.turnNumber));
+    return distinctTurnWindows.filter((window) => wanted.has(window.turnNumber));
   }
   if (detailOptions.mode === "tail") {
     const count = Math.max(1, detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS);
-    return turnWindows.slice(-count);
+    return distinctTurnWindows.slice(-count);
   }
   return [];
+}
+
+function latestWindowPerTurn(turnWindows) {
+  const byTurn = new Map();
+  for (const window of turnWindows ?? []) {
+    const previous = byTurn.get(window.turnNumber);
+    if (!previous || window.startTime > previous.startTime) {
+      byTurn.set(window.turnNumber, window);
+    }
+  }
+  return [...byTurn.values()].sort((a, b) => a.startTime - b.startTime);
 }
 
 function buildSessionReadOptions(selectedWindows, detailOptions) {
@@ -2064,7 +2076,7 @@ function rememberTokenBaseline(record, readOptions, context) {
     return;
   }
   const time = Date.parse(record.recordedAt ?? "");
-  if (!Number.isFinite(time) || time >= readOptions.minTime) {
+  if (!Number.isFinite(time) || !hasFutureIncludedWindow(time, readOptions)) {
     return;
   }
   context.tokenBaseline = {
@@ -2075,6 +2087,7 @@ function rememberTokenBaseline(record, readOptions, context) {
       baseline: true,
     },
   };
+  context.tokenBaselineEmitted = false;
 }
 
 function shouldParseOutOfWindowSessionLineForUsageBaseline(line, timestamp, readOptions) {
@@ -2082,17 +2095,24 @@ function shouldParseOutOfWindowSessionLineForUsageBaseline(line, timestamp, read
     return false;
   }
   const time = Date.parse(timestamp ?? "");
-  return Number.isFinite(time) && time < readOptions.minTime;
+  return Number.isFinite(time) &&
+    (!Number.isFinite(readOptions.maxTime) || time < readOptions.maxTime) &&
+    hasFutureIncludedWindow(time, readOptions);
+}
+
+function hasFutureIncludedWindow(time, readOptions) {
+  return (readOptions.windows ?? []).some((window) => time < window.startTime);
 }
 
 function emitTokenBaselineIfNeeded(record, readOptions, context, events) {
-  if (!readOptions.includeTokenBaseline || context.tokenBaselineEmitted) {
+  if (!readOptions.includeTokenBaseline) {
     return;
   }
   if (record.eventType !== "codex.session.token_count" || !context.tokenBaseline) {
     return;
   }
   events.push(compactConvertedSessionEvent(context.tokenBaseline, readOptions.outputLimit));
+  context.tokenBaseline = null;
   context.tokenBaselineEmitted = true;
 }
 

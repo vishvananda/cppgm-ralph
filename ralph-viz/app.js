@@ -2647,7 +2647,11 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
 
   const progress = new Map();
   for (const [stage, state] of stages.entries()) {
-    const targets = [...state.targets.values()];
+    const entries = [...state.targets.entries()];
+    const nonAggregateEntries = entries.filter(([target]) =>
+      !isStageAggregateProgressTarget(target, stage));
+    const targets = (nonAggregateEntries.length ? nonAggregateEntries : entries)
+      .map(([, target]) => target);
     const passed = targets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
     const total = targets.reduce((sum, target) => sum + (target.total ?? 0), 0);
     const failed = targets.some((target) => target.status === "fail");
@@ -2660,6 +2664,11 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
     });
   }
   return progress;
+}
+
+function isStageAggregateProgressTarget(target, stage) {
+  const normalized = cleanText(target).replace(/\s+/g, " ");
+  return normalized === `${stage} tests` || normalized === `${stage}/tests`;
 }
 
 function setStageTargetProgress(stages, options) {
