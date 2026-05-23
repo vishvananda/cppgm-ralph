@@ -1250,6 +1250,7 @@ function buildTurnDurationMap(records) {
   const map = new Map();
   const spansByTurnThread = new Map();
   const sessionTimingByTurn = new Map();
+  const ralphLifecycleByTurn = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1289,11 +1290,35 @@ function buildTurnDurationMap(records) {
       }
       sessionTimingByTurn.set(turn, timing);
     }
+
+    if (record.eventType === "ralph.phase-status") {
+      const lifecycle = ralphLifecycleByTurn.get(turn) ?? { startMs: null, checkedMs: null };
+      if (record.event?.action === "turn-start") {
+        lifecycle.startMs = lifecycle.startMs == null ? time : Math.max(lifecycle.startMs, time);
+        if (lifecycle.checkedMs != null && lifecycle.checkedMs < lifecycle.startMs) {
+          lifecycle.checkedMs = null;
+        }
+      } else if (record.event?.action === "checked") {
+        lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
+      }
+      ralphLifecycleByTurn.set(turn, lifecycle);
+    }
   }
   for (const threadSpan of spansByTurnThread.values()) {
     const span = map.get(threadSpan.turn);
     if (span) {
       span.durationMs += Math.max(0, threadSpan.last - threadSpan.first);
+    }
+  }
+  for (const [turn, lifecycle] of ralphLifecycleByTurn.entries()) {
+    const span = map.get(turn);
+    if (
+      span &&
+      Number.isFinite(lifecycle.startMs) &&
+      Number.isFinite(lifecycle.checkedMs) &&
+      lifecycle.checkedMs >= lifecycle.startMs
+    ) {
+      span.durationMs = lifecycle.checkedMs - lifecycle.startMs;
     }
   }
   for (const [turn, timing] of sessionTimingByTurn.entries()) {
@@ -1313,6 +1338,9 @@ function buildTurnDurationMap(records) {
 }
 
 function isCodexTimingActivity(record) {
+  if (isUsageBaselineRecord(record)) {
+    return false;
+  }
   return record.eventType === "codex.session.token_count" ||
     record.eventType === "codex.task_complete" ||
     record.eventType === "codex.thread_goal_updated";

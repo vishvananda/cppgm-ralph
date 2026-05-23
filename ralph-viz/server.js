@@ -582,6 +582,7 @@ function turnExecutionDurationMs(events, sessionTiming = new Map()) {
 
 function ralphEventTurnDurationFallbacks(events) {
   const spansByTurnThread = new Map();
+  const lifecycleByTurn = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -596,11 +597,33 @@ function ralphEventTurnDurationFallbacks(events) {
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
     spansByTurnThread.set(key, span);
+
+    if (event.eventType === "ralph.phase-status") {
+      const lifecycle = lifecycleByTurn.get(turn) ?? { startMs: null, checkedMs: null };
+      if (event.event?.action === "turn-start") {
+        lifecycle.startMs = lifecycle.startMs == null ? time : Math.max(lifecycle.startMs, time);
+        if (lifecycle.checkedMs != null && lifecycle.checkedMs < lifecycle.startMs) {
+          lifecycle.checkedMs = null;
+        }
+      } else if (event.event?.action === "checked") {
+        lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
+      }
+      lifecycleByTurn.set(turn, lifecycle);
+    }
   }
 
   const durations = new Map();
   for (const span of spansByTurnThread.values()) {
     durations.set(span.turn, (durations.get(span.turn) ?? 0) + Math.max(0, span.last - span.first));
+  }
+  for (const [turn, lifecycle] of lifecycleByTurn.entries()) {
+    if (
+      Number.isFinite(lifecycle.startMs) &&
+      Number.isFinite(lifecycle.checkedMs) &&
+      lifecycle.checkedMs >= lifecycle.startMs
+    ) {
+      durations.set(turn, lifecycle.checkedMs - lifecycle.startMs);
+    }
   }
   return durations;
 }
