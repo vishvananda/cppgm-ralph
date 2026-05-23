@@ -68,7 +68,7 @@ my %seen_file;
 
 my @fatal;
 my @warning;
-my %source_by_file;
+my %logical_by_file;
 my %line_count_by_file;
 my %stem_groups;
 
@@ -76,21 +76,23 @@ for my $file (@files) {
     my $rel = relative_path($file, $root);
     next if is_exempt_file($rel);
     my $text = read_text($file);
-    $source_by_file{$rel} = $text;
+    my $comment_masked_text = mask_comments($text);
+    my $code_masked_text = mask_comments_and_strings($text);
+    $logical_by_file{$rel} = [normalized_logical_lines_from_masked($code_masked_text)];
     my $line_count = count_lines($text);
     $line_count_by_file{$rel} = $line_count;
     push @{$stem_groups{division_stem($rel)}}, $rel;
 
     check_file_size($rel, $line_count, \@fatal);
     check_file_name($rel, $line_count, \@fatal, \@warning);
-    check_includes($rel, $text, \%included_by, \@fatal, \@warning);
-    check_shortcut_smells($rel, $text, \@fatal, \@warning);
-    check_functions($rel, $text, \@fatal, \@warning);
-    check_header_body_weight($rel, $text, \@fatal, \@warning);
+    check_includes($rel, $text, $comment_masked_text, $code_masked_text, \%included_by, \@fatal, \@warning);
+    check_shortcut_smells($rel, $text, $comment_masked_text, $code_masked_text, \@fatal, \@warning);
+    check_functions($rel, $code_masked_text, \@fatal, \@warning);
+    check_header_body_weight($rel, $code_masked_text, \@fatal, \@warning);
 }
 
 check_stem_groups(\%stem_groups, \@warning);
-check_duplicate_blocks(\%source_by_file, \@warning);
+check_duplicate_blocks(\%logical_by_file, \@warning);
 
 my $stage_text = $opt{stage} ? " for $opt{stage}" : '';
 if (!@fatal && !@warning) {
@@ -348,7 +350,7 @@ sub check_file_name {
 }
 
 sub check_includes {
-    my ($rel, $text, $included_by, $fatal, $warning) = @_;
+    my ($rel, $text, $comment_masked_text, $code_masked_text, $included_by, $fatal, $warning) = @_;
     my @include_sites = @{$included_by->{$rel} // []};
     my @inline_sites = grep { $_->{after_code} } @include_sites;
     if (@inline_sites) {
@@ -356,13 +358,13 @@ sub check_includes {
         add_finding($fatal, 'bad-division', $rel, 1,
             "included as an implementation fragment from $first->{from}:$first->{line}; refactor the owned code into self-contained modules under the file/function limits instead of splitting implementation with inline includes");
     }
-    if (!@inline_sites && @include_sites && !has_header_preamble($text) && contains_function_definition($text)) {
+    if (!@inline_sites && @include_sites && !has_header_preamble($text) && contains_function_definition($code_masked_text, 1)) {
         my $first = $include_sites[0];
         add_finding($fatal, 'bad-division', $rel, 1,
             "included file contains implementation bodies but is not a guarded header; refactor ownership into cohesive modules rather than sharing implementation by include");
     }
 
-    for my $include (find_include_records($text)) {
+    for my $include (find_include_records($text, $comment_masked_text)) {
         if ($include->{after_code}) {
             add_finding($fatal, 'bad-division', $rel, $include->{line},
                 "inline include appears after code; remove the include-as-code-split pattern and refactor the affected responsibilities into self-contained modules under the audit limits");
@@ -375,9 +377,9 @@ sub check_includes {
 }
 
 sub find_include_records {
-    my ($text) = @_;
+    my ($text, $comment_masked_text) = @_;
     my @lines = split /\n/, $text;
-    my @code_lines = split /\n/, mask_comments($text);
+    my @code_lines = split /\n/, defined $comment_masked_text ? $comment_masked_text : mask_comments($text);
     my @records;
     my $saw_real_code = 0;
 
@@ -407,14 +409,14 @@ sub has_header_preamble {
 }
 
 sub contains_function_definition {
-    my ($text) = @_;
-    my @defs = find_function_definitions($text);
+    my ($text, $already_masked) = @_;
+    my @defs = find_function_definitions($text, $already_masked);
     return scalar(@defs) > 0;
 }
 
 sub find_function_definitions {
-    my ($text) = @_;
-    my @lines = split /\n/, mask_comments_and_strings($text);
+    my ($text, $already_masked) = @_;
+    my @lines = split /\n/, $already_masked ? $text : mask_comments_and_strings($text);
     my @signature;
     my @definitions;
     my $in_function = 0;
@@ -470,10 +472,10 @@ sub line_is_real_code {
 }
 
 sub check_shortcut_smells {
-    my ($rel, $text, $fatal, $warning) = @_;
+    my ($rel, $text, $comment_masked_text, $code_masked_text, $fatal, $warning) = @_;
     my @lines = split /\n/, $text;
-    my @code_lines = split /\n/, mask_comments_and_strings($text);
-    my @uncommented_lines = split /\n/, mask_comments($text);
+    my @code_lines = split /\n/, $code_masked_text;
+    my @uncommented_lines = split /\n/, $comment_masked_text;
     for my $i (0 .. $#lines) {
         my $line = $lines[$i];
         my $code_line = $code_lines[$i] // '';
@@ -542,9 +544,8 @@ sub emitted_script_marker_from_line {
 }
 
 sub check_functions {
-    my ($rel, $text, $fatal, $warning) = @_;
-    my @lines = split /\n/, mask_comments_and_strings($text);
-    my @raw_lines = split /\n/, $text;
+    my ($rel, $code_masked_text, $fatal, $warning) = @_;
+    my @lines = split /\n/, $code_masked_text;
     my @signature;
     my $in_function = 0;
     my $function_start = 0;
@@ -626,9 +627,9 @@ sub report_function_shape {
 }
 
 sub check_header_body_weight {
-    my ($rel, $text, $fatal, $warning) = @_;
+    my ($rel, $code_masked_text, $fatal, $warning) = @_;
     return if $rel !~ /\.(?:h|hh|hpp|hxx)$/;
-    my @lines = split /\n/, mask_comments_and_strings($text);
+    my @lines = split /\n/, $code_masked_text;
     my $body_lines = 0;
     for my $line (@lines) {
         $body_lines++ if $line =~ /[{};]/ && $line !~ /^\s*(?:class|struct|enum|namespace|typedef|using|#)/;
@@ -651,10 +652,10 @@ sub check_stem_groups {
 }
 
 sub check_duplicate_blocks {
-    my ($source_by_file, $warning) = @_;
+    my ($logical_by_file, $warning) = @_;
     my %seen;
-    for my $rel (sort keys %$source_by_file) {
-        my @logical = normalized_logical_lines($source_by_file->{$rel});
+    for my $rel (sort keys %$logical_by_file) {
+        my @logical = @{$logical_by_file->{$rel}};
         next if @logical < $opt{duplicate_window};
         for (my $i = 0; $i + $opt{duplicate_window} <= @logical; ++$i) {
             my @slice = @logical[$i .. $i + $opt{duplicate_window} - 1];
@@ -673,7 +674,12 @@ sub check_duplicate_blocks {
 
 sub normalized_logical_lines {
     my ($text) = @_;
-    my @lines = split /\n/, mask_comments_and_strings($text);
+    return normalized_logical_lines_from_masked(mask_comments_and_strings($text));
+}
+
+sub normalized_logical_lines_from_masked {
+    my ($code_masked_text) = @_;
+    my @lines = split /\n/, $code_masked_text;
     my @out;
     for my $i (0 .. $#lines) {
         my $line = $lines[$i];
@@ -707,83 +713,32 @@ sub mask_comments_and_strings {
 
 sub mask_text {
     my ($text, $mask_comments, $mask_strings) = @_;
-    my @chars = split //, $text;
     my $out = '';
-    my $state = 'normal';
-    for (my $i = 0; $i < @chars; ++$i) {
-        my $ch = $chars[$i];
-        my $next = $i + 1 < @chars ? $chars[$i + 1] : '';
-        if ($state eq 'line_comment') {
-            if ($ch eq "\n") {
-                $state = 'normal';
-                $out .= "\n";
-            } else {
-                $out .= ' ';
-            }
-            next;
-        }
-        if ($state eq 'block_comment') {
-            if ($ch eq '*' && $next eq '/') {
-                $out .= '  ';
-                ++$i;
-                $state = 'normal';
-            } else {
-                $out .= $ch eq "\n" ? "\n" : ' ';
-            }
-            next;
-        }
-        if ($state eq 'string') {
-            if ($ch eq '\\') {
-                $out .= ' ';
-                if ($i + 1 < @chars) {
-                    $out .= $chars[$i + 1] eq "\n" ? "\n" : ' ';
-                    ++$i;
-                }
-                next;
-            }
-            $state = 'normal' if $ch eq '"';
-            $out .= $ch eq "\n" ? "\n" : ' ';
-            next;
-        }
-        if ($state eq 'char') {
-            if ($ch eq '\\') {
-                $out .= ' ';
-                if ($i + 1 < @chars) {
-                    $out .= $chars[$i + 1] eq "\n" ? "\n" : ' ';
-                    ++$i;
-                }
-                next;
-            }
-            $state = 'normal' if $ch eq "'";
-            $out .= $ch eq "\n" ? "\n" : ' ';
-            next;
-        }
+    my $last = 0;
 
-        if ($mask_comments && $ch eq '/' && $next eq '/') {
-            $out .= '  ';
-            ++$i;
-            $state = 'line_comment';
-            next;
+    while ($text =~ m{//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'}sg) {
+        my $start = $-[0];
+        my $end = $+[0];
+        my $token = substr($text, $start, $end - $start);
+        $out .= substr($text, $last, $start - $last);
+
+        if ($mask_comments && ($token =~ m{\A//} || $token =~ m{\A/\*})) {
+            $out .= mask_segment_preserving_newlines($token);
+        } elsif ($mask_strings && ($token =~ /\A"/ || $token =~ /\A'/)) {
+            $out .= mask_segment_preserving_newlines($token);
+        } else {
+            $out .= $token;
         }
-        if ($mask_comments && $ch eq '/' && $next eq '*') {
-            $out .= '  ';
-            ++$i;
-            $state = 'block_comment';
-            next;
-        }
-        if ($mask_strings && $ch eq '"') {
-            $out .= ' ';
-            $state = 'string';
-            next;
-        }
-        if ($mask_strings && $ch eq "'") {
-            $out .= ' ';
-            $state = 'char';
-            next;
-        }
-        $out .= $ch;
+        $last = $end;
     }
+    $out .= substr($text, $last);
     return $out;
+}
+
+sub mask_segment_preserving_newlines {
+    my ($text) = @_;
+    $text =~ s/[^\n]/ /g;
+    return $text;
 }
 
 sub count_char {
