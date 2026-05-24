@@ -24,7 +24,7 @@ const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 4;
+const RUN_USAGE_CACHE_VERSION = 5;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
@@ -269,17 +269,32 @@ async function readShapeUsage(shape, selected = {}) {
 async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
   const stat = await fs.stat(filePath);
   const precision = runUsagePrecision(usageMode);
+  const events = await readRunFile(filePath);
+  const threadIds = precision ? inferThreadIdsFromRun(filePath, events) : [];
+  const sessionStats = precision ? await codexSessionStatsForThreadIds(threadIds) : [];
   if (precision) {
-    const cached = await readRunUsageCache(shape, fileBase, stat, precision);
-    if (cached) {
-      return cached;
+    const cacheEntry = await readRunUsageCacheEntry(shape, fileBase, stat, precision);
+    if (cacheEntry && cacheSessionStatsMatch(cacheEntry.codexSessions, sessionStats)) {
+      return normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
+    }
+    if (cacheEntry && precision === "fast") {
+      const refreshed = await refreshFastRunUsageSummary(
+        cacheEntry.summary,
+        stat,
+        fileBase,
+        threadIds,
+        cacheEntry.codexSessions,
+        sessionStats,
+      );
+      await writeRunUsageCache(shape, fileBase, stat, precision, sessionStats, refreshed);
+      return refreshed;
     }
   }
 
-  const events = await readRunFile(filePath);
   const summary = await buildRunUsageSummary(filePath, fileBase, stat, events, precision);
   if (precision) {
-    await writeRunUsageCache(shape, fileBase, stat, precision, summary);
+    const latestSessionStats = await codexSessionStatsForThreadIds(threadIds);
+    await writeRunUsageCache(shape, fileBase, stat, precision, latestSessionStats, summary);
   }
   return summary;
 }
@@ -394,7 +409,7 @@ function runUsagePrecision(usageMode) {
   return usageMode === "fast" ? "fast" : "full";
 }
 
-async function readRunUsageCache(shape, fileBase, stat, requestedPrecision) {
+async function readRunUsageCacheEntry(shape, fileBase, stat, requestedPrecision) {
   const cachePath = runUsageCachePath(shape, fileBase);
   if (!cachePath) {
     return null;
@@ -415,10 +430,10 @@ async function readRunUsageCache(shape, fileBase, stat, requestedPrecision) {
   ) {
     return null;
   }
-  return normalizeRunUsageSummary(parsed.summary, stat, fileBase);
+  return parsed;
 }
 
-async function writeRunUsageCache(shape, fileBase, stat, precision, summary) {
+async function writeRunUsageCache(shape, fileBase, stat, precision, sessionStats, summary) {
   const cachePath = runUsageCachePath(shape, fileBase);
   if (!cachePath) {
     return;
@@ -432,6 +447,7 @@ async function writeRunUsageCache(shape, fileBase, stat, precision, summary) {
       mtimeMs: stat.mtimeMs,
       mtime: stat.mtime.toISOString(),
     },
+    codexSessions: sessionStats,
     summary,
   });
   const dir = path.dirname(cachePath);
@@ -459,6 +475,113 @@ function cacheStatMatches(file, stat) {
     Number(file?.size) === stat.size &&
     Math.abs(Number(file?.mtimeMs) - stat.mtimeMs) < 0.001
   );
+}
+
+async function refreshFastRunUsageSummary(rawSummary, stat, fileBase, threadIds, cachedSessionStats, currentSessionStats) {
+  const summary = normalizeRunUsageSummary(rawSummary, stat, fileBase);
+  const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
+  const seenThreadIds = new Set(summary.threadIds);
+
+  for (const threadId of threadIds ?? []) {
+    if (!threadId) {
+      continue;
+    }
+    seenThreadIds.add(threadId);
+    const usage = await readCodexThreadUsageFast(threadId);
+    if (hasTokenUsage(usage)) {
+      threadUsageById.set(threadId, usage);
+    }
+  }
+
+  summary.threadIds = [...seenThreadIds].sort();
+  summary.threadUsages = [...threadUsageById.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([threadId, usage]) => ({ threadId, usage }));
+
+  const elapsedDelta = sessionStatsElapsedDeltaMs(cachedSessionStats, currentSessionStats);
+  if (elapsedDelta > 0) {
+    summary.durationMs += elapsedDelta;
+  }
+  const latestSessionMtimeMs = maxSessionMtimeMs(currentSessionStats);
+  if (Number.isFinite(latestSessionMtimeMs)) {
+    const latestSessionAt = new Date(latestSessionMtimeMs).toISOString();
+    if (!summary.lastAt || latestSessionAt > summary.lastAt) {
+      summary.lastAt = latestSessionAt;
+    }
+  }
+
+  return summary;
+}
+
+async function codexSessionStatsForThreadIds(threadIds) {
+  const stats = [];
+  const seen = new Set();
+  for (const threadId of threadIds ?? []) {
+    if (!threadId || seen.has(threadId)) {
+      continue;
+    }
+    seen.add(threadId);
+    const files = await findCodexSessionFiles(threadId);
+    for (const filePath of files.sort()) {
+      try {
+        const stat = await fs.stat(filePath);
+        stats.push({
+          threadId,
+          file: path.basename(filePath),
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+        });
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+  }
+  return stats.sort((left, right) =>
+    left.threadId.localeCompare(right.threadId) ||
+    left.file.localeCompare(right.file));
+}
+
+function sessionStatsElapsedDeltaMs(cachedStats, currentStats) {
+  const previous = maxSessionMtimeMs(cachedStats);
+  const current = maxSessionMtimeMs(currentStats);
+  if (!Number.isFinite(previous) || !Number.isFinite(current) || current <= previous) {
+    return 0;
+  }
+  return current - previous;
+}
+
+function maxSessionMtimeMs(stats) {
+  let max = null;
+  for (const entry of stats ?? []) {
+    const value = Number(entry?.mtimeMs);
+    if (Number.isFinite(value)) {
+      max = max == null ? value : Math.max(max, value);
+    }
+  }
+  return max;
+}
+
+function cacheSessionStatsMatch(cachedStats, currentStats) {
+  const cached = Array.isArray(cachedStats) ? cachedStats : [];
+  const current = Array.isArray(currentStats) ? currentStats : [];
+  if (cached.length !== current.length) {
+    return false;
+  }
+  for (let index = 0; index < current.length; index += 1) {
+    const left = cached[index];
+    const right = current[index];
+    if (
+      left?.threadId !== right.threadId ||
+      left?.file !== right.file ||
+      Number(left?.size) !== right.size ||
+      Math.abs(Number(left?.mtimeMs) - right.mtimeMs) >= 0.001
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function cachePrecisionSatisfies(cachedPrecision, requestedPrecision) {
