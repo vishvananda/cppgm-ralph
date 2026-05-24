@@ -2425,7 +2425,7 @@ function buildAgentProgressTargets(records, stageTotalAnchors = new Map()) {
 }
 
 function deriveRalphTestProgress(record, tracker) {
-  const testStatus = ralphTestStatusFromRecord(record);
+  const testStatus = anchorTestStatusTotals(ralphTestStatusFromRecord(record), tracker.stageTotals);
   if (!testStatus) {
     return null;
   }
@@ -2438,6 +2438,7 @@ function deriveRalphTestProgress(record, tracker) {
   if (!configured) {
     return null;
   }
+  const progress = progressFromTestStatus(testStatus, configured.stage, tracker);
   if (record.eventType === "ralph.phase-status" && record.event?.action === "turn-start") {
     return {
       stage: configured.stage,
@@ -2447,11 +2448,10 @@ function deriveRalphTestProgress(record, tracker) {
       turn,
       recordedAt: record.recordedAt,
       status: "running",
-      passed: 0,
+      passed: Math.max(0, Math.min(progress.passed, configured.total)),
       total: configured.total,
     };
   }
-  const progress = progressFromTestStatus(testStatus, configured.stage);
   return {
     stage: configured.stage,
     stageNumber: stageNumber(configured.stage),
@@ -2519,20 +2519,34 @@ function progressTargetFromTestStatus(testStatus, phaseStage = null) {
   };
 }
 
-function progressFromTestStatus(testStatus, stage) {
+function progressFromTestStatus(testStatus, stage, tracker) {
   const stageStatus = Array.isArray(testStatus?.stages)
     ? testStatus.stages.find((candidate) => candidate?.name === stage)
     : null;
   if (stageStatus) {
+    const passed = stagePassedCount(stageStatus);
     return {
-      passed: stagePassedCount(stageStatus) ?? 0,
+      passed: passed ?? inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ?? 0,
       status: stageStatus.status === "pass" || testStatus.allTestsPassed ? "pass" : "fail",
     };
   }
   return {
-    passed: Math.max(0, testStatus?.testsPassed ?? 0),
+    passed: inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ??
+      Math.max(0, testStatus?.testsPassed ?? 0),
     status: testStatus?.allTestsPassed ? "pass" : "fail",
   };
+}
+
+function inferredStagePassedFromThroughStatus(testStatus, stage, tracker) {
+  if ((testStatus?.stageCount ?? 0) <= 1) {
+    return null;
+  }
+  const number = stageNumber(stage);
+  const priorTotal = number ? knownPriorStageTotal(tracker, number) : null;
+  if (priorTotal == null || !Number.isFinite(testStatus?.testsPassed)) {
+    return null;
+  }
+  return Math.max(0, testStatus.testsPassed - priorTotal);
 }
 
 function progressTargetKey(turn, stage) {
