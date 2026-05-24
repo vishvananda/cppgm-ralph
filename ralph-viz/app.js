@@ -1420,9 +1420,6 @@ function isDurationSpanActivity(record) {
   if (isUsageBaselineRecord(record)) {
     return false;
   }
-  if (record.eventType === "ralph.test-status") {
-    return false;
-  }
   return true;
 }
 
