@@ -216,6 +216,7 @@ function annotateDisplayTurns(records) {
   const sorted = [...records].sort((a, b) =>
     String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
   let maxDisplayTurn = 0;
+  let maxStartedSourceTurn = 0;
   let active = null;
   let lastChecked = null;
 
@@ -234,8 +235,9 @@ function annotateDisplayTurns(records) {
     const action = record.event?.action ?? null;
 
     if (phaseStatus && action === "turn-start") {
-      const replayedSourceTurn = sourceTurn <= maxDisplayTurn;
+      const replayedSourceTurn = sourceTurn < maxStartedSourceTurn && active?.sourceTurn !== sourceTurn;
       const displayTurn = replayedSourceTurn ? maxDisplayTurn + 1 : sourceTurn;
+      maxStartedSourceTurn = Math.max(maxStartedSourceTurn, sourceTurn);
       maxDisplayTurn = Math.max(maxDisplayTurn, displayTurn);
       active = {
         sourceTurn,
@@ -274,7 +276,6 @@ function annotateDisplayTurns(records) {
     }
 
     record._displayTurn = sourceTurn;
-    maxDisplayTurn = Math.max(maxDisplayTurn, sourceTurn);
   }
 
   return records;
@@ -1248,9 +1249,10 @@ function buildTurnMap(events) {
 
 function buildTurnDurationMap(records) {
   const map = new Map();
-  const spansByTurnThread = new Map();
-  const sessionTimingByTurn = new Map();
-  const ralphLifecycleByTurn = new Map();
+  const attempts = buildTurnAttemptWindows(records);
+  const spansByTurnAttemptThread = new Map();
+  const sessionTimingByTurnAttempt = new Map();
+  const ralphLifecycleByTurnAttempt = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1262,14 +1264,17 @@ function buildTurnDurationMap(records) {
     span.last = Math.max(span.last, time);
     map.set(turn, span);
 
-    const threadKey = `${turn}\0${record.threadId ?? ""}`;
-    const threadSpan = spansByTurnThread.get(threadKey) ?? { turn, first: time, last: time };
+    const attemptIndex = findTurnAttemptIndex(attempts, turn, time);
+    const attemptKey = `${turn}\0${attemptIndex}\0${record.threadId ?? ""}`;
+    const threadSpan = spansByTurnAttemptThread.get(attemptKey) ?? { turn, attemptIndex, first: time, last: time };
     threadSpan.first = Math.min(threadSpan.first, time);
     threadSpan.last = Math.max(threadSpan.last, time);
-    spansByTurnThread.set(threadKey, threadSpan);
+    spansByTurnAttemptThread.set(attemptKey, threadSpan);
 
     if (isCodexTimingActivity(record)) {
-      const timing = sessionTimingByTurn.get(turn) ?? {
+      const timing = sessionTimingByTurnAttempt.get(attemptKey) ?? {
+        turn,
+        attemptIndex,
         durationMs: 0,
         goalTimeUsedMs: 0,
         sessionFirstMs: null,
@@ -1288,11 +1293,16 @@ function buildTurnDurationMap(records) {
           timing.goalTimeUsedMs = Math.max(timing.goalTimeUsedMs, timeUsedSeconds * 1000);
         }
       }
-      sessionTimingByTurn.set(turn, timing);
+      sessionTimingByTurnAttempt.set(attemptKey, timing);
     }
 
     if (record.eventType === "ralph.phase-status") {
-      const lifecycle = ralphLifecycleByTurn.get(turn) ?? { startMs: null, checkedMs: null };
+      const lifecycle = ralphLifecycleByTurnAttempt.get(`${turn}\0${attemptIndex}`) ?? {
+        turn,
+        attemptIndex,
+        startMs: null,
+        checkedMs: null,
+      };
       if (record.event?.action === "turn-start") {
         lifecycle.startMs = lifecycle.startMs == null ? time : Math.max(lifecycle.startMs, time);
         if (lifecycle.checkedMs != null && lifecycle.checkedMs < lifecycle.startMs) {
@@ -1301,40 +1311,92 @@ function buildTurnDurationMap(records) {
       } else if (record.event?.action === "checked") {
         lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
       }
-      ralphLifecycleByTurn.set(turn, lifecycle);
+      ralphLifecycleByTurnAttempt.set(`${turn}\0${attemptIndex}`, lifecycle);
     }
   }
-  for (const threadSpan of spansByTurnThread.values()) {
-    const span = map.get(threadSpan.turn);
-    if (span) {
-      span.durationMs += Math.max(0, threadSpan.last - threadSpan.first);
-    }
+  const attemptDurations = new Map();
+  for (const threadSpan of spansByTurnAttemptThread.values()) {
+    const key = `${threadSpan.turn}\0${threadSpan.attemptIndex}`;
+    attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + Math.max(0, threadSpan.last - threadSpan.first));
   }
-  for (const [turn, lifecycle] of ralphLifecycleByTurn.entries()) {
-    const span = map.get(turn);
+  for (const [key, lifecycle] of ralphLifecycleByTurnAttempt.entries()) {
     if (
-      span &&
       Number.isFinite(lifecycle.startMs) &&
       Number.isFinite(lifecycle.checkedMs) &&
       lifecycle.checkedMs >= lifecycle.startMs
     ) {
-      span.durationMs = lifecycle.checkedMs - lifecycle.startMs;
+      attemptDurations.set(key, lifecycle.checkedMs - lifecycle.startMs);
     }
   }
-  for (const [turn, timing] of sessionTimingByTurn.entries()) {
-    const span = map.get(turn);
-    if (!span) {
-      continue;
-    }
+  for (const [key, timing] of sessionTimingByTurnAttempt.entries()) {
     if (timing.durationMs > 0) {
-      span.durationMs = timing.durationMs;
+      attemptDurations.set(key, timing.durationMs);
     } else if (timing.goalTimeUsedMs > 0) {
-      span.durationMs = timing.goalTimeUsedMs;
+      attemptDurations.set(key, timing.goalTimeUsedMs);
     } else if (timing.sessionFirstMs != null && timing.sessionLastMs != null) {
-      span.durationMs = Math.max(0, timing.sessionLastMs - timing.sessionFirstMs);
+      attemptDurations.set(key, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+    }
+  }
+  const totalByTurn = new Map();
+  for (const [key, durationMs] of attemptDurations.entries()) {
+    const turn = Number(key.split("\0", 1)[0]);
+    if (Number.isFinite(turn)) {
+      totalByTurn.set(turn, (totalByTurn.get(turn) ?? 0) + durationMs);
+    }
+  }
+  for (const [turn, durationMs] of totalByTurn.entries()) {
+    const span = map.get(turn);
+    if (span) {
+      span.durationMs = durationMs;
     }
   }
   return map;
+}
+
+function buildTurnAttemptWindows(records) {
+  const attempts = new Map();
+  const starts = records
+    .filter((record) => record.eventType === "ralph.phase-status" &&
+      record.event?.action === "turn-start" &&
+      Number.isInteger(displayTurnForRecord(record)))
+    .map((record) => ({
+      turn: displayTurnForRecord(record),
+      startMs: Date.parse(record.recordedAt ?? ""),
+    }))
+    .filter((entry) => Number.isFinite(entry.startMs))
+    .sort((left, right) => left.startMs - right.startMs);
+
+  for (const start of starts) {
+    const list = attempts.get(start.turn) ?? [];
+    const previous = list[list.length - 1];
+    if (previous && previous.endMs == null) {
+      previous.endMs = start.startMs;
+    }
+    list.push({
+      index: list.length,
+      startMs: start.startMs,
+      endMs: null,
+    });
+    attempts.set(start.turn, list);
+  }
+  return attempts;
+}
+
+function findTurnAttemptIndex(attempts, turn, time) {
+  const list = attempts.get(turn);
+  if (!list?.length) {
+    return 0;
+  }
+  let selected = list[0];
+  for (const attempt of list) {
+    if (time >= attempt.startMs && (attempt.endMs == null || time < attempt.endMs)) {
+      return attempt.index;
+    }
+    if (time >= attempt.startMs) {
+      selected = attempt;
+    }
+  }
+  return selected.index;
 }
 
 function isCodexTimingActivity(record) {

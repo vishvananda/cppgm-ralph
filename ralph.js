@@ -174,7 +174,7 @@ async function main() {
   let thread = null;
   const providerLabel = formatProviderLabel(CONFIG.provider);
 
-  let turnNumber = state.turnsCompleted;
+  let turnNumber = await reconcileTurnsCompletedWithEventLog(state);
   while (turnNumber < CONFIG.maxTurns) {
     const phase = resolveActivePhase(state);
     const phaseStatus = await runPhaseChecks(state, phase);
@@ -4506,6 +4506,53 @@ async function loadState() {
     }
     throw error;
   }
+}
+
+async function reconcileTurnsCompletedWithEventLog(state) {
+  const stateTurn = Number.isInteger(state?.turnsCompleted) ? state.turnsCompleted : 0;
+  const latestEventTurn = await latestEventLogTurnNumber(state);
+  if (latestEventTurn > stateTurn) {
+    log(
+      `Event log already contains turn ${latestEventTurn}; ` +
+        `using it instead of state turnsCompleted ${stateTurn}.`,
+    );
+    state.turnsCompleted = latestEventTurn;
+    return latestEventTurn;
+  }
+  return stateTurn;
+}
+
+async function latestEventLogTurnNumber(state) {
+  const eventLogPath = state?.eventLogPath ?? buildEventLogPath(state?.threadId);
+  if (!eventLogPath) {
+    return 0;
+  }
+  let raw;
+  try {
+    raw = await fs.readFile(eventLogPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+
+  let latest = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    if (Number.isInteger(record?.turnNumber) && record.turnNumber > latest) {
+      latest = record.turnNumber;
+    }
+  }
+  return latest;
 }
 
 async function saveState(state) {

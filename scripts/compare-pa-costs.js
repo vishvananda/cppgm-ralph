@@ -297,11 +297,20 @@ function eventThreadId(record) {
 }
 
 function buildTurnMeta(events) {
-  const byTurn = new Map();
-  const ensure = (turn) => {
-    if (!byTurn.has(turn)) {
-      byTurn.set(turn, {
+  const attempts = buildRawTurnAttemptWindows(events);
+  const byAttempt = new Map();
+  const ensure = (attempt) => {
+    const turn = attempt?.turnNumber;
+    const key = attempt?.key ?? (Number.isInteger(turn) ? String(turn) : null);
+    if (!key || !Number.isInteger(turn) || turn <= 0) {
+      return null;
+    }
+    if (!byAttempt.has(key)) {
+      byAttempt.set(key, {
+        key,
         turn,
+        attemptIndex: attempt?.attemptIndex ?? 0,
+        startedAtMs: attempt?.startTime ?? null,
         stage: null,
         phase: null,
         subset: null,
@@ -319,13 +328,21 @@ function buildTurnMeta(events) {
         tokenEvents: 0,
       });
     }
-    return byTurn.get(turn);
+    return byAttempt.get(key);
   };
-  const set = (turn, fields) => {
+  for (const attempt of attempts) {
+    ensure(attempt);
+  }
+  const set = (event, fields) => {
+    const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
       return;
     }
-    const target = ensure(turn);
+    const time = Date.parse(event.recordedAt ?? "");
+    const target = ensure(rawTurnAttemptForTime(attempts, turn, time) ?? { turnNumber: turn, key: String(turn) });
+    if (!target) {
+      return;
+    }
     for (const [key, value] of Object.entries(fields)) {
       if (value != null && value !== "") {
         target[key] = value;
@@ -353,17 +370,17 @@ function buildTurnMeta(events) {
             ? 0
             : 1;
       }
-      set(turn, fields);
+      set(event, fields);
     } else if (event.eventType === "ralph.prompt") {
       const prompt = String(event.event?.prompt ?? "");
-      set(turn, inferPromptTarget(prompt));
+      set(event, inferPromptTarget(prompt));
     } else if (event.eventType === "ralph.goal") {
       const objective = String(event.event?.goal?.objective ?? "");
-      set(turn, inferGoalTarget(objective));
+      set(event, inferGoalTarget(objective));
     }
   }
 
-  return byTurn;
+  return byAttempt;
 }
 
 function inferPromptTarget(prompt) {
@@ -426,29 +443,73 @@ function inferGoalTarget(objective) {
 }
 
 function buildTurnResolver(events) {
-  const starts = events
-    .filter((event) => event.eventType === "ralph.prompt" && Number.isInteger(event.turnNumber))
-    .map((event) => ({
-      turn: event.turnNumber,
-      time: Date.parse(event.recordedAt ?? ""),
-    }))
-    .filter((entry) => Number.isFinite(entry.time))
-    .sort((a, b) => a.time - b.time);
+  const starts = buildRawTurnAttemptWindows(events);
 
   return (timestamp) => {
     const time = typeof timestamp === "number" ? timestamp : Date.parse(timestamp ?? "");
     if (!Number.isFinite(time)) {
       return null;
     }
-    let turn = null;
+    let attempt = null;
     for (const start of starts) {
-      if (start.time > time) {
+      if (start.startTime > time) {
         break;
       }
-      turn = start.turn;
+      attempt = start;
     }
-    return turn;
+    return attempt
+      ? { turn: attempt.turnNumber, key: attempt.key }
+      : null;
   };
+}
+
+function buildRawTurnAttemptWindows(events) {
+  const starts = events
+    .filter((event) => event.eventType === "ralph.phase-status" &&
+      event.event?.action === "turn-start" &&
+      Number.isInteger(event.turnNumber) &&
+      event.turnNumber > 0)
+    .map((event) => ({
+      turnNumber: event.turnNumber,
+      startTime: Date.parse(event.recordedAt ?? ""),
+    }))
+    .filter((entry) => Number.isFinite(entry.startTime))
+    .sort((a, b) => a.startTime - b.startTime);
+
+  const countsByTurn = new Map();
+  return starts.map((start, index) => {
+    const attemptIndex = countsByTurn.get(start.turnNumber) ?? 0;
+    countsByTurn.set(start.turnNumber, attemptIndex + 1);
+    return {
+      ...start,
+      attemptIndex,
+      endTime: starts[index + 1]?.startTime ?? Infinity,
+      key: `${start.turnNumber}\0${attemptIndex}`,
+    };
+  });
+}
+
+function rawTurnAttemptForTime(attempts, turnNumber, time) {
+  if (!Number.isFinite(time)) {
+    return null;
+  }
+  let selected = null;
+  let nextSameTurn = null;
+  for (const attempt of attempts) {
+    if (attempt.startTime > time) {
+      if (attempt.turnNumber === turnNumber) {
+        nextSameTurn = attempt;
+      }
+      break;
+    }
+    if (attempt.turnNumber === turnNumber) {
+      selected = attempt;
+      if (time < attempt.endTime) {
+        return attempt;
+      }
+    }
+  }
+  return selected ?? nextSameTurn;
 }
 
 function findSessionFiles(codexDir, threadIds) {
@@ -500,8 +561,14 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
     }
 
     const time = Date.parse(record.timestamp ?? "");
-    const turn = resolveTurn(record.timestamp);
-    const slot = Number.isInteger(turn) ? byTurn.get(turn) : null;
+    const resolvedTurn = resolveTurn(record.timestamp);
+    const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turn : resolvedTurn;
+    const key = typeof resolvedTurn === "object"
+      ? resolvedTurn?.key
+      : Number.isInteger(turn)
+        ? String(turn)
+        : null;
+    const slot = key ? byTurn.get(key) : null;
     if (slot && Number.isFinite(time)) {
       slot.hasSessionActivity = true;
       slot.sessionFirstMs = slot.sessionFirstMs == null ? time : Math.min(slot.sessionFirstMs, time);
@@ -545,17 +612,10 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
 }
 
 function fillDurationFallbacks(events, byTurn) {
-  const starts = events
-    .filter((event) => event.eventType === "ralph.prompt" && Number.isInteger(event.turnNumber))
-    .map((event) => ({
-      turn: event.turnNumber,
-      time: Date.parse(event.recordedAt ?? ""),
-    }))
-    .filter((entry) => Number.isFinite(entry.time))
-    .sort((a, b) => a.time - b.time);
+  const starts = buildRawTurnAttemptWindows(events);
 
   for (let index = 0; index < starts.length; index += 1) {
-    const slot = byTurn.get(starts[index].turn);
+    const slot = byTurn.get(starts[index].key);
     if (!slot || slot.durationMs > 0) {
       continue;
     }
@@ -567,9 +627,9 @@ function fillDurationFallbacks(events, byTurn) {
       slot.durationMs = Math.max(0, slot.sessionLastMs - slot.sessionFirstMs);
       continue;
     }
-    const nextTime = starts[index + 1]?.time;
-    if (Number.isFinite(nextTime) && nextTime > starts[index].time) {
-      slot.durationMs = nextTime - starts[index].time;
+    const nextTime = starts[index + 1]?.startTime;
+    if (Number.isFinite(nextTime) && nextTime > starts[index].startTime) {
+      slot.durationMs = nextTime - starts[index].startTime;
     }
   }
 }
@@ -594,7 +654,11 @@ async function summarizeRun(options, side) {
 
   const model = options[`${side}Model`];
   const byPa = new Map();
-  for (const [turn, turnInfo] of [...byTurn.entries()].sort((a, b) => a[0] - b[0])) {
+  const turnInfos = [...byTurn.values()].sort((a, b) =>
+    (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0) ||
+    a.turn - b.turn ||
+    a.attemptIndex - b.attemptIndex);
+  for (const turnInfo of turnInfos) {
     const number = stageNumber(turnInfo.stage);
     if (!number || number < 1 || number > options.throughNumber) {
       continue;
@@ -614,7 +678,7 @@ async function summarizeRun(options, side) {
       });
     }
     const row = byPa.get(pa);
-    row.turns.push(turn);
+    row.turns.push(turnInfo.key ?? String(turnInfo.turn));
     row.usage = addUsage(row.usage, turnInfo.usage);
     row.durationMs += turnInfo.durationMs;
     row.cost += estimateCost(turnInfo.usage, model);

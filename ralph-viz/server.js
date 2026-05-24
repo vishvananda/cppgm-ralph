@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import http from "node:http";
 import os from "node:os";
 import readline from "node:readline";
+import { createHash } from "node:crypto";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -24,8 +25,10 @@ const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 5;
+const RUN_USAGE_CACHE_VERSION = 6;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
+const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
 const RALPH_DEFAULT_REASONING_EFFORT = "high";
@@ -302,7 +305,7 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
 async function buildRunUsageSummary(filePath, fileBase, stat, events, precision) {
   const bounds = eventTimeBounds(events);
   const threadIds = inferThreadIdsFromRun(filePath, events);
-  const sessionTiming = await readCodexThreadTiming(threadIds, buildSessionTurnResolver(events));
+  const sessionTiming = await readCodexThreadTiming(threadIds, buildSessionTurnAttemptResolver(events));
   const tokenUsage = usageFromTokenEventsByThread(events);
   const threadUsages = [...tokenUsage.threadUsages];
   const coveredThreadIds = new Set(threadUsages.map((entry) => entry.threadId));
@@ -686,26 +689,32 @@ function activeEventDurationMs(timedEvents) {
 
 function turnExecutionDurationMs(events, sessionTiming = new Map()) {
   const fallbackDurations = ralphEventTurnDurationFallbacks(events);
-  const turns = new Set([...fallbackDurations.keys(), ...sessionTiming.keys()]);
   let durationMs = 0;
-  for (const turn of turns) {
-    const timing = sessionTiming.get(turn);
+  const coveredAttempts = new Set();
+  for (const [attemptKey, timing] of sessionTiming.entries()) {
+    coveredAttempts.add(attemptKey);
     if (timing?.durationMs > 0) {
       durationMs += timing.durationMs;
     } else if (timing?.goalTimeUsedMs > 0) {
       durationMs += timing.goalTimeUsedMs;
     } else if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
       durationMs += Math.max(0, timing.sessionLastMs - timing.sessionFirstMs);
-    } else {
-      durationMs += fallbackDurations.get(turn) ?? 0;
+    } else if (fallbackDurations.has(attemptKey)) {
+      durationMs += fallbackDurations.get(attemptKey);
+    }
+  }
+  for (const [attemptKey, fallbackMs] of fallbackDurations.entries()) {
+    if (!coveredAttempts.has(attemptKey)) {
+      durationMs += fallbackMs;
     }
   }
   return durationMs;
 }
 
 function ralphEventTurnDurationFallbacks(events) {
-  const spansByTurnThread = new Map();
-  const lifecycleByTurn = new Map();
+  const attempts = buildRawTurnAttemptWindows(events);
+  const spansByAttemptThread = new Map();
+  const lifecycleByAttempt = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -715,14 +724,16 @@ function ralphEventTurnDurationFallbacks(events) {
     if (!Number.isFinite(time)) {
       continue;
     }
-    const key = `${turn}\0${event.threadId ?? ""}`;
-    const span = spansByTurnThread.get(key) ?? { turn, first: time, last: time };
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    const attemptKey = attempt?.key ?? String(turn);
+    const key = `${attemptKey}\0${event.threadId ?? ""}`;
+    const span = spansByAttemptThread.get(key) ?? { attemptKey, first: time, last: time };
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
-    spansByTurnThread.set(key, span);
+    spansByAttemptThread.set(key, span);
 
     if (event.eventType === "ralph.phase-status") {
-      const lifecycle = lifecycleByTurn.get(turn) ?? { startMs: null, checkedMs: null };
+      const lifecycle = lifecycleByAttempt.get(attemptKey) ?? { startMs: null, checkedMs: null };
       if (event.event?.action === "turn-start") {
         lifecycle.startMs = lifecycle.startMs == null ? time : Math.max(lifecycle.startMs, time);
         if (lifecycle.checkedMs != null && lifecycle.checkedMs < lifecycle.startMs) {
@@ -731,21 +742,21 @@ function ralphEventTurnDurationFallbacks(events) {
       } else if (event.event?.action === "checked") {
         lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
       }
-      lifecycleByTurn.set(turn, lifecycle);
+      lifecycleByAttempt.set(attemptKey, lifecycle);
     }
   }
 
   const durations = new Map();
-  for (const span of spansByTurnThread.values()) {
-    durations.set(span.turn, (durations.get(span.turn) ?? 0) + Math.max(0, span.last - span.first));
+  for (const span of spansByAttemptThread.values()) {
+    durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + Math.max(0, span.last - span.first));
   }
-  for (const [turn, lifecycle] of lifecycleByTurn.entries()) {
+  for (const [attemptKey, lifecycle] of lifecycleByAttempt.entries()) {
     if (
       Number.isFinite(lifecycle.startMs) &&
       Number.isFinite(lifecycle.checkedMs) &&
       lifecycle.checkedMs >= lifecycle.startMs
     ) {
-      durations.set(turn, lifecycle.checkedMs - lifecycle.startMs);
+      durations.set(attemptKey, lifecycle.checkedMs - lifecycle.startMs);
     }
   }
   return durations;
@@ -794,11 +805,20 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
     }
 
     const time = Date.parse(record.timestamp ?? "");
-    const turn = resolveTurn(record.timestamp);
+    const resolvedTurn = resolveTurn(record.timestamp);
+    const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turnNumber : resolvedTurn;
+    const attemptKey = typeof resolvedTurn === "object"
+      ? resolvedTurn?.attemptKey
+      : Number.isInteger(turn)
+        ? String(turn)
+        : null;
     if (!Number.isInteger(turn) || turn <= 0) {
       continue;
     }
-    const timing = timingByTurn.get(turn) ?? {
+    const key = attemptKey ?? String(turn);
+    const timing = timingByTurn.get(key) ?? {
+      turnNumber: turn,
+      attemptKey: key,
       durationMs: 0,
       goalTimeUsedMs: 0,
       sessionFirstMs: null,
@@ -820,7 +840,7 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
         timing.goalTimeUsedMs = Math.max(timing.goalTimeUsedMs, timeUsedSeconds * 1000);
       }
     }
-    timingByTurn.set(turn, timing);
+    timingByTurn.set(key, timing);
   }
 }
 
@@ -1972,6 +1992,73 @@ function buildSessionTurnResolver(events) {
   };
 }
 
+function buildSessionTurnAttemptResolver(events) {
+  const attempts = buildRawTurnAttemptWindows(events);
+  return (recordedAt) => {
+    const time = Date.parse(recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      return null;
+    }
+
+    let selected = null;
+    for (const attempt of attempts) {
+      if (attempt.startTime > time) {
+        break;
+      }
+      selected = attempt;
+    }
+    return selected
+      ? { turnNumber: selected.turnNumber, attemptKey: selected.key }
+      : null;
+  };
+}
+
+function buildRawTurnAttemptWindows(events) {
+  const starts = events
+    .filter((event) => event.eventType === "ralph.phase-status" &&
+      event.event?.action === "turn-start" &&
+      Number.isInteger(event.turnNumber) &&
+      event.turnNumber > 0)
+    .map((event) => ({
+      turnNumber: event.turnNumber,
+      startTime: Date.parse(event.recordedAt ?? ""),
+    }))
+    .filter((entry) => Number.isFinite(entry.startTime))
+    .sort((a, b) => a.startTime - b.startTime);
+
+  const countsByTurn = new Map();
+  return starts.map((start, index) => {
+    const attemptIndex = countsByTurn.get(start.turnNumber) ?? 0;
+    countsByTurn.set(start.turnNumber, attemptIndex + 1);
+    return {
+      ...start,
+      attemptIndex,
+      endTime: starts[index + 1]?.startTime ?? Infinity,
+      key: `${start.turnNumber}\0${attemptIndex}`,
+    };
+  });
+}
+
+function rawTurnAttemptForTime(attempts, turnNumber, time) {
+  let selected = null;
+  let nextSameTurn = null;
+  for (const attempt of attempts) {
+    if (attempt.startTime > time) {
+      if (attempt.turnNumber === turnNumber) {
+        nextSameTurn = attempt;
+      }
+      break;
+    }
+    if (attempt.turnNumber === turnNumber) {
+      selected = attempt;
+      if (time < attempt.endTime) {
+        return attempt;
+      }
+    }
+  }
+  return selected ?? nextSameTurn;
+}
+
 function defaultCodexDetailOptions() {
   return { mode: "none" };
 }
@@ -2142,17 +2229,13 @@ function shouldStopSessionRead(timestamp, options) {
 }
 
 async function readCodexSessionEvents(threadId, resolveTurnNumber, readOptions = { mode: "all" }) {
+  if (readOptions?.mode === "windows" && (readOptions.windows?.length ?? 0) > 1) {
+    return readCodexSessionWindowEvents(threadId, resolveTurnNumber, readOptions);
+  }
+
   const files = await findCodexSessionFiles(threadId);
   const events = [];
-  const context = {
-    threadId,
-    resolveTurnNumber,
-    commandsByCallId: new Map(),
-    functionCallsByCallId: new Map(),
-    commandsBySessionId: new Map(),
-    tokenBaseline: null,
-    tokenBaselineEmitted: false,
-  };
+  const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
   for (const filePath of files) {
     const tailLines = shouldReadCodexSessionFromTail(readOptions)
       ? await readCodexSessionTailLines(filePath, readOptions)
@@ -2175,6 +2258,163 @@ async function readCodexSessionEvents(threadId, resolveTurnNumber, readOptions =
     }
   }
   return limitSessionEventsByTurn(events, readOptions.maxEventsPerTurn);
+}
+
+async function readCodexSessionWindowEvents(threadId, resolveTurnNumber, readOptions) {
+  const files = await findCodexSessionFiles(threadId);
+  const events = [];
+  const closedWindows = (readOptions.windows ?? []).filter((window) => Number.isFinite(window.endTime));
+  const openWindows = (readOptions.windows ?? []).filter((window) => !Number.isFinite(window.endTime));
+
+  for (const filePath of files) {
+    for (const window of closedWindows) {
+      events.push(...await readCachedClosedCodexSessionWindow(
+        filePath,
+        threadId,
+        resolveTurnNumber,
+        readOptions,
+        window,
+      ));
+    }
+
+    for (const window of openWindows) {
+      const windowOptions = {
+        ...readOptions,
+        windows: [window],
+        minTime: window.startTime,
+        maxTime: Infinity,
+        includeTokenBaseline: closedWindows.length === 0,
+      };
+      events.push(...await readCodexSessionEventsFromFile(
+        filePath,
+        threadId,
+        resolveTurnNumber,
+        windowOptions,
+      ));
+    }
+  }
+
+  return limitSessionEventsByTurn(events, readOptions.maxEventsPerTurn);
+}
+
+async function readCachedClosedCodexSessionWindow(filePath, threadId, resolveTurnNumber, readOptions, window) {
+  const stat = await fs.stat(filePath);
+  const cachePath = codexSessionWindowCachePath(filePath, threadId, readOptions, window);
+  const cached = cachePath ? await readCodexSessionWindowCache(cachePath, stat) : null;
+  if (cached) {
+    return cached;
+  }
+
+  const windowOptions = {
+    ...readOptions,
+    windows: [window],
+    minTime: window.startTime,
+    maxTime: window.endTime,
+    includeTokenBaseline: true,
+  };
+  const events = await readCodexSessionEventsFromFile(
+    filePath,
+    threadId,
+    resolveTurnNumber,
+    windowOptions,
+  );
+  const limited = limitSessionEventsByTurn(events, readOptions.maxEventsPerTurn);
+  if (cachePath) {
+    await writeCodexSessionWindowCache(cachePath, stat, limited);
+  }
+  return limited;
+}
+
+async function readCodexSessionEventsFromFile(filePath, threadId, resolveTurnNumber, readOptions) {
+  const events = [];
+  const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
+  const tailLines = shouldReadCodexSessionFromTail(readOptions)
+    ? await readCodexSessionTailLines(filePath, readOptions)
+    : null;
+  if (tailLines) {
+    for (const rawLine of tailLines) {
+      processCodexSessionLine(rawLine, readOptions, context, events);
+    }
+    return events;
+  }
+
+  const lines = readline.createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    if (processCodexSessionLine(rawLine, readOptions, context, events) === "stop") {
+      break;
+    }
+  }
+  return events;
+}
+
+function buildCodexSessionReadContext(threadId, resolveTurnNumber) {
+  return {
+    threadId,
+    resolveTurnNumber,
+    commandsByCallId: new Map(),
+    functionCallsByCallId: new Map(),
+    commandsBySessionId: new Map(),
+    tokenBaseline: null,
+    tokenBaselineEmitted: false,
+  };
+}
+
+async function readCodexSessionWindowCache(cachePath, stat) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, "utf8"));
+    if (
+      parsed?.version !== CODEX_SESSION_WINDOW_CACHE_VERSION ||
+      !Array.isArray(parsed.events) ||
+      Number(parsed.file?.sizeAtCache) > stat.size
+    ) {
+      return null;
+    }
+    return parsed.events;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    return null;
+  }
+}
+
+async function writeCodexSessionWindowCache(cachePath, stat, events) {
+  const body = JSON.stringify({
+    version: CODEX_SESSION_WINDOW_CACHE_VERSION,
+    generatedAt: new Date().toISOString(),
+    file: {
+      sizeAtCache: stat.size,
+    },
+    events,
+  });
+  const dir = path.dirname(cachePath);
+  const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(tmpPath, body, "utf8");
+    await fs.rename(tmpPath, cachePath);
+  } catch (_) {
+    try {
+      await fs.unlink(tmpPath);
+    } catch (_) {}
+  }
+}
+
+function codexSessionWindowCachePath(filePath, threadId, readOptions, window) {
+  const key = JSON.stringify({
+    version: CODEX_SESSION_WINDOW_CACHE_VERSION,
+    filePath: path.resolve(filePath),
+    threadId,
+    startTime: window.startTime,
+    endTime: window.endTime,
+    maxEventsPerTurn: readOptions.maxEventsPerTurn ?? null,
+    outputLimit: readOptions.outputLimit ?? null,
+  });
+  const digest = createHash("sha256").update(key).digest("hex");
+  return path.join(RALPH_DIR, CODEX_SESSION_WINDOW_CACHE_DIR, `${digest}.json`);
 }
 
 function processCodexSessionLine(rawLine, readOptions, context, events) {
@@ -2370,6 +2610,7 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
       group.forEach((event) => keep.add(event));
       continue;
     }
+    keepSessionBoundaryEvents(group, keep);
     group
       .filter(isAlwaysKeptSessionEvent)
       .forEach((event) => keep.add(event));
@@ -2399,10 +2640,24 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
   return events.filter((event) => keep.has(event));
 }
 
+function keepSessionBoundaryEvents(group, keep) {
+  const tokenCounts = group.filter((event) => event.eventType === "codex.session.token_count");
+  if (tokenCounts.length > 0) {
+    keep.add(tokenCounts[0]);
+    keep.add(tokenCounts[tokenCounts.length - 1]);
+    tokenCounts
+      .filter(isUsageBaselineRecord)
+      .forEach((event) => keep.add(event));
+  }
+
+  const goalUpdates = group.filter((event) => event.eventType === "codex.thread_goal_updated");
+  if (goalUpdates.length > 0) {
+    keep.add(goalUpdates[goalUpdates.length - 1]);
+  }
+}
+
 function isAlwaysKeptSessionEvent(event) {
-  return event.eventType === "codex.session.token_count" ||
-    event.eventType === "codex.task_complete" ||
-    event.eventType === "codex.thread_goal_updated";
+  return event.eventType === "codex.task_complete";
 }
 
 async function findCodexSessionFiles(threadId) {
