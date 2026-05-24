@@ -1929,19 +1929,24 @@ function buildTurnWindows(events) {
 }
 
 function selectTurnWindows(turnWindows, detailOptions) {
-  const distinctTurnWindows = latestWindowPerTurn(turnWindows);
   if (detailOptions.mode === "all") {
     return [];
   }
   if (detailOptions.mode === "turns") {
     const wanted = new Set(detailOptions.turns ?? []);
-    return distinctTurnWindows.filter((window) => wanted.has(window.turnNumber));
+    return (turnWindows ?? []).filter((window) => wanted.has(window.turnNumber));
   }
   if (detailOptions.mode === "tail") {
     const count = Math.max(1, detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS);
-    return distinctTurnWindows.slice(-count);
+    return windowsForLatestDistinctTurns(turnWindows, count);
   }
   return [];
+}
+
+function windowsForLatestDistinctTurns(turnWindows, count) {
+  const latestByTurn = latestWindowPerTurn(turnWindows);
+  const wanted = new Set(latestByTurn.slice(-count).map((window) => window.turnNumber));
+  return (turnWindows ?? []).filter((window) => wanted.has(window.turnNumber));
 }
 
 function latestWindowPerTurn(turnWindows) {
@@ -2142,6 +2147,7 @@ function emitTokenBaselineIfNeeded(record, readOptions, context, events) {
 function shouldReadCodexSessionFromTail(readOptions) {
   return (
     readOptions?.mode === "windows" &&
+    (readOptions.windows?.length ?? 0) === 1 &&
     Number.isFinite(readOptions.minTime) &&
     !Number.isFinite(readOptions.maxTime)
   );

@@ -234,7 +234,7 @@ function annotateDisplayTurns(records) {
     const action = record.event?.action ?? null;
 
     if (phaseStatus && action === "turn-start") {
-      const replayedSourceTurn = sourceTurn <= maxDisplayTurn && active?.sourceTurn !== sourceTurn;
+      const replayedSourceTurn = sourceTurn <= maxDisplayTurn;
       const displayTurn = replayedSourceTurn ? maxDisplayTurn + 1 : sourceTurn;
       maxDisplayTurn = Math.max(maxDisplayTurn, displayTurn);
       active = {
