@@ -2401,16 +2401,25 @@ function buildAgentTestProgressState(records) {
 
 function buildAgentProgressTargets(records, stageTotalAnchors = new Map()) {
   const targets = new Map();
+  const turnsWithPhaseTargets = new Set();
   for (const record of records) {
-    const testStatus = anchorTestStatusTotals(ralphTestStatusFromRecord(record), stageTotalAnchors);
-    if (!testStatus) {
-      continue;
-    }
-    const target = progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+    const target = progressPhaseTargetFromRecord(record, stageTotalAnchors);
     if (!target) {
       continue;
     }
-    targets.set(progressTargetKey(displayTurnForRecord(record), target.stage), target);
+    const turn = displayTurnForRecord(record);
+    turnsWithPhaseTargets.add(turn);
+    targets.set(progressTargetKey(turn, target.stage), target);
+  }
+
+  for (const record of records) {
+    if (record.eventType === "ralph.phase-status" || turnsWithPhaseTargets.has(displayTurnForRecord(record))) {
+      continue;
+    }
+    const target = progressTargetFromRecord(record, stageTotalAnchors);
+    if (target) {
+      targets.set(progressTargetKey(displayTurnForRecord(record), target.stage), target);
+    }
   }
   return targets;
 }
@@ -2429,17 +2438,50 @@ function deriveRalphTestProgress(record, tracker) {
   if (!configured) {
     return null;
   }
+  if (record.eventType === "ralph.phase-status" && record.event?.action === "turn-start") {
+    return {
+      stage: configured.stage,
+      stageNumber: stageNumber(configured.stage),
+      commandKind: "ralph",
+      commandTarget: "phase start",
+      turn,
+      recordedAt: record.recordedAt,
+      status: "running",
+      passed: 0,
+      total: configured.total,
+    };
+  }
+  const progress = progressFromTestStatus(testStatus, configured.stage);
   return {
-    stage: target.stage,
-    stageNumber: stageNumber(target.stage),
+    stage: configured.stage,
+    stageNumber: stageNumber(configured.stage),
     commandKind: "ralph",
     commandTarget: "ralph required status",
     turn,
     recordedAt: testStatus.recordedAt ?? record.recordedAt,
-    status: testStatus.allTestsPassed ? "pass" : "fail",
-    passed: Math.max(0, Math.min(testStatus.testsPassed ?? 0, configured.total)),
+    status: progress.status,
+    passed: Math.max(0, Math.min(progress.passed, configured.total)),
     total: configured.total,
   };
+}
+
+function progressTargetFromRecord(record, stageTotalAnchors) {
+  const testStatus = anchorTestStatusTotals(ralphTestStatusFromRecord(record), stageTotalAnchors);
+  if (!testStatus) {
+    return null;
+  }
+  return progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+}
+
+function progressPhaseTargetFromRecord(record, stageTotalAnchors) {
+  if (record.eventType === "ralph.phase-status") {
+    return progressTargetFromRecord(record, stageTotalAnchors);
+  }
+  const phaseTarget = phaseStatusTarget(phaseStatusCandidateFromRecord(record)?.status);
+  const total = phaseTarget ? stageTotalAnchors.get(phaseTarget.stage) : null;
+  return phaseTarget && total > 0
+    ? { stage: phaseTarget.stage, total, recordedAt: record.recordedAt ?? null }
+    : null;
 }
 
 function ralphTestStatusFromRecord(record) {
@@ -2453,23 +2495,43 @@ function ralphTestStatusFromRecord(record) {
 }
 
 function progressTargetFromTestStatus(testStatus, phaseStage = null) {
-  const total = finitePositiveNumber(testStatus?.testsTotal);
-  if (!total || (testStatus.stageCount ?? 0) > 1) {
-    return null;
-  }
   const stage =
-    phaseStage ??
-    testStatus.targetStage ??
+    normalizeStageName(phaseStage) ??
+    normalizeStageName(testStatus?.targetStage) ??
+    normalizeStageName(testStatus?.failingStage) ??
     (Array.isArray(testStatus.stages) && testStatus.stages.length === 1
-      ? testStatus.stages[0]?.name
+      ? normalizeStageName(testStatus.stages[0]?.name)
       : null);
   if (!stage) {
+    return null;
+  }
+  const stageStatus = Array.isArray(testStatus.stages)
+    ? testStatus.stages.find((candidate) => candidate?.name === stage)
+    : null;
+  const total = finitePositiveNumber(stageStatus?.total) ?? finitePositiveNumber(testStatus?.testsTotal);
+  if (!total) {
     return null;
   }
   return {
     stage,
     total,
     recordedAt: testStatus.recordedAt ?? null,
+  };
+}
+
+function progressFromTestStatus(testStatus, stage) {
+  const stageStatus = Array.isArray(testStatus?.stages)
+    ? testStatus.stages.find((candidate) => candidate?.name === stage)
+    : null;
+  if (stageStatus) {
+    return {
+      passed: stagePassedCount(stageStatus) ?? 0,
+      status: stageStatus.status === "pass" || testStatus.allTestsPassed ? "pass" : "fail",
+    };
+  }
+  return {
+    passed: Math.max(0, testStatus?.testsPassed ?? 0),
+    status: testStatus?.allTestsPassed ? "pass" : "fail",
   };
 }
 
