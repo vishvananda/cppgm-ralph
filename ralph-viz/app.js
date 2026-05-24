@@ -1822,17 +1822,28 @@ function buildTestStatusMap(records) {
 
 function buildPhaseStatusMap(records) {
   const map = new Map();
+  const successfulTests = new Map();
   for (const r of records) {
     const candidate = phaseStatusCandidateFromRecord(r);
-    if (!candidate) {
-      continue;
+    if (candidate) {
+      const turn = displayTurnForRecord(r);
+      const previous = map.get(turn);
+      if (!previous || phaseStatusCandidateIsNewer(candidate, previous)) {
+        map.set(turn, candidate);
+      }
     }
-    const turn = displayTurnForRecord(r);
-    const previous = map.get(turn);
-    if (!previous || candidate.priority >= previous.priority) {
-      map.set(turn, candidate);
+    if (r.eventType === "ralph.test-status") {
+      const target = successfulTestStatusTarget(r.event?.testStatus);
+      if (target) {
+        const turn = displayTurnForRecord(r);
+        if (!successfulTests.has(turn)) {
+          successfulTests.set(turn, new Set());
+        }
+        successfulTests.get(turn).add(phaseTargetKey(target));
+      }
     }
   }
+  synthesizeAdvancedPhaseCompletions(map, successfulTests);
   return new Map([...map.entries()].map(([turn, candidate]) => [turn, candidate.status]));
 }
 
@@ -1846,16 +1857,14 @@ function latestPhaseStatus(records) {
     if (!candidate) {
       continue;
     }
-    const time = Date.parse(r.recordedAt ?? "");
-    const sortableTime = Number.isFinite(time) ? time : 0;
     if (
       !selectedStatus ||
-      sortableTime > selectedTime ||
-      (sortableTime === selectedTime && candidate.priority >= selectedPriority)
+      candidate.time > selectedTime ||
+      (candidate.time === selectedTime && candidate.priority >= selectedPriority)
     ) {
       selectedTurn = displayTurnForRecord(r);
       selectedStatus = candidate.status;
-      selectedTime = sortableTime;
+      selectedTime = candidate.time;
       selectedPriority = candidate.priority;
     }
   }
@@ -1863,14 +1872,130 @@ function latestPhaseStatus(records) {
 }
 
 function phaseStatusCandidateFromRecord(record) {
+  const time = sortableRecordTime(record);
   if (record.eventType === "ralph.phase-status" && record.event?.phaseStatus) {
-    return { priority: 2, status: record.event.phaseStatus };
+    return {
+      priority: 2,
+      status: record.event.phaseStatus,
+      action: record.event.action ?? null,
+      time,
+    };
   }
   if (record.eventType === "ralph.prompt") {
     const inferred = inferPhaseStatusFromPrompt(record.event?.prompt);
-    return inferred ? { priority: 1, status: inferred } : null;
+    return inferred ? { priority: 1, status: inferred, action: null, time } : null;
   }
   return null;
+}
+
+function phaseStatusCandidateIsNewer(candidate, previous) {
+  return (
+    candidate.priority > previous.priority ||
+    (candidate.priority === previous.priority && candidate.time >= previous.time)
+  );
+}
+
+function sortableRecordTime(record) {
+  const time = Date.parse(record?.recordedAt ?? "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function synthesizeAdvancedPhaseCompletions(map, successfulTests) {
+  for (const [turn, candidate] of map) {
+    if (
+      candidate.status?.allRequiredPassed ||
+      candidate.action === "checked" ||
+      !phaseAdvancedAfterTurn(turn, candidate.status, map)
+    ) {
+      continue;
+    }
+    const target = phaseStatusTarget(candidate.status);
+    if (!target || !successfulTests.get(turn)?.has(phaseTargetKey(target))) {
+      continue;
+    }
+    candidate.status = completedPhaseStatus(candidate.status);
+  }
+}
+
+function phaseAdvancedAfterTurn(turn, status, map) {
+  if (!Number.isInteger(turn)) {
+    return false;
+  }
+  const nextTurn = [...map.keys()]
+    .filter((candidateTurn) => Number.isInteger(candidateTurn) && candidateTurn > turn)
+    .sort((a, b) => a - b)
+    .at(0);
+  if (nextTurn == null) {
+    return false;
+  }
+
+  const currentTarget = phaseStatusTarget(status);
+  const nextStatus = map.get(nextTurn)?.status;
+  const nextTarget = phaseStatusTarget(nextStatus);
+  if (!currentTarget || !nextTarget) {
+    return false;
+  }
+
+  const currentStageNumber = stageNumber(currentTarget.stage);
+  const nextStageNumber = stageNumber(nextTarget.stage);
+  if (currentStageNumber != null && nextStageNumber != null && nextStageNumber > currentStageNumber) {
+    return true;
+  }
+
+  return (
+    nextTarget.stage === currentTarget.stage &&
+    nextTarget.subset === currentTarget.subset &&
+    cleanText(nextStatus?.phase) !== cleanText(status?.phase)
+  );
+}
+
+function successfulTestStatusTarget(status) {
+  if (!status?.allTestsPassed || status.exitCode !== 0) {
+    return null;
+  }
+  const stage = normalizeStageName(status.targetStage ?? status.passingThrough);
+  if (!stage) {
+    return null;
+  }
+  return { stage, subset: normalizeOptionalText(status.targetSubset) };
+}
+
+function phaseStatusTarget(status) {
+  const stage = normalizeStageName(
+    status?.stage ??
+    status?.testStatus?.targetStage ??
+    status?.primaryCheck?.targetStage,
+  );
+  if (!stage) {
+    return null;
+  }
+  return {
+    stage,
+    subset: normalizeOptionalText(
+      status?.subset ??
+      status?.testStatus?.targetSubset ??
+      status?.primaryCheck?.targetSubset,
+    ),
+  };
+}
+
+function phaseTargetKey(target) {
+  return `${target.stage}\0${target.subset}`;
+}
+
+function completedPhaseStatus(status) {
+  const checks = (status.checks ?? []).map((check) => ({
+    ...check,
+    passed: true,
+    exitCode: check.exitCode === 0 ? check.exitCode : 0,
+  }));
+  return {
+    ...status,
+    checks: checks.length > 0 ? checks : [{ name: "tests", required: true, passed: true, exitCode: 0 }],
+    allRequiredPassed: true,
+    failedRequiredChecks: [],
+    inferredCompletion: true,
+  };
 }
 
 function inferPhaseStatusFromPrompt(prompt) {
