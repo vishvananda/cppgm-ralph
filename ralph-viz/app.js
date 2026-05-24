@@ -1259,20 +1259,28 @@ function buildTurnDurationMap(records) {
     if (!Number.isFinite(time)) {
       continue;
     }
-    const span = map.get(turn) ?? { first: time, last: time, durationMs: 0 };
-    span.first = Math.min(span.first, time);
-    span.last = Math.max(span.last, time);
-    map.set(turn, span);
+    const durationSpanActivity = isDurationSpanActivity(record);
+    if (durationSpanActivity) {
+      const span = map.get(turn) ?? { first: time, last: time, durationMs: 0 };
+      span.first = Math.min(span.first, time);
+      span.last = Math.max(span.last, time);
+      map.set(turn, span);
+    } else if (!map.has(turn)) {
+      map.set(turn, { first: null, last: null, durationMs: 0 });
+    }
 
     const attemptIndex = findTurnAttemptIndex(attempts, turn, time);
-    const attemptKey = `${turn}\0${attemptIndex}\0${record.threadId ?? ""}`;
-    const threadSpan = spansByTurnAttemptThread.get(attemptKey) ?? { turn, attemptIndex, first: time, last: time };
-    threadSpan.first = Math.min(threadSpan.first, time);
-    threadSpan.last = Math.max(threadSpan.last, time);
-    spansByTurnAttemptThread.set(attemptKey, threadSpan);
+    const turnAttemptKey = `${turn}\0${attemptIndex}`;
+    if (durationSpanActivity) {
+      const attemptThreadKey = `${turnAttemptKey}\0${record.threadId ?? ""}`;
+      const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey) ?? { turn, attemptIndex, first: time, last: time };
+      threadSpan.first = Math.min(threadSpan.first, time);
+      threadSpan.last = Math.max(threadSpan.last, time);
+      spansByTurnAttemptThread.set(attemptThreadKey, threadSpan);
+    }
 
     if (isCodexTimingActivity(record)) {
-      const timing = sessionTimingByTurnAttempt.get(attemptKey) ?? {
+      const timing = sessionTimingByTurnAttempt.get(turnAttemptKey) ?? {
         turn,
         attemptIndex,
         durationMs: 0,
@@ -1293,11 +1301,11 @@ function buildTurnDurationMap(records) {
           timing.goalTimeUsedMs = Math.max(timing.goalTimeUsedMs, timeUsedSeconds * 1000);
         }
       }
-      sessionTimingByTurnAttempt.set(attemptKey, timing);
+      sessionTimingByTurnAttempt.set(turnAttemptKey, timing);
     }
 
     if (record.eventType === "ralph.phase-status") {
-      const lifecycle = ralphLifecycleByTurnAttempt.get(`${turn}\0${attemptIndex}`) ?? {
+      const lifecycle = ralphLifecycleByTurnAttempt.get(turnAttemptKey) ?? {
         turn,
         attemptIndex,
         startMs: null,
@@ -1311,7 +1319,7 @@ function buildTurnDurationMap(records) {
       } else if (record.event?.action === "checked") {
         lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
       }
-      ralphLifecycleByTurnAttempt.set(`${turn}\0${attemptIndex}`, lifecycle);
+      ralphLifecycleByTurnAttempt.set(turnAttemptKey, lifecycle);
     }
   }
   const attemptDurations = new Map();
@@ -1406,6 +1414,16 @@ function isCodexTimingActivity(record) {
   return record.eventType === "codex.session.token_count" ||
     record.eventType === "codex.task_complete" ||
     record.eventType === "codex.thread_goal_updated";
+}
+
+function isDurationSpanActivity(record) {
+  if (isUsageBaselineRecord(record)) {
+    return false;
+  }
+  if (record.eventType === "ralph.test-status") {
+    return false;
+  }
+  return true;
 }
 
 function durationText(span) {
@@ -3327,7 +3345,7 @@ function codexDetailQueryParams() {
 function combinedRunQueryParams() {
   const params = new URLSearchParams();
   params.set("codex", "tail");
-  params.set("tailTurns", "2");
+  params.set("tailTurns", String(COMBINED_RUN_CARD_LIMIT));
   params.set("usage", "fast");
   return params;
 }
