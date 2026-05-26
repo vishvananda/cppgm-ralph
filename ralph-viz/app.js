@@ -2181,6 +2181,10 @@ function isFullStageTestStatus(status) {
   return !cleanText(status?.targetSubset);
 }
 
+function testStatusHasSubset(status) {
+  return Boolean(cleanText(status?.targetSubset));
+}
+
 function normalizeStageName(stage) {
   return typeof stage === "string" && /^pa\d+$/.test(stage) ? stage : null;
 }
@@ -2495,20 +2499,25 @@ function ralphTestStatusFromRecord(record) {
 }
 
 function progressTargetFromTestStatus(testStatus, phaseStage = null) {
+  const stages = Array.isArray(testStatus?.stages) ? testStatus.stages : [];
+  const normalizedPhaseStage = normalizeStageName(phaseStage);
+  const phaseStageMatchesStatus =
+    normalizedPhaseStage &&
+    (stages.length === 0 || stages.some((candidate) => candidate?.name === normalizedPhaseStage));
   const stage =
-    normalizeStageName(phaseStage) ??
+    (phaseStageMatchesStatus ? normalizedPhaseStage : null) ??
     normalizeStageName(testStatus?.targetStage) ??
     normalizeStageName(testStatus?.failingStage) ??
-    (Array.isArray(testStatus.stages) && testStatus.stages.length === 1
-      ? normalizeStageName(testStatus.stages[0]?.name)
+    (stages.length === 1
+      ? normalizeStageName(stages[0]?.name)
       : null);
   if (!stage) {
     return null;
   }
-  const stageStatus = Array.isArray(testStatus.stages)
-    ? testStatus.stages.find((candidate) => candidate?.name === stage)
-    : null;
-  const total = finitePositiveNumber(stageStatus?.total) ?? finitePositiveNumber(testStatus?.testsTotal);
+  const stageStatus = stages.find((candidate) => candidate?.name === stage);
+  const total = testStatusHasSubset(testStatus) && normalizeStageName(testStatus?.targetStage) === stage
+    ? finitePositiveNumber(testStatus?.testsTotal) ?? finitePositiveNumber(stageStatus?.total)
+    : finitePositiveNumber(stageStatus?.total) ?? finitePositiveNumber(testStatus?.testsTotal);
   if (!total) {
     return null;
   }
@@ -2520,6 +2529,16 @@ function progressTargetFromTestStatus(testStatus, phaseStage = null) {
 }
 
 function progressFromTestStatus(testStatus, stage, tracker) {
+  if (
+    testStatusHasSubset(testStatus) &&
+    normalizeStageName(testStatus?.targetStage) === stage &&
+    finitePositiveNumber(testStatus?.testsTotal)
+  ) {
+    return {
+      passed: Math.max(0, testStatus?.testsPassed ?? 0),
+      status: testStatus?.allTestsPassed ? "pass" : "fail",
+    };
+  }
   const stageStatus = Array.isArray(testStatus?.stages)
     ? testStatus.stages.find((candidate) => candidate?.name === stage)
     : null;
@@ -2827,6 +2846,9 @@ function summaryProgressStatus(summary, exitCode) {
 
 function applyAgentTestProgressObservation(tracker, observation) {
   const target = tracker.turnTargets.get(progressTargetKey(observation.turn, observation.stage));
+  if (!target && turnHasConfiguredProgressTarget(tracker, observation.turn)) {
+    return null;
+  }
   if (target && observation.total !== target.total) {
     return null;
   }
@@ -2864,6 +2886,19 @@ function applyAgentTestProgressObservation(tracker, observation) {
   };
   tracker.latest = progress;
   return progress;
+}
+
+function turnHasConfiguredProgressTarget(tracker, turn) {
+  if (!Number.isInteger(turn)) {
+    return false;
+  }
+  const prefix = `${turn}:`;
+  for (const key of tracker.turnTargets.keys()) {
+    if (key.startsWith(prefix)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function updateKnownStageTotal(tracker, stage, total) {
