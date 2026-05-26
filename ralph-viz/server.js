@@ -24,11 +24,14 @@ const CODEX_SESSION_OUTPUT_LIMIT = 12_000;
 const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
+const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_USAGE_CACHE_VERSION = 6;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 1;
+const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
 const RALPH_DEFAULT_REASONING_EFFORT = "high";
@@ -192,11 +195,12 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
   const sessionEvents = sessionEventGroups.flat();
-  if (!sessionEvents.length) {
+  const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
+  if (!sessionEvents.length && !progressEvents.length) {
     return events;
   }
 
-  return mergeEventStreams(events, sessionEvents);
+  return mergeEventStreams(mergeEventStreams(events, sessionEvents), progressEvents);
 }
 
 async function readShapeUsage(shape, selected = {}) {
@@ -1954,6 +1958,7 @@ function mergeEventStreams(primary, secondary) {
 function eventKey(record) {
   const event = record.event ?? {};
   const item = event.item ?? {};
+  const progress = event.progress ?? {};
   return [
     record.recordedAt ?? "",
     record.threadId ?? "",
@@ -1962,6 +1967,9 @@ function eventKey(record) {
     event.type ?? "",
     item.id ?? "",
     item.type ?? "",
+    progress.stage ?? "",
+    progress.passed ?? "",
+    progress.total ?? "",
   ].join("|");
 }
 
@@ -2295,6 +2303,265 @@ async function readCodexSessionWindowEvents(threadId, resolveTurnNumber, readOpt
   }
 
   return limitSessionEventsByTurn(events, readOptions.maxEventsPerTurn);
+}
+
+async function readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions) {
+  const events = [];
+  for (const threadId of threadIds ?? []) {
+    const files = await findCodexSessionFiles(threadId);
+    for (const filePath of files) {
+      const observations = await readCodexSessionProgressObservations(filePath);
+      for (const observation of observations) {
+        if (!timestampIncludedBySessionReadOptions(observation.recordedAt, readOptions)) {
+          continue;
+        }
+        const turnNumber = resolveTurnNumber(observation.recordedAt);
+        if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
+          continue;
+        }
+        events.push({
+          recordedAt: observation.recordedAt,
+          threadId,
+          turnNumber,
+          eventType: "ralph.agent-progress",
+          event: {
+            type: "ralph.agent-progress",
+            progress: {
+              ...observation,
+              commandKind: "session-cache",
+              commandTarget: "cached test summary",
+            },
+          },
+        });
+      }
+    }
+  }
+  return compactBestProgressEvents(events);
+}
+
+async function readCodexSessionProgressObservations(filePath) {
+  const stat = await fs.stat(filePath);
+  const cachePath = codexSessionProgressCachePath(filePath);
+  const cached = cachePath ? await readCodexSessionProgressCache(cachePath, filePath) : null;
+  if (cached && Number(cached.file?.size) === stat.size) {
+    return cached.observations;
+  }
+
+  let observations = [];
+  let startOffset = 0;
+  if (cached && Number(cached.file?.size) > 0 && Number(cached.file.size) < stat.size) {
+    observations = cached.observations;
+    startOffset = Math.max(0, Number(cached.file.size) - CODEX_SESSION_PROGRESS_OVERLAP_BYTES);
+  }
+
+  const scanned = await scanCodexSessionProgressObservations(filePath, startOffset);
+  observations = dedupeProgressObservations([...observations, ...scanned]);
+  if (cachePath) {
+    await writeCodexSessionProgressCache(cachePath, filePath, stat, observations);
+  }
+  return observations;
+}
+
+async function readCodexSessionProgressCache(cachePath, filePath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(cachePath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      return null;
+    }
+    return null;
+  }
+  if (
+    parsed?.version !== CODEX_SESSION_PROGRESS_CACHE_VERSION ||
+    parsed?.file?.path !== filePath ||
+    !Array.isArray(parsed?.observations)
+  ) {
+    return null;
+  }
+  return {
+    file: parsed.file,
+    observations: dedupeProgressObservations(parsed.observations.map(normalizeProgressObservation).filter(Boolean)),
+  };
+}
+
+async function writeCodexSessionProgressCache(cachePath, filePath, stat, observations) {
+  const body = JSON.stringify({
+    version: CODEX_SESSION_PROGRESS_CACHE_VERSION,
+    generatedAt: new Date().toISOString(),
+    file: {
+      path: filePath,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      mtime: stat.mtime.toISOString(),
+    },
+    observations,
+  });
+  const dir = path.dirname(cachePath);
+  const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(tmpPath, body, "utf8");
+    await fs.rename(tmpPath, cachePath);
+  } catch (_) {
+    try {
+      await fs.unlink(tmpPath);
+    } catch (_) {}
+  }
+}
+
+function codexSessionProgressCachePath(filePath) {
+  const key = createHash("sha256").update(filePath).digest("hex").slice(0, 24);
+  return path.join(RALPH_DIR, CODEX_SESSION_PROGRESS_CACHE_DIR, `${key}.json`);
+}
+
+async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
+  const observations = [];
+  const stream = createReadStream(filePath, { encoding: "utf8", start: Math.max(0, startOffset) });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const rawLine of lines) {
+    const line = String(rawLine ?? "").trim();
+    if (
+      !line ||
+      !line.includes('"type":"response_item"') ||
+      !line.includes('"function_call_output"') ||
+      (!line.includes("TEST SUMMARY") && !line.includes("ALL TESTS PASSED SUCCESSFULLY"))
+    ) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    const observation = progressObservationFromCodexOutputRecord(record);
+    if (observation) {
+      observations.push(observation);
+    }
+  }
+  return observations;
+}
+
+function progressObservationFromCodexOutputRecord(record) {
+  if (record?.type !== "response_item" || record.payload?.type !== "function_call_output") {
+    return null;
+  }
+  const output = String(record.payload.output ?? "");
+  const summary = parseSessionTestSummary(output);
+  if (!summary) {
+    return null;
+  }
+  const stage = inferSingleSessionProgressStage(output);
+  if (!stage) {
+    return null;
+  }
+  return normalizeProgressObservation({
+    recordedAt: record.timestamp,
+    stage,
+    passed: summary.testsPassed,
+    total: summary.testsTotal,
+    status: summary.allTestsPassed ? "pass" : "fail",
+    hasSubset: false,
+  });
+}
+
+function parseSessionTestSummary(output) {
+  const allPassed = String(output ?? "").match(
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \((\d+)\s*\/\s*(\d+)\))? =====$/m,
+  );
+  if (allPassed) {
+    const testsPassed = parseOptionalInt(allPassed[1]);
+    const testsTotal = parseOptionalInt(allPassed[2]);
+    return {
+      allTestsPassed: true,
+      testsPassed: testsPassed ?? testsTotal ?? 0,
+      testsTotal: testsTotal ?? testsPassed ?? 0,
+    };
+  }
+
+  const summary = String(output ?? "").match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
+  if (!summary) {
+    return null;
+  }
+  return {
+    allTestsPassed: false,
+    testsPassed: Number.parseInt(summary[1], 10),
+    testsTotal: Number.parseInt(summary[2], 10),
+  };
+}
+
+function inferSingleSessionProgressStage(output) {
+  const stages = [...String(output ?? "").matchAll(/^===== (pa\d+) =====$/gm)]
+    .map((match) => match[1]);
+  const unique = [...new Set(stages)];
+  if (unique.length === 1) {
+    return unique[0];
+  }
+  return null;
+}
+
+function normalizeProgressObservation(raw) {
+  const stage = typeof raw?.stage === "string" && /^pa\d+$/.test(raw.stage) ? raw.stage : null;
+  const passed = Number(raw?.passed);
+  const total = Number(raw?.total);
+  const recordedAt = typeof raw?.recordedAt === "string" ? raw.recordedAt : null;
+  if (!stage || !recordedAt || !Number.isFinite(passed) || !Number.isFinite(total) || total <= 0) {
+    return null;
+  }
+  return {
+    recordedAt,
+    stage,
+    passed: Math.max(0, Math.min(passed, total)),
+    total,
+    status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
+    hasSubset: raw?.hasSubset === true,
+  };
+}
+
+function dedupeProgressObservations(observations) {
+  const byKey = new Map();
+  for (const observation of observations) {
+    const normalized = normalizeProgressObservation(observation);
+    if (!normalized) {
+      continue;
+    }
+    byKey.set(progressObservationKey(normalized), normalized);
+  }
+  return [...byKey.values()].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
+}
+
+function progressObservationKey(observation) {
+  return [
+    observation.recordedAt,
+    observation.stage,
+    observation.passed,
+    observation.total,
+    observation.status,
+  ].join("|");
+}
+
+function compactBestProgressEvents(events) {
+  const byKey = new Map();
+  for (const event of events) {
+    const progress = event.event?.progress;
+    const key = [event.turnNumber, progress?.stage, progress?.total].join("|");
+    const previous = byKey.get(key);
+    if (!previous || compareProgressEvents(event, previous) > 0) {
+      byKey.set(key, event);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+}
+
+function compareProgressEvents(left, right) {
+  const leftProgress = left.event?.progress ?? {};
+  const rightProgress = right.event?.progress ?? {};
+  const passedDelta = (leftProgress.passed ?? 0) - (rightProgress.passed ?? 0);
+  if (passedDelta !== 0) {
+    return passedDelta;
+  }
+  return String(left.recordedAt ?? "").localeCompare(String(right.recordedAt ?? ""));
 }
 
 async function readCachedClosedCodexSessionWindow(filePath, threadId, resolveTurnNumber, readOptions, window) {

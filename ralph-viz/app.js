@@ -25,6 +25,8 @@ const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
 const SCROLL_DEBUG_DEFAULT = false;
 const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
+const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v1";
+const PROGRESS_BEST_CACHE_LIMIT = 600;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -54,6 +56,7 @@ const state = {
   scrollDebugEnabled: initialScrollDebugEnabled(),
   scrollDebugPageId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   scrollDebugSeq: 0,
+  progressBestCache: loadProgressBestCache(),
   lastObservedScrollTop: null,
   lastUserScrollAt: 0,
   mobileScrollPauseUntil: 0,
@@ -68,6 +71,7 @@ const NOISE_TYPES = new Set([
   "thread.started", "turn.started", "turn.completed", "turn.failed",
   "item.started", "error", "codex.session.token_count", "codex.task_complete",
   "codex.thread_goal_updated", "ralph.test-status",
+  "ralph.agent-progress",
   // Gemini streaming noise
   "content", "finished", "model_info", "tool_call_response",
 ]);
@@ -163,6 +167,8 @@ function buildSummary(events, shapeUsage = null, run = null) {
     typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
   }
 
+  const testProgress = applyProgressBestCache(buildAgentTestProgressState(events), run);
+
   return {
     threadId: events.at(0)?.threadId ?? "n/a",
     events: events.length,
@@ -174,7 +180,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
     priceModel,
     latestTurn: latestTurnOverview(events, priceModel),
     latestPhaseStatus: latestPhaseStatus(events),
-    testProgress: buildAgentTestProgressState(events),
+    testProgress,
     latestTestStatus: latestTestStatus(events),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
@@ -2370,7 +2376,9 @@ function buildAgentTestProgressState(records) {
 
   for (const record of records) {
     seedAgentTestProgressTracker(tracker, record);
-    const seededObservation = deriveRalphTestProgress(record, tracker);
+    const seededObservation =
+      deriveCachedAgentTestProgress(record) ??
+      deriveRalphTestProgress(record, tracker);
     if (seededObservation) {
       const progress = applyAgentTestProgressObservation(tracker, seededObservation);
       if (progress) {
@@ -2401,6 +2409,159 @@ function buildAgentTestProgressState(records) {
   }
 
   return { byTurn, latest: tracker.latest };
+}
+
+function applyProgressBestCache(progressState, run = null) {
+  if (!progressState) {
+    return progressState;
+  }
+  const runKey = progressBestRunKey(run);
+  if (!runKey) {
+    return progressState;
+  }
+
+  let changed = false;
+  let cacheChanged = false;
+  const byTurn = new Map();
+  for (const [turn, progress] of progressState.byTurn ?? []) {
+    const { progress: updated, cacheChanged: updatedCache } = mergeProgressBestCache(runKey, progress);
+    byTurn.set(turn, updated);
+    cacheChanged = cacheChanged || updatedCache;
+    if (updated !== progress) {
+      changed = true;
+    }
+  }
+
+  let latest = progressState.latest;
+  if (latest) {
+    const { progress: updated, cacheChanged: updatedCache } = mergeProgressBestCache(runKey, latest);
+    cacheChanged = cacheChanged || updatedCache;
+    if (updated !== latest) {
+      latest = updated;
+      changed = true;
+    }
+  }
+
+  if (cacheChanged) {
+    saveProgressBestCache();
+  }
+
+  return changed ? { ...progressState, byTurn, latest } : progressState;
+}
+
+function mergeProgressBestCache(runKey, progress) {
+  const cacheKey = progressBestCacheKey(runKey, progress);
+  if (!cacheKey) {
+    return { progress, cacheChanged: false };
+  }
+
+  const candidate = progressBestCandidate(progress);
+  let cached = state.progressBestCache.get(cacheKey) ?? null;
+  let cacheChanged = false;
+  if (isBetterProgressBest(candidate, cached)) {
+    cached = {
+      ...candidate,
+      updatedAt: new Date().toISOString(),
+    };
+    state.progressBestCache.set(cacheKey, cached);
+    cacheChanged = true;
+  }
+
+  if (!cached || !isBetterProgressBest(cached, progress.best)) {
+    return { progress, cacheChanged };
+  }
+  return { progress: {
+    ...progress,
+    best: {
+      passed: cached.passed,
+      total: cached.total,
+      recordedAt: cached.recordedAt ?? cached.updatedAt ?? progress.recordedAt ?? null,
+    },
+  }, cacheChanged };
+}
+
+function progressBestRunKey(run) {
+  return cleanText(run?.id ?? state.selectedRun);
+}
+
+function progressBestCacheKey(runKey, progress) {
+  if (!runKey || !progress || !Number.isInteger(progress.turn) || !progress.stage) {
+    return null;
+  }
+  const total = finitePositiveNumber(progress.current?.total) ?? finitePositiveNumber(progress.best?.total);
+  if (!total) {
+    return null;
+  }
+  return `${runKey}\0${progress.turn}\0${progress.stage}\0${total}`;
+}
+
+function progressBestCandidate(progress) {
+  const best = progress?.best ?? progress?.current ?? null;
+  const current = progress?.current ?? null;
+  const bestPassed = Number.isFinite(best?.passed) ? best.passed : -1;
+  const currentPassed = Number.isFinite(current?.passed) ? current.passed : -1;
+  const source = currentPassed > bestPassed ? current : best;
+  const total = finitePositiveNumber(source?.total) ?? finitePositiveNumber(best?.total) ?? finitePositiveNumber(current?.total);
+  if (!source || !total) {
+    return null;
+  }
+  return {
+    passed: Math.max(0, source.passed ?? 0),
+    total,
+    recordedAt: source.recordedAt ?? progress?.recordedAt ?? null,
+  };
+}
+
+function isBetterProgressBest(candidate, previous) {
+  if (!candidate) {
+    return false;
+  }
+  if (!previous) {
+    return true;
+  }
+  if ((candidate.total ?? 0) !== (previous.total ?? 0)) {
+    return false;
+  }
+  if ((candidate.passed ?? 0) !== (previous.passed ?? 0)) {
+    return (candidate.passed ?? 0) > (previous.passed ?? 0);
+  }
+  const candidateTime = Date.parse(candidate.recordedAt ?? candidate.updatedAt ?? "");
+  const previousTime = Date.parse(previous.recordedAt ?? previous.updatedAt ?? "");
+  return Number.isFinite(candidateTime) &&
+    (!Number.isFinite(previousTime) || candidateTime > previousTime);
+}
+
+function loadProgressBestCache() {
+  try {
+    const raw = window.localStorage.getItem(PROGRESS_BEST_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    return new Map(entries.filter(([key, value]) => typeof key === "string" && value));
+  } catch (_) {
+    return new Map();
+  }
+}
+
+function saveProgressBestCache() {
+  pruneProgressBestCache();
+  try {
+    window.localStorage.setItem(PROGRESS_BEST_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      entries: [...state.progressBestCache.entries()],
+    }));
+  } catch (_) {}
+}
+
+function pruneProgressBestCache() {
+  if (state.progressBestCache.size <= PROGRESS_BEST_CACHE_LIMIT) {
+    return;
+  }
+  const entries = [...state.progressBestCache.entries()].sort((a, b) => {
+    const aTime = Date.parse(a[1]?.updatedAt ?? a[1]?.recordedAt ?? "");
+    const bTime = Date.parse(b[1]?.updatedAt ?? b[1]?.recordedAt ?? "");
+    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+  });
+  state.progressBestCache = new Map(entries.slice(0, PROGRESS_BEST_CACHE_LIMIT));
 }
 
 function buildAgentProgressTargets(records, stageTotalAnchors = new Map()) {
@@ -2466,6 +2627,30 @@ function deriveRalphTestProgress(record, tracker) {
     status: progress.status,
     passed: Math.max(0, Math.min(progress.passed, configured.total)),
     total: configured.total,
+  };
+}
+
+function deriveCachedAgentTestProgress(record) {
+  if (record.eventType !== "ralph.agent-progress") {
+    return null;
+  }
+  const raw = record.event?.progress;
+  const stage = normalizeStageName(raw?.stage);
+  const total = finitePositiveNumber(raw?.total);
+  if (!stage || !total) {
+    return null;
+  }
+  return {
+    stage,
+    stageNumber: stageNumber(stage),
+    commandKind: cleanText(raw?.commandKind) || "session-cache",
+    commandTarget: cleanText(raw?.commandTarget) || "cached test summary",
+    hasSubset: raw?.hasSubset === true,
+    turn: displayTurnForRecord(record),
+    recordedAt: raw?.recordedAt ?? record.recordedAt,
+    status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
+    passed: Math.max(0, Math.min(raw?.passed ?? 0, total)),
+    total,
   };
 }
 
@@ -3385,7 +3570,10 @@ function renderTimeline(records) {
   const testMap = buildTestStatusMap(records);
   const phaseMap = buildPhaseStatusMap(records);
   const durationMap = buildTurnDurationMap(records);
-  const progressMap = buildAgentTestProgressState(records).byTurn;
+  const progressMap = applyProgressBestCache(
+    buildAgentTestProgressState(records),
+    state.currentRun,
+  ).byTurn;
   const filtered = filterRecords(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
