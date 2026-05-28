@@ -1141,6 +1141,11 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
     summary.allTestsPassed ||
     (existingStatus.exitCode === 0 && summary.testsPassed === summary.testsTotal);
   const canInferPassingThrough = isContiguousStagePrefix(stageNames);
+  const existingStages = new Map(
+    (Array.isArray(existingStatus.stages) ? existingStatus.stages : [])
+      .filter((stage) => typeof stage?.name === "string")
+      .map((stage) => [stage.name, stage]),
+  );
   const stagesPassed = allTestsPassed
     ? stageNames.length
     : failingIndex > 0
@@ -1154,15 +1159,25 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
   const stages = stageSections.map((stage, index) => {
     const failureLines = extractStageFailureLines(stage.body);
     const failed = failureLines.length;
+    const existingStage = existingStages.get(stage.name);
+    const existingTotal = finitePositiveNumber(existingStage?.total);
+    const status = allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown";
+    const total = existingTotal ?? 0;
+    const passed = inferDerivedStagePassed({
+      status,
+      failed,
+      total,
+      existingPassed: existingStage?.passed,
+    });
     return {
       name: stage.name,
-      status: allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown",
-      passed: 0,
-      total: 0,
+      status,
+      passed,
+      total,
       failed,
       timeouts: failureLines.filter((line) => classifyFailureLine(line) === "timeout").length,
       timeoutExpectations: failureLines.filter((line) => classifyFailureLine(line) === "timeout_expected").length,
-      targets: [],
+      targets: Array.isArray(existingStage?.targets) ? existingStage.targets : [],
     };
   });
   const timeoutFailures = stages.length
@@ -1186,6 +1201,22 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
     timeoutExpectationFailures,
     stages: stages.length ? stages : existingStatus.stages,
   };
+}
+
+function inferDerivedStagePassed({ status, failed, total, existingPassed }) {
+  if (!Number.isFinite(total) || total <= 0) {
+    return Number.isFinite(existingPassed) ? Math.max(0, existingPassed) : 0;
+  }
+  if (status === "pass") {
+    return total;
+  }
+  if (failed > 0) {
+    return Math.max(0, Math.min(total, total - failed));
+  }
+  if (Number.isFinite(existingPassed)) {
+    return Math.max(0, Math.min(total, existingPassed));
+  }
+  return 0;
 }
 
 async function augmentSliceMetadataForRun(events, shape) {
@@ -1842,6 +1873,11 @@ function parseOptionalInt(value) {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function finitePositiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
 }
 
 function isContiguousStagePrefix(stageNames) {
