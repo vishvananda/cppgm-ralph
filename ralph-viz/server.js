@@ -697,12 +697,18 @@ function turnExecutionDurationMs(events, sessionTiming = new Map()) {
   const coveredAttempts = new Set();
   for (const [attemptKey, timing] of sessionTiming.entries()) {
     coveredAttempts.add(attemptKey);
+    let attemptDurationMs = 0;
     if (timing?.durationMs > 0) {
-      durationMs += timing.durationMs;
-    } else if (timing?.goalTimeUsedMs > 0) {
-      durationMs += timing.goalTimeUsedMs;
-    } else if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
-      durationMs += Math.max(0, timing.sessionLastMs - timing.sessionFirstMs);
+      attemptDurationMs = Math.max(attemptDurationMs, timing.durationMs);
+    }
+    if (timing?.goalTimeUsedMs > 0) {
+      attemptDurationMs = Math.max(attemptDurationMs, timing.goalTimeUsedMs);
+    }
+    if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
+      attemptDurationMs = Math.max(attemptDurationMs, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+    }
+    if (attemptDurationMs > 0) {
+      durationMs += attemptDurationMs;
     } else if (fallbackDurations.has(attemptKey)) {
       durationMs += fallbackDurations.get(attemptKey);
     }

@@ -15,9 +15,9 @@ const DEFAULTS = {
   left: "phases-gpt-5.5-xhigh",
   leftLabel: "phases",
   leftModel: "gpt-5.5",
-  right: "spark-gpt-5.4-medium",
-  rightLabel: "spark",
-  rightModel: "gpt-5.4",
+  right: "trusted-gpt-5.5-xhigh",
+  rightLabel: "trusted",
+  rightModel: "gpt-5.5",
   through: "pa22",
   ralphDir: path.join(os.homedir(), "work", ".ralph"),
   codexDir: path.join(os.homedir(), ".codex", "sessions"),
@@ -33,9 +33,9 @@ Options:
   --left <run>          Left run shape, run id, event jsonl, or events dir
   --right <run>         Right run shape, run id, event jsonl, or events dir
   --left-label <text>   Label for the left run (default: phases)
-  --right-label <text>  Label for the right run (default: spark)
+  --right-label <text>  Label for the right run (default: trusted)
   --left-model <model>  Pricing model for the left run (default: gpt-5.5)
-  --right-model <model> Pricing model for the right run (default: gpt-5.4)
+  --right-model <model> Pricing model for the right run (default: gpt-5.5)
   --through <paN|N>     Last PA to include (default: pa22)
   --ralph-dir <path>    Ralph state dir (default: ~/work/.ralph)
   --codex-dir <path>    Codex sessions dir (default: ~/.codex/sessions)
@@ -616,15 +616,20 @@ function fillDurationFallbacks(events, byTurn) {
 
   for (let index = 0; index < starts.length; index += 1) {
     const slot = byTurn.get(starts[index].key);
-    if (!slot || slot.durationMs > 0) {
+    if (!slot) {
       continue;
     }
+    let bestDurationMs = Number.isFinite(slot.durationMs) && slot.durationMs > 0
+      ? slot.durationMs
+      : 0;
     if (slot.goalTimeUsedMs > 0) {
-      slot.durationMs = slot.goalTimeUsedMs;
-      continue;
+      bestDurationMs = Math.max(bestDurationMs, slot.goalTimeUsedMs);
     }
     if (slot.sessionFirstMs != null && slot.sessionLastMs != null) {
-      slot.durationMs = Math.max(0, slot.sessionLastMs - slot.sessionFirstMs);
+      bestDurationMs = Math.max(bestDurationMs, Math.max(0, slot.sessionLastMs - slot.sessionFirstMs));
+    }
+    if (bestDurationMs > 0) {
+      slot.durationMs = bestDurationMs;
       continue;
     }
     const nextTime = starts[index + 1]?.startTime;

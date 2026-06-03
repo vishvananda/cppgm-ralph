@@ -1343,12 +1343,18 @@ function buildTurnDurationMap(records) {
     }
   }
   for (const [key, timing] of sessionTimingByTurnAttempt.entries()) {
+    let durationMs = 0;
     if (timing.durationMs > 0) {
-      attemptDurations.set(key, timing.durationMs);
-    } else if (timing.goalTimeUsedMs > 0) {
-      attemptDurations.set(key, timing.goalTimeUsedMs);
-    } else if (timing.sessionFirstMs != null && timing.sessionLastMs != null) {
-      attemptDurations.set(key, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+      durationMs = Math.max(durationMs, timing.durationMs);
+    }
+    if (timing.goalTimeUsedMs > 0) {
+      durationMs = Math.max(durationMs, timing.goalTimeUsedMs);
+    }
+    if (timing.sessionFirstMs != null && timing.sessionLastMs != null) {
+      durationMs = Math.max(durationMs, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+    }
+    if (durationMs > 0) {
+      attemptDurations.set(key, durationMs);
     }
   }
   const totalByTurn = new Map();
