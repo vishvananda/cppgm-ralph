@@ -1,0 +1,55 @@
+{
+  "baseDir": "/work",
+  "workdir": "/work/cppgm-run-trusted",
+  "useExistingWorkdir": true,
+  "name": "cppgm-run-trusted",
+  "testCommand": "make test-report-through-paX",
+  "checks": {
+    "tests": {
+      "command": "make test-report-through-{{testStage}}",
+      "primary": true,
+      "required": true,
+      "kind": "test"
+    },
+    "fileAudit": {
+      "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev/src",
+      "required": true
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "checks": [
+        "tests",
+        "fileAudit"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "runWhenChecksPass": true,
+      "checks": [
+        "tests",
+        "fileAudit"
+      ]
+    }
+  ],
+  "maxTurns": 100,
+  "stateBaseDir": "/work/.ralph",
+  "model": "gpt-5.5",
+  "reasoningEffort": "xhigh",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "additionalDirectories": [],
+  "outputTailChars": 20000,
+  "codexPath": "codex",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run"
+}
