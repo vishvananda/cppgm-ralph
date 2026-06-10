@@ -30,6 +30,35 @@ prompt, exposes Ralph-owned goal tools through the Antigravity SDK bridge, and
 records `ralph.goal` events in the same visualization stream. Ralph still
 advances only after its own configured checks pass and the worktree is clean.
 
+For Claude runs (`"provider": "claude"`, default model `claude-fable-5`), Ralph
+drives the Claude Code CLI in skip-permissions mode the same way it drives the
+Codex CLI: `claude --print --output-format stream-json --dangerously-skip-permissions`,
+resuming the persisted session id on later turns. The stream-json events are
+translated into the same Codex-shaped event log (`item.completed`,
+`turn.completed` with normalized token usage plus the exact `total_cost_usd`).
+Goal mode uses Claude Code's built-in `/goal` feature: each turn Ralph clears
+any leftover goal, sends the turn as `/goal <objective>`, and delivers the
+detailed turn instructions as appended system instructions, so Claude's graded
+stop hook keeps the agent working until the loop goal is judged complete. The
+`/goal` condition is limited to 4000 characters and the grader judges only the
+objective, so goal sidecar templates should be self-contained (include the
+required exit criteria); oversized objectives are tail-truncated as a last
+resort. If Claude reports a usage/session limit mid-turn, Ralph waits for the
+limit window to reset (using the reset time from the stream when available, 15
+minutes otherwise) and resumes the same session so the turn continues with its
+context intact. After an interrupted run, `node ralph.js --continue` resumes
+the most recent provider thread for the next turn only (subsequent turns
+follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
+still active, Ralph skips re-sending the goal and instead sends a short
+continuation nudge with refreshed turn instructions in the appended system
+prompt. The CLI path can be overridden with `claudePath` / `RALPH_CLAUDE_PATH`.
+
+To stop a run cleanly at the next turn boundary, create a `stop-after-turn`
+file in the run's state directory (e.g.
+`touch .ralph/<run-name>/stop-after-turn`). Ralph consumes the file and exits
+before starting the next provider turn; restarting later resumes from the
+saved state.
+
 The first-turn default prompt can be customized with a Markdown sidecar file next
 to the config file. For a config named `goals-2026-05-14.config.json`, Ralph
 looks for `goals-2026-05-14.default.md`. If it is missing, Ralph falls back to

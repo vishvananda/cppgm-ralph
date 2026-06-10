@@ -32,6 +32,9 @@ const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
   ["gpt-5.4-mini", { input: 0.75, cachedInput: 0.075, output: 4.50 }],
   ["gpt-5.4", { input: 2.50, cachedInput: 0.25, output: 15.00 }],
+  ["claude-fable-5", { input: 10.00, cachedInput: 1.00, output: 50.00 }],
+  ["claude-opus-4-8", { input: 5.00, cachedInput: 0.50, output: 25.00 }],
+  ["claude-haiku-4-5", { input: 1.00, cachedInput: 0.10, output: 5.00 }],
 ]);
 
 const state = {
@@ -47,6 +50,7 @@ const state = {
   openTurnReloadTimer: null,
   refreshInFlight: false,
   openEntryKeys: new Set(),
+  expandedOutputKeys: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
@@ -499,9 +503,14 @@ function buildDisplayEntries(records) {
       if (item.id) cmdStarts.set(item.id, entry);
       continue;
     }
-    if (record.eventType === "item.completed" && isCmd && item.id && cmdStarts.has(item.id)) {
-      cmdStarts.get(item.id).endRecord = record;
-      cmdStarts.delete(item.id);
+    if (record.eventType === "item.completed" && isCmd) {
+      if (item.id && cmdStarts.has(item.id)) {
+        cmdStarts.get(item.id).endRecord = record;
+        cmdStarts.delete(item.id);
+      } else {
+        // Claude emits completed-only command events (no item.started)
+        entries.push({ kind: "command", startRecord: null, endRecord: record });
+      }
       continue;
     }
 
@@ -601,27 +610,42 @@ function renderCommandCard(entry) {
   appendFullCommand(body, cmd);
 
   if (output) {
-    const pre = document.createElement("pre");
-    pre.className = "cmd-output";
-    if (output.length > 2000) {
-      pre.textContent = output.slice(0, 2000);
-      const more = document.createElement("button");
-      more.className = "btn-more";
-      more.textContent = `Show all (${output.length} chars)`;
-      more.onclick = () => {
-        const scrollSnapshot = captureScrollSnapshot();
-        pre.textContent = output;
-        more.remove();
-        markLayoutScrollIntent(scrollSnapshot);
-      };
-      body.append(pre, more);
-    } else {
-      pre.textContent = output;
-      body.append(pre);
-    }
+    appendExpandableText(body, output, `out:${commandEntryKey(entry)}`, "cmd-output");
   }
 
   return card;
+}
+
+const OUTPUT_PREVIEW_CHAR_LIMIT = 2000;
+
+function appendExpandableText(container, text, key, className) {
+  const el = document.createElement(className === "thought-body" ? "div" : "pre");
+  el.className = className;
+  const expanded = key ? state.expandedOutputKeys.has(key) : false;
+  if (expanded || text.length <= OUTPUT_PREVIEW_CHAR_LIMIT) {
+    el.textContent = text;
+    container.append(el);
+    return;
+  }
+  let cut = text.lastIndexOf("\n", OUTPUT_PREVIEW_CHAR_LIMIT);
+  if (cut <= 0) {
+    cut = OUTPUT_PREVIEW_CHAR_LIMIT;
+  }
+  const totalLines = text.split(/\r?\n/).length;
+  el.textContent = text.slice(0, cut);
+  const more = document.createElement("button");
+  more.className = "btn-more";
+  more.textContent = `Show all (${fmtInt(totalLines)} lines)`;
+  more.onclick = () => {
+    const scrollSnapshot = captureScrollSnapshot();
+    if (key) {
+      state.expandedOutputKeys.add(key);
+    }
+    el.textContent = text;
+    more.remove();
+    markLayoutScrollIntent(scrollSnapshot);
+  };
+  container.append(el, more);
 }
 
 function appendFullCommand(body, command) {
@@ -827,6 +851,130 @@ function renderTodoCard(record) {
   }
 
   body.append(list);
+  return card;
+}
+
+function renderReasoningCard(record) {
+  const text = cleanText(record.event?.item?.text);
+  if (!text) return null;
+
+  const card = document.createElement("div");
+  card.className = "ev ev-thought";
+
+  appendExpandableText(card, text, `out:${recordScrollKey(record, "reasoning")}`, "thought-body");
+
+  return card;
+}
+
+function renderMcpToolCard(record) {
+  const item = record.event?.item ?? {};
+  const failed = item.status === "failed" || Boolean(item.error);
+  const label = item.server && item.server !== "claude-code"
+    ? `${item.server}/${item.tool ?? "tool"}`
+    : item.tool ?? "tool";
+  const errorText = cleanText(item.error?.message ?? "");
+  const resultText = cleanText(
+    typeof item.result === "string" ? item.result : JSON.stringify(item.result ?? "", null, 2),
+  );
+  const output = errorText && errorText !== resultText
+    ? [errorText, resultText].filter(Boolean).join("\n")
+    : resultText || errorText;
+  const time = fmtShort(record.recordedAt);
+
+  const card = document.createElement("div");
+  card.className = "ev ev-cmd" + (failed ? " ev-cmd-fail" : "");
+  const { header: summary, body } = createAccordion(card, {
+    key: mcpToolEntryKey(record),
+  });
+
+  const toolSpan = document.createElement("span");
+  toolSpan.className = "pill";
+  toolSpan.textContent = label;
+  summary.append(toolSpan);
+
+  const detail = mcpToolDetailText(item);
+  if (detail) {
+    const detailSpan = document.createElement("code");
+    detailSpan.className = "cmd-inline";
+    detailSpan.textContent = truncate(detail, 200);
+    summary.append(document.createTextNode(" "), detailSpan);
+  }
+
+  if (output) {
+    const lineCount = output.split(/\r?\n/).length;
+    const lc = document.createElement("span");
+    lc.className = "cmd-lines";
+    lc.textContent = `${lineCount} line${lineCount !== 1 ? "s" : ""}`;
+    summary.append(lc);
+  }
+
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  const badge = document.createElement("span");
+  badge.className = failed ? "pill pill-bad" : "pill pill-ok";
+  badge.textContent = failed ? "error" : "ok";
+  summary.append(badge);
+
+  if (output) {
+    appendExpandableText(body, output, `out:${mcpToolEntryKey(record)}`, "cmd-output");
+  }
+
+  return card;
+}
+
+function mcpToolDetailText(item) {
+  const input = item?.input;
+  if (!input || typeof input !== "object") return "";
+  const value =
+    input.file_path ??
+    input.notebook_path ??
+    input.path ??
+    input.pattern ??
+    input.query ??
+    input.url ??
+    input.command ??
+    input.description ??
+    input.prompt ??
+    "";
+  let detail = typeof value === "string" ? value : "";
+  if (detail && input.offset != null) {
+    detail += `:${input.offset}`;
+    if (input.limit != null) detail += `-${Number(input.offset) + Number(input.limit)}`;
+  }
+  return detail;
+}
+
+function mcpToolEntryKey(record) {
+  const item = record.event?.item ?? {};
+  const threadId = record.threadId ?? "thread";
+  const turn = record.turnNumber ?? "setup";
+  if (item.id) {
+    return `mcp:${threadId}:${turn}:${item.id}`;
+  }
+  return `mcp:${threadId}:${turn}:${record.recordedAt ?? ""}:${item.server ?? ""}:${item.tool ?? ""}`;
+}
+
+function renderWebSearchCard(record) {
+  const query = cleanText(record.event?.item?.query);
+  if (!query) return null;
+
+  const card = document.createElement("div");
+  card.className = "ev ev-cmd";
+
+  const label = document.createElement("span");
+  label.className = "pill";
+  label.textContent = "web_search";
+
+  const text = document.createElement("code");
+  text.className = "cmd-inline";
+  text.textContent = truncate(query, 200);
+
+  card.append(label, document.createTextNode(" "), text);
   return card;
 }
 
@@ -1038,24 +1186,7 @@ function renderGeminiToolCallCard(entry) {
   appendFullCommand(body, cmd || description);
 
   if (output) {
-    const pre = document.createElement("pre");
-    pre.className = "cmd-output";
-    if (output.length > 2000) {
-      pre.textContent = output.slice(0, 2000);
-      const more = document.createElement("button");
-      more.className = "btn-more";
-      more.textContent = `Show all (${output.length} chars)`;
-      more.onclick = () => {
-        const scrollSnapshot = captureScrollSnapshot();
-        pre.textContent = output;
-        more.remove();
-        markLayoutScrollIntent(scrollSnapshot);
-      };
-      body.append(pre, more);
-    } else {
-      pre.textContent = output;
-      body.append(pre);
-    }
+    appendExpandableText(body, output, `out:${geminiToolEntryKey(entry)}`, "cmd-output");
   } else if (!responseRecord) {
     // No response yet — show args as fallback
     const argText = JSON.stringify(args, null, 2);
@@ -1123,8 +1254,14 @@ function renderDisplayEntry(entry) {
     return renderMessageCard(record);
   if (record.eventType === "item.completed" && item?.type === "file_change")
     return renderFileChangeCard(record);
-  if (record.eventType === "item.started" && item?.type === "todo_list")
+  if ((record.eventType === "item.started" || record.eventType === "item.completed") && item?.type === "todo_list")
     return renderTodoCard(record);
+  if (record.eventType === "item.completed" && item?.type === "reasoning")
+    return renderReasoningCard(record);
+  if (record.eventType === "item.completed" && item?.type === "mcp_tool_call")
+    return renderMcpToolCard(record);
+  if (record.eventType === "item.completed" && item?.type === "web_search")
+    return renderWebSearchCard(record);
 
   // System / noise
   return renderSystemCard(record);
@@ -1162,6 +1299,9 @@ function expandableEntryKey(entry) {
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
   if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "file_change") {
     return fileChangeEntryKey(entry.record);
+  }
+  if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "mcp_tool_call") {
+    return mcpToolEntryKey(entry.record);
   }
   return null;
 }
@@ -1524,12 +1664,14 @@ function normalizeUsage(usage) {
     usage.thoughtsTokenCount ??
     0;
   const total = usage.total_tokens ?? usage.totalTokenCount ?? input + output;
+  const costUsd = Number(usage.cost_usd ?? usage.total_cost_usd) || 0;
   return {
     input_tokens: Math.max(0, input),
     cached_input_tokens: Math.max(0, cached),
     output_tokens: Math.max(0, output),
     reasoning_output_tokens: Math.max(0, reasoning),
     total_tokens: Math.max(0, total),
+    cost_usd: Math.max(0, costUsd),
   };
 }
 
@@ -1540,6 +1682,7 @@ function emptyUsage() {
     output_tokens: 0,
     reasoning_output_tokens: 0,
     total_tokens: 0,
+    cost_usd: 0,
   };
 }
 
@@ -1563,6 +1706,7 @@ function addUsage(left, right) {
     output_tokens: a.output_tokens + b.output_tokens,
     reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
+    cost_usd: (a.cost_usd ?? 0) + (b.cost_usd ?? 0),
   };
 }
 
@@ -1575,6 +1719,7 @@ function subtractUsage(current, previous) {
     output_tokens: Math.max(0, a.output_tokens - b.output_tokens),
     reasoning_output_tokens: Math.max(0, a.reasoning_output_tokens - b.reasoning_output_tokens),
     total_tokens: Math.max(0, a.total_tokens - b.total_tokens),
+    cost_usd: Math.max(0, (a.cost_usd ?? 0) - (b.cost_usd ?? 0)),
   };
 }
 
@@ -1630,11 +1775,8 @@ function isUsageBaselineRecord(record) {
 }
 
 function latestCumulativeUsage(records) {
-  const tokenRecords = tokenCountRecords(records);
-  if (tokenRecords.length) {
-    return cumulativeUsageFromTokenRecords(tokenRecords);
-  }
-
+  // buildUsageMap merges token_count-derived turns with turn.completed
+  // fallback turns, so summing it covers mixed-provenance runs.
   let total = emptyUsage();
   for (const usage of buildUsageMap(records).values()) {
     total = addUsage(total, usage);
@@ -1642,38 +1784,24 @@ function latestCumulativeUsage(records) {
   return hasTokenUsage(total) ? total : null;
 }
 
-function cumulativeUsageFromTokenRecords(tokenRecords) {
-  let total = emptyUsage();
-  const previousByThread = new Map();
-  for (const record of tokenRecords) {
-    const current = normalizeUsage(record.event.usage);
-    if (!hasTokenUsage(current)) {
-      continue;
-    }
-    const threadId = tokenCountThreadKey(record);
-    if (isUsageBaselineRecord(record)) {
-      previousByThread.set(threadId, current);
-      continue;
-    }
-    const previous = previousByThread.get(threadId) ?? null;
-    total = addUsage(total, usageDelta(current, previous));
-    previousByThread.set(threadId, current);
-  }
-  return hasTokenUsage(total) ? total : null;
-}
-
 function apiCostEstimate(usage, model) {
   const normalized = normalizeUsage(usage);
+  if (!normalized) return null;
   const rates = model ? API_PRICE_RATES.get(model) : null;
-  if (!normalized || !rates) return null;
-  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
-  const uncached = Math.max(0, normalized.input_tokens - cached);
-  return (
-    (uncached * rates.input +
-      cached * rates.cachedInput +
-      normalized.output_tokens * rates.output) /
-    1_000_000
-  );
+  const estimate = rates
+    ? (Math.max(0, normalized.input_tokens - Math.min(normalized.cached_input_tokens, normalized.input_tokens)) * rates.input +
+        Math.min(normalized.cached_input_tokens, normalized.input_tokens) * rates.cachedInput +
+        normalized.output_tokens * rates.output) /
+      1_000_000
+    : null;
+  // Prefer the provider-reported cost (covers thinking tokens and cache-write
+  // premiums the rate estimate can't see). In mixed aggregates where only some
+  // turns carry actual cost, take the larger of the two.
+  const actual = normalized.cost_usd > 0 ? normalized.cost_usd : null;
+  if (actual != null && (estimate == null || actual >= estimate)) {
+    return actual;
+  }
+  return estimate;
 }
 
 function costEstimateText(usage, model, options = {}) {
@@ -1751,6 +1879,9 @@ function fullUsageText(usage, options = {}) {
 function buildUsageMap(records) {
   const map = new Map();
   const tokenRecords = tokenCountRecords(records);
+  // Turns covered by token_count records; other turns (e.g. recorded before a
+  // provider emitted live token counts) fall back to turn.completed usage.
+  const tokenTurns = new Set();
   if (tokenRecords.length) {
     const previousByThread = new Map();
     for (const record of tokenRecords) {
@@ -1766,19 +1897,30 @@ function buildUsageMap(records) {
       if (!hasTokenUsage(delta)) continue;
       const turn = displayTurnForRecord(record);
       map.set(turn, addUsage(map.get(turn), delta));
+      tokenTurns.add(turn);
     }
-    return map;
   }
 
   for (const r of records) {
-    // Codex: turn.completed has usage
+    // turn.completed has usage (and, for Claude, the exact turn cost)
     if (r.eventType === "turn.completed" && r.event?.usage) {
       const turn = displayTurnForRecord(r);
-      map.set(turn, normalizeUsage(r.event.usage));
+      const usage = normalizeUsage(r.event.usage);
+      if (tokenTurns.has(turn)) {
+        // Tokens already counted from token_count records; harvest the exact
+        // cost, which the incremental records don't carry.
+        const existing = map.get(turn);
+        if (existing && usage.cost_usd > 0) {
+          existing.cost_usd = (existing.cost_usd ?? 0) + usage.cost_usd;
+        }
+        continue;
+      }
+      map.set(turn, usage);
     }
     // Gemini: finished events have usageMetadata — accumulate per turn
     if (r.eventType === "finished" && r.event?.value?.usageMetadata) {
       const turn = displayTurnForRecord(r);
+      if (tokenTurns.has(turn)) continue;
       const gm = r.event.value.usageMetadata;
       const prev = map.get(turn);
       const usage = normalizeUsage(gm);

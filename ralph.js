@@ -15,6 +15,11 @@ const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
 const CODEX_GOAL_CONTINUATION_GRACE_MS = 60_000;
 const CODEX_SESSION_WATCH_TAIL_BYTES = 4 * 1024 * 1024;
 const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
+const CLAUDE_LIMIT_RETRY_MAX = 20;
+const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET_BUFFER_MS ?? 90_000);
+const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
+const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
+const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -63,6 +68,8 @@ const DEFAULT_CONFIG = {
   additionalDirectories: [],
   outputTailChars: 20000,
   codexPath: "codex",
+  claudePath: "claude",
+  claudeDefaultModel: "claude-fable-5",
   antigravityPython: "python3",
   antigravityScriptPath: path.join(RALPH_DIR, "scripts", "antigravity-turn.py"),
   antigravitySdkPath: null,
@@ -169,13 +176,33 @@ async function main() {
   };
 
   const configuredThreadId = process.env.RALPH_THREAD_ID ?? null;
-  let activeThreadId = configuredThreadId ?? state.threadId ?? null;
+  // --continue resumes the most recent provider thread for the next turn only;
+  // afterwards the configured freshThreadPerTurn behavior applies again.
+  let continueThreadId = null;
+  if (process.argv.includes("--continue") && !configuredThreadId) {
+    continueThreadId = state.threadId ?? (await findLatestEventLogThreadId());
+    if (continueThreadId) {
+      log(`--continue: resuming last thread ${continueThreadId} for the next turn`);
+    } else {
+      log("--continue: no previous thread id found; starting fresh");
+    }
+  }
+  let activeThreadId = configuredThreadId ?? continueThreadId ?? state.threadId ?? null;
   let backend = null;
   let thread = null;
   const providerLabel = formatProviderLabel(CONFIG.provider);
 
-  let turnNumber = await reconcileTurnsCompletedWithEventLog(state);
+  // With --continue, the resumed attempt re-enters the interrupted turn, so
+  // keep the state's completed-turn count instead of bumping past the partial
+  // turn already present in the event log.
+  let turnNumber = continueThreadId
+    ? state.turnsCompleted ?? 0
+    : await reconcileTurnsCompletedWithEventLog(state);
   while (turnNumber < CONFIG.maxTurns) {
+    if (await consumeStopAfterTurnRequest()) {
+      log("Found stop-after-turn file; exiting cleanly before the next turn.");
+      return;
+    }
     const phase = resolveActivePhase(state);
     const phaseStatus = await runPhaseChecks(state, phase);
     const testStatus = phaseStatus.testStatus;
@@ -307,7 +334,7 @@ async function main() {
     }
 
     PROMPT_PARTIALS = await loadPromptPartials();
-    const freshThreadForTurn = CONFIG.freshThreadPerTurn && !configuredThreadId;
+    const freshThreadForTurn = CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId;
     if (freshThreadForTurn) {
       if (activeThreadId) {
         log(`Starting a fresh ${providerLabel} thread for this turn; previous thread was ${activeThreadId}`);
@@ -369,9 +396,13 @@ async function main() {
       }
     }
 
-    const turnPrompt = attachPortableGoalPrompt(prompt, loopGoalEventRecord?.event?.goal);
+    const loopGoal = loopGoalEventRecord?.event?.goal ?? null;
+    const turnPrompt = attachPortableGoalPrompt(prompt, loopGoal);
     log(`Ralph prompt: ${previewText(turnPrompt)}`);
-    const { events } = await thread.runStreamed(turnPrompt);
+    const { events } = await thread.runStreamed(turnPrompt, {
+      goal: loopGoal,
+      continueSession: Boolean(continueThreadId),
+    });
     const turn = await collectStreamedTurn(events, {
       prompt: turnPrompt,
       preTurnEventRecords: [
@@ -392,6 +423,8 @@ async function main() {
       turnNumber: turnNumber + 1,
     });
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
+    // --continue only applies to the first provider turn.
+    continueThreadId = null;
 
     const phaseAttemptedAfterTurn = cleanupOnlyTurn ? state.phaseAttempted === true : true;
     await saveState({
@@ -831,6 +864,15 @@ function attachPortableGoalPrompt(prompt, goal) {
     return prompt;
   }
 
+  if (CONFIG.provider === "claude") {
+    // Claude Code has goal mode built in, so the goal is delivered through the
+    // native `/goal` command instead of prompt text. ClaudeThread sends
+    // `/goal <objective>` as the turn message and carries this prompt as
+    // appended system instructions, mirroring how Codex keeps the goal and the
+    // turn prompt separate.
+    return prompt;
+  }
+
   return normalizeRenderedPrompt([
     prompt,
     "",
@@ -841,6 +883,16 @@ function attachPortableGoalPrompt(prompt, goal) {
     "",
     goal.objective,
   ].join("\n"));
+}
+
+const CLAUDE_GOAL_CONDITION_MAX_CHARS = 4000;
+
+function truncateClaudeGoalCondition(text) {
+  const chars = Array.from(text.trim());
+  if (chars.length <= CLAUDE_GOAL_CONDITION_MAX_CHARS) {
+    return text.trim();
+  }
+  return `${chars.slice(0, CLAUDE_GOAL_CONDITION_MAX_CHARS - 40).join("")}\n[goal text truncated by Ralph]`;
 }
 
 function analyzeTestProgress(output, previousStatus = null, options = {}) {
@@ -1637,6 +1689,19 @@ function trimmedOutput(output) {
   ].join("\n");
 }
 
+async function consumeStopAfterTurnRequest() {
+  const stopPath = path.join(CONFIG.stateDir, "stop-after-turn");
+  try {
+    await fs.unlink(stopPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function installProcessSignalHandlers() {
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => {
@@ -2114,7 +2179,13 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
 }
 
 async function preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
-  const activeThreadId = threadId ?? (CONFIG.provider === "antigravity" ? null : generateProviderThreadId(CONFIG.provider));
+  // Antigravity and Claude mint their own conversation/session ids on the first
+  // turn, so leave the thread id unset until the provider reports it.
+  const activeThreadId =
+    threadId ??
+    (CONFIG.provider === "antigravity" || CONFIG.provider === "claude"
+      ? null
+      : generateProviderThreadId(CONFIG.provider));
   const startedThread = !threadId;
   const now = new Date().toISOString();
   const goal = {
@@ -2932,7 +3003,16 @@ function createAgentBackend() {
   if (CONFIG.provider === "antigravity") {
     return new Antigravity(buildAntigravityOptions());
   }
+  if (CONFIG.provider === "claude") {
+    return new Claude(buildClaudeOptions());
+  }
   throw new Error(`Unsupported provider ${CONFIG.provider}`);
+}
+
+function buildClaudeOptions() {
+  return {
+    claudePath: CONFIG.claudePath,
+  };
 }
 
 function buildAntigravityOptions() {
@@ -3158,6 +3238,624 @@ class CodexExec {
       }
     } finally {
       stopTaskCompleteWatcher?.();
+      rl.close();
+      child.removeAllListeners();
+      terminateChildProcess(child);
+    }
+  }
+}
+
+class Claude {
+  constructor(options = {}) {
+    this.options = options;
+    this.exec = new ClaudeExec(options);
+  }
+
+  startThread(options = {}) {
+    return new ClaudeThread(this.exec, this.options, options);
+  }
+
+  resumeThread(id, options = {}) {
+    return new ClaudeThread(this.exec, this.options, options, id);
+  }
+}
+
+class ClaudeThread {
+  constructor(exec, claudeOptions, threadOptions, id = null) {
+    this.exec = exec;
+    this.claudeOptions = claudeOptions;
+    this.threadOptions = threadOptions;
+    this._id = id;
+    // Cumulative session token counters, mirroring Codex's session token_count
+    // records so the viz can show usage while a turn is still running.
+    this._usageBase = emptyCodexUsage();
+    this._turnAccruedUsage = emptyCodexUsage();
+    this._countedUsageRequests = new Set();
+  }
+
+  get id() {
+    return this._id;
+  }
+
+  async runStreamed(input, turnOptions = {}) {
+    return { events: this.runStreamedInternal(input, turnOptions) };
+  }
+
+  async *runStreamedInternal(input, turnOptions = {}) {
+    const { prompt } = normalizeCodexInput(input);
+    const goal = turnOptions.goal ?? null;
+    let message = prompt;
+    let appendSystemPrompt = null;
+    if (goal?.objective) {
+      // `/goal <condition>` installs a graded stop hook that keeps the agent
+      // working until the condition is judged complete, then auto-clears. The
+      // condition is limited to 4000 characters, so only the goal objective
+      // goes there; the detailed turn instructions ride along as appended
+      // system instructions (the goal objective must therefore be
+      // self-contained enough for the grader, e.g. include the exit criteria).
+      message = `/goal ${truncateClaudeGoalCondition(goal.objective)}`;
+      appendSystemPrompt = [
+        "Ralph is the outer automation loop. The active /goal is Ralph's loop",
+        "goal for this turn, and the turn instructions below are mandatory",
+        "parts of that goal. Follow them exactly.",
+        "",
+        "## Turn Instructions",
+        "",
+        prompt,
+      ].join("\n");
+      if (this._id) {
+        const execArgs = {
+          threadId: this._id,
+          model: this.threadOptions.model,
+          workingDirectory: this.threadOptions.workingDirectory,
+          signal: turnOptions.signal,
+        };
+        if (turnOptions.continueSession && (await this.exec.goalIsActive(execArgs))) {
+          // The interrupted session still has its loop goal installed, so skip
+          // re-sending the goal: a short nudge continues it with the session's
+          // existing context, while the appended system instructions carry the
+          // refreshed turn instructions and current state.
+          log(`Continuing active loop goal in session ${this._id}`);
+          message =
+            "Ralph restarted after an interruption. Your previous loop goal is " +
+            "still active; continue it from where you left off. Refreshed turn " +
+            "instructions and current state are in the system instructions.";
+        } else {
+          // Mirror the Codex flow: clear any leftover loop goal before
+          // installing a fresh one. Claude auto-clears satisfied goals, so this
+          // only matters when the previous turn ended with its goal still active.
+          await this.exec.clearGoal(execArgs);
+        }
+      }
+    }
+
+    const shared = { started: false, pendingToolUses: new Map() };
+    let attemptInput = message;
+    let attemptSystemPrompt = appendSystemPrompt;
+    let limitRetries = 0;
+    while (true) {
+      const attempt = yield* this.runAttempt(attemptInput, attemptSystemPrompt, turnOptions, shared);
+      if (!attempt.limitMessage) {
+        return;
+      }
+
+      limitRetries += 1;
+      if (limitRetries > CLAUDE_LIMIT_RETRY_MAX) {
+        yield {
+          type: "turn.failed",
+          error: {
+            message:
+              `Claude usage limit persisted after ${CLAUDE_LIMIT_RETRY_MAX} resume attempts: ` +
+              attempt.limitMessage,
+          },
+        };
+        return;
+      }
+
+      const waitMs = claudeLimitWaitMs(attempt.rateLimitInfo);
+      log(
+        `Claude usage limit hit (${previewText(attempt.limitMessage)}); waiting ` +
+          `${Math.ceil(waitMs / 60000)}m before resuming ` +
+          `${this._id ? `session ${this._id}` : "with the original prompt"} ` +
+          `(attempt ${limitRetries}/${CLAUDE_LIMIT_RETRY_MAX})`,
+      );
+      await sleepMs(waitMs);
+      if (this._id) {
+        // Resume the same session with a continuation nudge. The loop goal is
+        // still active in the session, so the stop hook keeps enforcing it,
+        // and the appended system instructions are already part of the session.
+        attemptInput =
+          "Ralph paused this session because the Claude usage limit was hit. " +
+          "The limit window has passed; continue the active goal from where you left off.";
+        attemptSystemPrompt = appendSystemPrompt;
+      }
+    }
+  }
+
+  async *runAttempt(attemptInput, appendSystemPrompt, turnOptions, shared) {
+    const lines = this.exec.run({
+      input: attemptInput,
+      appendSystemPrompt,
+      threadId: this._id,
+      model: this.threadOptions.model,
+      modelReasoningEffort: this.threadOptions.modelReasoningEffort,
+      webSearchEnabled: this.threadOptions.webSearchEnabled,
+      workingDirectory: this.threadOptions.workingDirectory,
+      additionalDirectories: this.threadOptions.additionalDirectories,
+      signal: turnOptions.signal,
+    });
+
+    let lastThinkingLogAt = 0;
+    let rateLimitInfo = null;
+    for await (const line of lines) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Failed to parse Claude JSON event: ${line}`, { cause: error });
+      }
+      if (event.type === "rate_limit_event" && event.rate_limit_info) {
+        rateLimitInfo = event.rate_limit_info;
+        continue;
+      }
+      if (event.type === "system" && event.subtype === "thinking_tokens") {
+        // Fable omits thinking text, so long thinking stretches would otherwise
+        // look like a stall. Log a throttled heartbeat instead of an event.
+        const now = Date.now();
+        if (now - lastThinkingLogAt >= 30000) {
+          lastThinkingLogAt = now;
+          log(`Claude is thinking (~${event.estimated_tokens ?? "?"} tokens so far)`);
+        }
+        continue;
+      }
+      const limitMessage = claudeUsageLimitMessage(event);
+      if (limitMessage) {
+        // Returning early skips the exec exit-code check; the caller waits for
+        // the limit window to pass and resumes the same session.
+        return { limitMessage, rateLimitInfo };
+      }
+      const requestUsage = event.type === "assistant" ? event.message?.usage : null;
+      if (requestUsage) {
+        // Emit live cumulative usage per API request, in the same shape as
+        // Codex session token_count records, so the viz tracks usage mid-turn.
+        // Per-request output counts are point-in-time snapshots; the exact
+        // totals from the result event correct them at turn end.
+        const requestId = event.request_id ?? event.message?.id ?? null;
+        if (!requestId || !this._countedUsageRequests.has(requestId)) {
+          if (requestId) {
+            this._countedUsageRequests.add(requestId);
+          }
+          this._turnAccruedUsage = addCodexUsage(this._turnAccruedUsage, claudeUsageToCodexShape(requestUsage));
+          yield {
+            type: "codex.session.token_count",
+            thread_id: this._id,
+            usage: addCodexUsage(this._usageBase, this._turnAccruedUsage),
+          };
+        }
+      }
+      if (event.type === "result" && !event.is_error && event.subtype === "success") {
+        this._usageBase = addCodexUsage(this._usageBase, claudeUsageToCodexShape(event.usage));
+        this._turnAccruedUsage = emptyCodexUsage();
+        this._countedUsageRequests.clear();
+        yield {
+          type: "codex.session.token_count",
+          thread_id: this._id,
+          usage: { ...this._usageBase },
+        };
+      }
+      const sessionId = typeof event.session_id === "string" ? event.session_id : null;
+      if (sessionId && !this._id) {
+        this._id = sessionId;
+      }
+      if (sessionId && !shared.started) {
+        shared.started = true;
+        yield { type: "thread.started", thread_id: sessionId };
+        yield { type: "turn.started", thread_id: sessionId };
+      }
+      yield* translateClaudeEvent(event, shared.pendingToolUses);
+    }
+    return { limitMessage: null, rateLimitInfo };
+  }
+}
+
+function claudeUsageLimitMessage(event) {
+  if (event?.type !== "result" || (!event.is_error && event.subtype === "success")) {
+    return null;
+  }
+  const message = typeof event.result === "string" ? event.result : "";
+  return /\bhit your\b.*\blimit\b/i.test(message) ? message : null;
+}
+
+function claudeLimitWaitMs(rateLimitInfo) {
+  const resetsAtMs = Number(rateLimitInfo?.resetsAt) * 1000;
+  if (Number.isFinite(resetsAtMs) && resetsAtMs > Date.now()) {
+    const wait = resetsAtMs - Date.now() + CLAUDE_LIMIT_RESET_BUFFER_MS;
+    return Math.min(Math.max(wait, CLAUDE_LIMIT_MIN_WAIT_MS), CLAUDE_LIMIT_MAX_WAIT_MS);
+  }
+  return CLAUDE_LIMIT_FALLBACK_WAIT_MS;
+}
+
+function sleepMs(durationMs) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+}
+
+function* translateClaudeEvent(event, pendingToolUses) {
+  // Events with a parent_tool_use_id come from subagent (Task) internals; the
+  // Task call itself surfaces as a normal tool_use/tool_result pair.
+  if (event.parent_tool_use_id) {
+    return;
+  }
+
+  if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+    for (const block of event.message.content) {
+      if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+        yield {
+          type: "item.completed",
+          item: { id: `${event.uuid ?? event.message?.id ?? "claude"}-thinking`, type: "reasoning", text: block.thinking },
+        };
+      } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+        yield {
+          type: "item.completed",
+          item: { id: event.uuid ?? event.message?.id ?? "claude-message", type: "agent_message", text: block.text },
+        };
+      } else if (block.type === "tool_use") {
+        pendingToolUses.set(block.id, { name: block.name, input: block.input });
+        if (block.name === "Bash" && typeof block.input?.command === "string") {
+          // Mirror Codex's item.started so the viz can show a running command
+          // card until the matching tool_result completes it.
+          yield {
+            type: "item.started",
+            item: { id: block.id, type: "command_execution", command: block.input.command, status: "in_progress" },
+          };
+        }
+      }
+    }
+    return;
+  }
+
+  if (event.type === "user") {
+    const content = event.message?.content;
+    const blocks = Array.isArray(content)
+      ? content
+      : typeof content === "string" && content.trim()
+        ? [{ type: "text", text: content }]
+        : [];
+    for (const block of blocks) {
+      if (block.type === "tool_result") {
+        const pending = pendingToolUses.get(block.tool_use_id);
+        if (pending) {
+          pendingToolUses.delete(block.tool_use_id);
+          yield {
+            type: "item.completed",
+            item: buildClaudeToolItem(block.tool_use_id, pending, block, event.tool_use_result),
+          };
+        }
+      } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+        // Goal-mode stop-hook feedback and other injected user text.
+        yield {
+          type: "item.completed",
+          item: { id: event.uuid ?? "claude-feedback", type: "reasoning", text: block.text },
+        };
+      }
+    }
+    return;
+  }
+
+  if (event.type === "result") {
+    if (event.is_error || event.subtype !== "success") {
+      const message =
+        (typeof event.result === "string" && event.result.trim()) ||
+        `Claude turn ended with ${event.subtype ?? "an error"}`;
+      yield { type: "turn.failed", error: { message } };
+      return;
+    }
+    yield {
+      type: "turn.completed",
+      thread_id: event.session_id,
+      usage: claudeUsageToCodexShape(event.usage, event.total_cost_usd),
+    };
+  }
+  // system/init, rate_limit_event, thinking_tokens, etc. carry no turn content.
+}
+
+function buildClaudeToolItem(toolUseId, pending, resultBlock, toolUseResult) {
+  const name = pending.name ?? "tool";
+  const input = isPlainObject(pending.input) ? pending.input : {};
+  const failed = resultBlock.is_error === true;
+  const status = failed ? "failed" : "completed";
+  const output = claudeToolResultText(resultBlock, toolUseResult);
+
+  if (name === "Bash") {
+    const exitCode = [toolUseResult?.exitCode, toolUseResult?.code, toolUseResult?.exit_code]
+      .find((value) => Number.isFinite(value));
+    return {
+      id: toolUseId,
+      type: "command_execution",
+      command: typeof input.command === "string" ? input.command : "",
+      status,
+      ...(Number.isFinite(exitCode) ? { exit_code: exitCode } : failed ? { exit_code: 1 } : { exit_code: 0 }),
+      aggregated_output: output,
+    };
+  }
+
+  if (name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit") {
+    const filePath = input.file_path ?? input.notebook_path ?? toolUseResult?.filePath ?? "";
+    const kind = toolUseResult?.type === "create"
+      ? "add"
+      : toolUseResult?.type === "update"
+        ? "update"
+        : name === "Write"
+          ? "add"
+          : "update";
+    const diff = buildClaudeFileChangeDiff(name, input, toolUseResult);
+    return {
+      id: toolUseId,
+      type: "file_change",
+      status,
+      changes: [{ kind, path: String(filePath), ...(diff ? { diff } : {}) }],
+    };
+  }
+
+  if (name === "TodoWrite") {
+    const todos = Array.isArray(input.todos) ? input.todos : [];
+    return {
+      id: toolUseId,
+      type: "todo_list",
+      items: todos.map((todo) => ({
+        text: String(todo?.content ?? todo?.subject ?? ""),
+        completed: todo?.status === "completed",
+      })),
+    };
+  }
+
+  if (name === "WebSearch") {
+    return { id: toolUseId, type: "web_search", query: String(input.query ?? "") };
+  }
+
+  const mcpParts = name.startsWith("mcp__") ? name.split("__") : null;
+  const isMcp = Array.isArray(mcpParts) && mcpParts.length >= 3;
+  return {
+    id: toolUseId,
+    type: "mcp_tool_call",
+    server: isMcp ? mcpParts[1] : "claude-code",
+    tool: isMcp ? mcpParts.slice(2).join("__") : name,
+    status,
+    input,
+    result: output,
+    ...(failed ? { error: { message: output || `${name} failed` } } : {}),
+  };
+}
+
+function buildClaudeFileChangeDiff(name, input, toolUseResult) {
+  const limit = CONFIG?.outputTailChars ?? 20000;
+  let diff = "";
+
+  const hunks = Array.isArray(toolUseResult?.structuredPatch) ? toolUseResult.structuredPatch : [];
+  if (hunks.length > 0) {
+    diff = hunks
+      .map((hunk) => {
+        const header = `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
+        const lines = Array.isArray(hunk.lines) ? hunk.lines : [];
+        return [header, ...lines].join("\n");
+      })
+      .join("\n");
+  } else if (typeof toolUseResult?.content === "string" && toolUseResult.content) {
+    // New file: render the full content as added lines.
+    diff = toolUseResult.content
+      .split(/\r?\n/)
+      .map((line) => `+${line}`)
+      .join("\n");
+  } else if (name === "Write" && typeof input.content === "string" && input.content) {
+    diff = input.content
+      .split(/\r?\n/)
+      .map((line) => `+${line}`)
+      .join("\n");
+  } else if (typeof input.old_string === "string" || typeof input.new_string === "string") {
+    const removed = String(input.old_string ?? "")
+      .split(/\r?\n/)
+      .map((line) => `-${line}`);
+    const added = String(input.new_string ?? "")
+      .split(/\r?\n/)
+      .map((line) => `+${line}`);
+    diff = [...removed, ...added].join("\n");
+  }
+
+  if (!diff) {
+    return null;
+  }
+  return diff.length > limit ? `${diff.slice(0, limit)}\n[diff truncated by Ralph]` : diff;
+}
+
+function claudeToolResultText(resultBlock, toolUseResult) {
+  const limit = CONFIG?.outputTailChars ?? 20000;
+  let text = "";
+  if (toolUseResult && (typeof toolUseResult.stdout === "string" || typeof toolUseResult.stderr === "string")) {
+    text = combineOutput(toolUseResult.stdout ?? "", toolUseResult.stderr ?? "");
+  } else if (typeof resultBlock.content === "string") {
+    text = resultBlock.content;
+  } else if (Array.isArray(resultBlock.content)) {
+    text = resultBlock.content
+      .map((part) => (part?.type === "text" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  text = text.trim();
+  return text.length > limit ? text.slice(text.length - limit) : text;
+}
+
+function emptyCodexUsage() {
+  return {
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: 0,
+  };
+}
+
+function addCodexUsage(a, b) {
+  return {
+    input_tokens: (a?.input_tokens ?? 0) + (b?.input_tokens ?? 0),
+    cached_input_tokens: (a?.cached_input_tokens ?? 0) + (b?.cached_input_tokens ?? 0),
+    output_tokens: (a?.output_tokens ?? 0) + (b?.output_tokens ?? 0),
+    reasoning_output_tokens: (a?.reasoning_output_tokens ?? 0) + (b?.reasoning_output_tokens ?? 0),
+    total_tokens: (a?.total_tokens ?? 0) + (b?.total_tokens ?? 0),
+  };
+}
+
+function claudeUsageToCodexShape(usage, totalCostUsd) {
+  const input = usage?.input_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? 0;
+  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+  const output = usage?.output_tokens ?? 0;
+  return {
+    input_tokens: input + cacheRead + cacheCreation,
+    cached_input_tokens: cacheRead,
+    output_tokens: output,
+    reasoning_output_tokens: 0,
+    total_tokens: input + cacheRead + cacheCreation + output,
+    ...(Number.isFinite(totalCostUsd) ? { total_cost_usd: totalCostUsd } : {}),
+  };
+}
+
+class ClaudeExec {
+  constructor(options = {}) {
+    this.claudePath = options.claudePath || "claude";
+  }
+
+  buildCommonArgs(args) {
+    const commandArgs = ["--print", "--dangerously-skip-permissions"];
+    if (args.model) {
+      commandArgs.push("--model", args.model);
+    }
+    if (args.threadId) {
+      commandArgs.push("--resume", args.threadId);
+    }
+    if (args.additionalDirectories?.length) {
+      commandArgs.push("--add-dir", ...args.additionalDirectories);
+    }
+    return commandArgs;
+  }
+
+  async clearGoal(args) {
+    const commandArgs = [...this.buildCommonArgs(args), "--output-format", "json"];
+    try {
+      await this.runToCompletion(commandArgs, "/goal clear", args);
+    } catch (error) {
+      log(`Failed to clear Claude loop goal: ${formatErrorMessage(error)}`);
+    }
+  }
+
+  async goalIsActive(args) {
+    const commandArgs = [...this.buildCommonArgs(args), "--output-format", "json"];
+    try {
+      const stdout = await this.runToCompletion(commandArgs, "/goal", args);
+      const result = JSON.parse(stdout)?.result ?? "";
+      return /^Goal active/i.test(String(result));
+    } catch (error) {
+      log(`Failed to query Claude loop goal status: ${formatErrorMessage(error)}`);
+      return false;
+    }
+  }
+
+  runToCompletion(commandArgs, input, args) {
+    return new Promise((resolve, reject) => {
+      const child = spawnTracked(this.claudePath, commandArgs, {
+        cwd: args.workingDirectory || process.cwd(),
+        signal: args.signal,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const stdoutChunks = [];
+      child.stdout?.on("data", (chunk) => {
+        stdoutChunks.push(chunk);
+      });
+      const stderrChunks = [];
+      child.stderr?.on("data", (chunk) => {
+        stderrChunks.push(chunk);
+      });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0 && !signal) {
+          resolve(Buffer.concat(stdoutChunks).toString("utf8"));
+        } else {
+          const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+          reject(new Error(`Claude exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`));
+        }
+      });
+      child.stdin?.write(input ?? "");
+      child.stdin?.end();
+    });
+  }
+
+  async *run(args) {
+    const commandArgs = [
+      ...this.buildCommonArgs(args),
+      "--output-format",
+      "stream-json",
+      "--verbose",
+    ];
+    if (args.modelReasoningEffort) {
+      commandArgs.push("--effort", args.modelReasoningEffort);
+    }
+    if (args.appendSystemPrompt) {
+      commandArgs.push("--append-system-prompt", args.appendSystemPrompt);
+    }
+    if (args.webSearchEnabled === false) {
+      commandArgs.push("--disallowed-tools", "WebSearch");
+    }
+
+    const child = spawnTracked(this.claudePath, commandArgs, {
+      cwd: args.workingDirectory || process.cwd(),
+      signal: args.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let spawnError = null;
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    if (!child.stdin || !child.stdout) {
+      terminateChildProcess(child);
+      throw new Error("Claude exec did not expose stdio pipes");
+    }
+
+    const stderrChunks = [];
+    child.stderr?.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      if (stderrChunks.length > 40) {
+        stderrChunks.splice(0, stderrChunks.length - 40);
+      }
+    });
+
+    const exitPromise = new Promise((resolve) => {
+      child.once("exit", (code, signal) => {
+        resolve({ code, signal });
+      });
+    });
+    const rl = readline.createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+    });
+
+    child.stdin.write(args.input ?? "");
+    child.stdin.end();
+
+    try {
+      for await (const line of rl) {
+        if (line.trim()) {
+          yield line;
+        }
+      }
+      if (spawnError) {
+        throw spawnError;
+      }
+      const { code, signal } = await exitPromise;
+      if (code !== 0 || signal) {
+        const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+        throw new Error(`Claude exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+      }
+    } finally {
       rl.close();
       child.removeAllListeners();
       terminateChildProcess(child);
@@ -3693,7 +4391,11 @@ async function loadConfig() {
   const model =
     process.env.RALPH_MODEL ??
     fileConfig.model ??
-    (provider === "antigravity" ? DEFAULT_CONFIG.antigravityDefaultModel : DEFAULT_CONFIG.model);
+    (provider === "antigravity"
+      ? DEFAULT_CONFIG.antigravityDefaultModel
+      : provider === "claude"
+        ? DEFAULT_CONFIG.claudeDefaultModel
+        : DEFAULT_CONFIG.model);
   const reasoningEffort =
     process.env.RALPH_REASONING_EFFORT ??
     fileConfig.reasoningEffort ??
@@ -3802,6 +4504,7 @@ async function loadConfig() {
       DEFAULT_CONFIG.outputTailChars,
     ),
     codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
+    claudePath: process.env.RALPH_CLAUDE_PATH ?? fileConfig.claudePath ?? DEFAULT_CONFIG.claudePath,
     antigravityPython:
       process.env.RALPH_ANTIGRAVITY_PYTHON ??
       fileConfig.antigravityPython ??
@@ -4154,6 +4857,12 @@ function summarizeEvent(event) {
   }
   if (event.type === "error") {
     return `error ${previewText(event.message)}`;
+  }
+  if (event.type === "codex.session.token_count") {
+    return `token_count ${formatUsage(event.usage ?? {})}`;
+  }
+  if (!event.item) {
+    return event.type;
   }
   return `${event.type} ${summarizeItem(event.item)}`;
 }
@@ -4508,6 +5217,59 @@ async function loadState() {
   }
 }
 
+async function findLatestEventLogThreadId() {
+  const files = [];
+  if (CONFIG.eventLogScope === "run") {
+    files.push(path.join(EVENTS_DIR_PATH, "run.jsonl"));
+  } else {
+    try {
+      const names = (await fs.readdir(EVENTS_DIR_PATH)).filter((name) => name.endsWith(".jsonl"));
+      const stats = await Promise.all(
+        names.map(async (name) => {
+          const filePath = path.join(EVENTS_DIR_PATH, name);
+          return { filePath, mtimeMs: (await fs.stat(filePath)).mtimeMs };
+        }),
+      );
+      stats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      files.push(...stats.map((entry) => entry.filePath));
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  for (const filePath of files) {
+    let raw;
+    try {
+      raw = await readRecentText(filePath, 4 * 1024 * 1024);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+    const lines = raw.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index].trim();
+      if (!line) {
+        continue;
+      }
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_) {
+        continue;
+      }
+      const threadId = record?.threadId ?? record?.event?.thread_id ?? null;
+      if (typeof threadId === "string" && threadId) {
+        return threadId;
+      }
+    }
+  }
+  return null;
+}
+
 async function reconcileTurnsCompletedWithEventLog(state) {
   const stateTurn = Number.isInteger(state?.turnsCompleted) ? state.turnsCompleted : 0;
   const latestEventTurn = await latestEventLogTurnNumber(state);
@@ -4794,6 +5556,9 @@ function formatProviderLabel(provider) {
   if (provider === "antigravity") {
     return "Antigravity";
   }
+  if (provider === "claude") {
+    return "Claude";
+  }
   return provider;
 }
 
@@ -5012,10 +5777,10 @@ function normalizeTestSubsetList(value, label) {
 
 function normalizeProvider(value) {
   const provider = String(value ?? "").trim().toLowerCase();
-  if (provider === "codex" || provider === "antigravity") {
+  if (provider === "codex" || provider === "antigravity" || provider === "claude") {
     return provider;
   }
-  throw new Error("Config provider must be `codex` or `antigravity`");
+  throw new Error("Config provider must be `codex`, `antigravity`, or `claude`");
 }
 
 function normalizeEventLogScope(value) {

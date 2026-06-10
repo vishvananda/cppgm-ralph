@@ -26,7 +26,7 @@ const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 6;
+const RUN_USAGE_CACHE_VERSION = 7;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
@@ -174,19 +174,27 @@ async function readRunFile(filePath) {
 async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDetailOptions()) {
   const events = await readRunFile(filePath);
   await augmentLatestTestStatusFromLog(events, filePath);
+  // Mid-turn progress for providers without session-file scanning (Claude,
+  // Antigravity): derive observations from command outputs already present in
+  // the run log. Codex runs get richer observations from session files below;
+  // overlapping observations are harmless to the best-progress dock logic.
+  const runProgressEvents = progressEventsFromRunEvents(events);
+  const withRunProgress = runProgressEvents.length
+    ? mergeEventStreams(events, runProgressEvents)
+    : events;
   if (detailOptions.mode === "none") {
-    return events;
+    return withRunProgress;
   }
 
   const turnWindows = buildTurnWindows(events);
   const selectedWindows = selectTurnWindows(turnWindows, detailOptions);
   if (detailOptions.mode !== "all" && selectedWindows.length === 0) {
-    return events;
+    return withRunProgress;
   }
 
   const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
   if (threadIds.length === 0) {
-    return events;
+    return withRunProgress;
   }
 
   const resolveTurnNumber = buildSessionTurnResolver(events);
@@ -197,10 +205,61 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
   const sessionEvents = sessionEventGroups.flat();
   const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
   if (!sessionEvents.length && !progressEvents.length) {
-    return events;
+    return withRunProgress;
   }
 
-  return mergeEventStreams(mergeEventStreams(events, sessionEvents), progressEvents);
+  return mergeEventStreams(mergeEventStreams(withRunProgress, sessionEvents), progressEvents);
+}
+
+function progressEventsFromRunEvents(events) {
+  const progressEvents = [];
+  for (const record of events) {
+    const item = record?.event?.item;
+    if (record?.eventType !== "item.completed" || item?.type !== "command_execution") {
+      continue;
+    }
+    if (!Number.isInteger(record.turnNumber) || record.turnNumber <= 0) {
+      continue;
+    }
+    const output = String(item.aggregated_output ?? "");
+    if (!output) {
+      continue;
+    }
+    const summary = parseSessionTestSummary(output);
+    if (!summary) {
+      continue;
+    }
+    const stage = inferSingleSessionProgressStage(output);
+    if (!stage) {
+      continue;
+    }
+    const observation = normalizeProgressObservation({
+      recordedAt: record.recordedAt,
+      stage,
+      passed: summary.testsPassed,
+      total: summary.testsTotal,
+      status: summary.allTestsPassed ? "pass" : "fail",
+      hasSubset: false,
+    });
+    if (!observation) {
+      continue;
+    }
+    progressEvents.push({
+      recordedAt: observation.recordedAt,
+      threadId: record.threadId ?? null,
+      turnNumber: record.turnNumber,
+      eventType: "ralph.agent-progress",
+      event: {
+        type: "ralph.agent-progress",
+        progress: {
+          ...observation,
+          commandKind: "run-log",
+          commandTarget: "command output summary",
+        },
+      },
+    });
+  }
+  return compactBestProgressEvents(progressEvents);
 }
 
 async function readShapeUsage(shape, selected = {}) {
@@ -327,6 +386,29 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
     }
   }
 
+  // Threads with no token_count records (e.g. turns recorded before a provider
+  // emitted live counts) fall back to their turn.completed usage; threads that
+  // are covered still harvest the exact turn cost from turn.completed.
+  const turnUsageByThread = turnCompletedUsageByThread(events);
+  for (const [threadId, usage] of turnUsageByThread.entries()) {
+    if (!threadId) {
+      continue;
+    }
+    if (coveredThreadIds.has(threadId)) {
+      if (usage.cost_usd > 0) {
+        const entry = threadUsages.find((candidate) => candidate.threadId === threadId);
+        if (entry && !((entry.usage?.cost_usd ?? 0) > 0)) {
+          entry.usage = { ...(normalizeUsage(entry.usage) ?? emptyUsage()), cost_usd: usage.cost_usd };
+        }
+      }
+      continue;
+    }
+    if (hasTokenUsage(usage)) {
+      threadUsages.push({ threadId, usage });
+      coveredThreadIds.add(threadId);
+    }
+  }
+
   let unthreadedUsage = tokenUsage.unthreadedUsage;
   if (!hasTokenUsage(unthreadedUsage) && threadUsages.length === 0) {
     const fallbackUsage = usageFromVizEvents(events);
@@ -369,6 +451,18 @@ function applyRunUsageSummaryToShape(summary, seenThreads) {
     usage = addUsage(usage, summary.unthreadedUsage);
   }
   return hasTokenUsage(usage) ? usage : null;
+}
+
+function turnCompletedUsageByThread(events) {
+  const totals = new Map();
+  for (const event of events) {
+    if (event.eventType !== "turn.completed" || !event.event?.usage) {
+      continue;
+    }
+    const threadId = eventThreadId(event) ?? "";
+    totals.set(threadId, addUsage(totals.get(threadId), event.event.usage));
+  }
+  return totals;
 }
 
 function usageFromTokenEventsByThread(events) {
@@ -1015,12 +1109,14 @@ function normalizeUsage(usage) {
     usage.thoughtsTokenCount ??
     0;
   const totalTokens = usage.total_tokens ?? usage.totalTokenCount ?? input + output;
+  const costUsd = Number(usage.cost_usd ?? usage.total_cost_usd) || 0;
   return {
     input_tokens: Math.max(0, input),
     cached_input_tokens: Math.max(0, cached),
     output_tokens: Math.max(0, output),
     reasoning_output_tokens: Math.max(0, reasoning),
     total_tokens: Math.max(0, totalTokens),
+    cost_usd: Math.max(0, costUsd),
   };
 }
 
@@ -1031,6 +1127,7 @@ function emptyUsage() {
     output_tokens: 0,
     reasoning_output_tokens: 0,
     total_tokens: 0,
+    cost_usd: 0,
   };
 }
 
@@ -1054,6 +1151,7 @@ function addUsage(left, right) {
     output_tokens: a.output_tokens + b.output_tokens,
     reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
+    cost_usd: (a.cost_usd ?? 0) + (b.cost_usd ?? 0),
   };
 }
 
@@ -1066,6 +1164,7 @@ function subtractUsage(current, previous) {
     output_tokens: Math.max(0, a.output_tokens - b.output_tokens),
     reasoning_output_tokens: Math.max(0, a.reasoning_output_tokens - b.reasoning_output_tokens),
     total_tokens: Math.max(0, a.total_tokens - b.total_tokens),
+    cost_usd: Math.max(0, (a.cost_usd ?? 0) - (b.cost_usd ?? 0)),
   };
 }
 

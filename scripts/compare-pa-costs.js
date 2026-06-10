@@ -9,6 +9,9 @@ const DEFAULT_RATES = {
   "gpt-5.5": { input: 5.0, cachedInput: 0.5, output: 30.0 },
   "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15.0 },
   "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
+  "claude-fable-5": { input: 10.0, cachedInput: 1.0, output: 50.0 },
+  "claude-opus-4-8": { input: 5.0, cachedInput: 0.5, output: 25.0 },
+  "claude-haiku-4-5": { input: 1.0, cachedInput: 0.1, output: 5.0 },
 };
 
 const DEFAULTS = {
@@ -210,6 +213,7 @@ function normalizeUsage(usage) {
       usage.reasoning_output_tokens ?? usage.thinking_output_tokens ?? usage.thoughtsTokenCount ?? 0,
     ),
     total_tokens: Math.max(0, usage.total_tokens ?? usage.totalTokenCount ?? 0),
+    cost_usd: Math.max(0, Number(usage.cost_usd ?? usage.total_cost_usd) || 0),
   };
 }
 
@@ -233,6 +237,7 @@ function addUsage(left, right) {
     output_tokens: a.output_tokens + b.output_tokens,
     reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
+    cost_usd: (a.cost_usd ?? 0) + (b.cost_usd ?? 0),
   };
 }
 
@@ -278,12 +283,14 @@ function estimateCost(usage, model) {
   }
   const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
   const uncached = Math.max(0, normalized.input_tokens - cached);
-  return (
+  const estimate =
     (uncached * rates.input +
       cached * rates.cachedInput +
       normalized.output_tokens * rates.output) /
-    1_000_000
-  );
+    1_000_000;
+  // Prefer provider-reported cost when present (covers thinking tokens and
+  // cache-write premiums the rate estimate can't see).
+  return normalized.cost_usd > estimate ? normalized.cost_usd : estimate;
 }
 
 function eventThreadId(record) {
