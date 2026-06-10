@@ -621,6 +621,9 @@ const OUTPUT_PREVIEW_CHAR_LIMIT = 2000;
 function appendExpandableText(container, text, key, className) {
   const el = document.createElement(className === "thought-body" ? "div" : "pre");
   el.className = className;
+  if (key) {
+    el.dataset.contentScrollKey = key;
+  }
   const expanded = key ? state.expandedOutputKeys.has(key) : false;
   if (expanded || text.length <= OUTPUT_PREVIEW_CHAR_LIMIT) {
     el.textContent = text;
@@ -790,6 +793,7 @@ function renderFileChangeCard(record) {
     if (c.diff) {
       const pre = document.createElement("pre");
       pre.className = "file-diff";
+      pre.dataset.contentScrollKey = `diff:${fileChangeEntryKey(record)}:${fileChangePathText(c)}`;
       pre.textContent = c.diff;
       list.append(pre);
     }
@@ -996,6 +1000,9 @@ function renderSystemCard(record) {
   } else if (record.eventType === "turn.failed") {
     text = `turn failed: ${cleanText(record.event?.error?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
+  } else if (record.eventType === "claude.limit_wait") {
+    const minutes = Math.ceil((record.event?.wait_ms ?? 0) / 60000);
+    text = `quota wait — ${minutes}m (${cleanText(record.event?.message) || "usage limit"})`;
   } else if (record.eventType === "error") {
     text = `error: ${cleanText(record.event?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
@@ -3812,12 +3819,40 @@ function renderTimeline(records) {
     });
     fragment.append(turnEl);
   }
+  const contentScrollPositions = captureContentScrollPositions();
   timelineEl.replaceChildren(fragment);
+  restoreContentScrollPositions(contentScrollPositions);
   scrollDebug("render-timeline-after", {
     recordCount: records.length,
     childCount: timelineEl.children.length,
     sortedTurns,
   });
+}
+
+// Internal scroll positions of long-output blocks (e.g. .cmd-output) keyed by
+// their stable content key, so re-rendering on auto-refresh doesn't reset a
+// card the user has scrolled within.
+function captureContentScrollPositions() {
+  const positions = new Map();
+  for (const el of timelineEl.querySelectorAll("[data-content-scroll-key]")) {
+    if (el.scrollTop || el.scrollLeft) {
+      positions.set(el.dataset.contentScrollKey, { top: el.scrollTop, left: el.scrollLeft });
+    }
+  }
+  return positions;
+}
+
+function restoreContentScrollPositions(positions) {
+  if (!positions.size) {
+    return;
+  }
+  for (const el of timelineEl.querySelectorAll("[data-content-scroll-key]")) {
+    const saved = positions.get(el.dataset.contentScrollKey);
+    if (saved) {
+      el.scrollTop = saved.top;
+      el.scrollLeft = saved.left;
+    }
+  }
 }
 
 function turnScrollKey(turn) {

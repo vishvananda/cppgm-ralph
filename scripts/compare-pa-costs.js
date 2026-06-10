@@ -16,11 +16,7 @@ const DEFAULT_RATES = {
 
 const DEFAULTS = {
   left: "phases-gpt-5.5-xhigh",
-  leftLabel: "phases",
-  leftModel: "gpt-5.5",
   right: "trusted-gpt-5.5-xhigh",
-  rightLabel: "trusted",
-  rightModel: "gpt-5.5",
   through: "pa22",
   ralphDir: path.join(os.homedir(), "work", ".ralph"),
   codexDir: path.join(os.homedir(), ".codex", "sessions"),
@@ -28,17 +24,22 @@ const DEFAULTS = {
 };
 
 function usage() {
-  return `Usage: node scripts/compare-pa-costs.js [options]
+  return `Usage: node scripts/compare-pa-costs.js [options] [runSpec ...]
 
-Compare per-PA implementation time and cost for two Ralph runs.
+Compare per-PA implementation time and cost across Ralph runs. Pass any number
+of run specs as positional arguments; the legacy --left/--right options remain
+as aliases for the first two runs. Labels default to the run spec and pricing
+models are inferred from the run name (e.g. "fable-claude-fable-5-xhigh" uses
+claude-fable-5 rates). Claude runs price each turn with the provider-reported
+cost recorded in the run log when available.
 
 Options:
-  --left <run>          Left run shape, run id, event jsonl, or events dir
-  --right <run>         Right run shape, run id, event jsonl, or events dir
-  --left-label <text>   Label for the left run (default: phases)
-  --right-label <text>  Label for the right run (default: trusted)
-  --left-model <model>  Pricing model for the left run (default: gpt-5.5)
-  --right-model <model> Pricing model for the right run (default: gpt-5.5)
+  --left <run>          First run shape, run id, event jsonl, or events dir
+  --right <run>         Second run shape, run id, event jsonl, or events dir
+  --left-label <text>   Label for the first run (default: run spec)
+  --right-label <text>  Label for the second run (default: run spec)
+  --left-model <model>  Pricing model for the first run (default: inferred)
+  --right-model <model> Pricing model for the second run (default: inferred)
   --through <paN|N>     Last PA to include (default: pa22)
   --ralph-dir <path>    Ralph state dir (default: ~/work/.ralph)
   --codex-dir <path>    Codex sessions dir (default: ~/.codex/sessions)
@@ -54,6 +55,7 @@ Run specs can be:
 
 function parseArgs(argv) {
   const options = { ...DEFAULTS };
+  const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") {
@@ -77,13 +79,37 @@ function parseArgs(argv) {
     else if (arg === "--ralph-dir") options.ralphDir = next();
     else if (arg === "--codex-dir") options.codexDir = next();
     else if (arg === "--format") options.format = next();
-    else throw new Error(`unknown option: ${arg}`);
+    else if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
+    else positional.push(arg);
   }
   options.throughNumber = parseStageNumber(options.through);
   if (!options.throughNumber) {
     throw new Error(`invalid --through value: ${options.through}`);
   }
+
+  const runConfigs = [];
+  if (argv.includes("--left") || !positional.length) {
+    runConfigs.push({ spec: options.left, label: options.leftLabel, model: options.leftModel });
+  }
+  if (argv.includes("--right") || !positional.length) {
+    runConfigs.push({ spec: options.right, label: options.rightLabel, model: options.rightModel });
+  }
+  runConfigs.push(...positional.map((spec) => ({ spec })));
+  options.runs = runConfigs.map((run) => ({
+    spec: run.spec,
+    label: run.label ?? run.spec,
+    model: run.model ?? inferModelFromSpec(run.spec),
+  }));
   return options;
+}
+
+function inferModelFromSpec(spec) {
+  const text = String(spec ?? "").toLowerCase();
+  return (
+    Object.keys(DEFAULT_RATES)
+      .sort((a, b) => b.length - a.length)
+      .find((model) => text.includes(model)) ?? null
+  );
 }
 
 function parseStageNumber(value) {
@@ -194,6 +220,7 @@ function emptyUsage() {
     output_tokens: 0,
     reasoning_output_tokens: 0,
     total_tokens: 0,
+    cost_usd: 0,
   };
 }
 
@@ -277,9 +304,11 @@ function usageDelta(current, previous) {
 
 function estimateCost(usage, model) {
   const normalized = normalizeUsage(usage) ?? emptyUsage();
-  const rates = DEFAULT_RATES[model];
+  const rates = model ? DEFAULT_RATES[model] : null;
   if (!rates) {
-    throw new Error(`no pricing rates configured for model ${model}`);
+    // No rate card: fall back to the provider-reported cost (Claude runs
+    // record total_cost_usd per turn) or zero.
+    return normalized.cost_usd ?? 0;
   }
   const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
   const uncached = Math.max(0, normalized.input_tokens - cached);
@@ -333,6 +362,9 @@ function buildTurnMeta(events) {
         failedRequiredCheckCount: 0,
         goalTimeUsedMs: 0,
         tokenEvents: 0,
+        eventFirstMs: null,
+        eventLastMs: null,
+        limitWaits: [],
       });
     }
     return byAttempt.get(key);
@@ -635,19 +667,134 @@ function fillDurationFallbacks(events, byTurn) {
     if (slot.sessionFirstMs != null && slot.sessionLastMs != null) {
       bestDurationMs = Math.max(bestDurationMs, Math.max(0, slot.sessionLastMs - slot.sessionFirstMs));
     }
+    if (slot.eventFirstMs != null && slot.eventLastMs != null) {
+      bestDurationMs = Math.max(bestDurationMs, Math.max(0, slot.eventLastMs - slot.eventFirstMs));
+    }
     if (bestDurationMs > 0) {
-      slot.durationMs = bestDurationMs;
+      slot.durationMs = Math.max(0, bestDurationMs - limitWaitOverlapMs(slot));
       continue;
     }
     const nextTime = starts[index + 1]?.startTime;
     if (Number.isFinite(nextTime) && nextTime > starts[index].startTime) {
-      slot.durationMs = nextTime - starts[index].startTime;
+      slot.durationMs = Math.max(0, nextTime - starts[index].startTime - limitWaitOverlapMs(slot));
     }
   }
 }
 
-async function summarizeRun(options, side) {
-  const spec = options[side];
+function readRunEventUsageIntoTurns(events, byTurn) {
+  const attempts = buildRawTurnAttemptWindows(events);
+  const slotFor = (record) => {
+    const turn = record.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      return null;
+    }
+    const time = Date.parse(record.recordedAt ?? "");
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    return byTurn.get(attempt?.key ?? String(turn)) ?? null;
+  };
+
+  // Track each attempt's activity span from its own provider/prompt events.
+  // This excludes downtime between attempts (crashes, --continue restarts)
+  // while still counting in-process waits (e.g. quota-reset sleeps) that
+  // happen between events of the same attempt.
+  for (const record of events) {
+    const type = String(record.eventType ?? "");
+    const time = Date.parse(record.recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    if (type === "claude.limit_wait") {
+      // Quota-reset sleeps are recorded so they can be excluded from turn time.
+      const slot = slotFor(record);
+      const waitMs = Number(record.event?.wait_ms ?? 0);
+      if (slot && Number.isFinite(waitMs) && waitMs > 0) {
+        slot.limitWaits.push({ startMs: time, durationMs: waitMs });
+      }
+      continue;
+    }
+    if (
+      !type.startsWith("item.") &&
+      !type.startsWith("turn.") &&
+      type !== "thread.started" &&
+      type !== "codex.session.token_count" &&
+      type !== "ralph.prompt"
+    ) {
+      continue;
+    }
+    const slot = slotFor(record);
+    if (!slot) {
+      continue;
+    }
+    slot.eventFirstMs = slot.eventFirstMs == null ? time : Math.min(slot.eventFirstMs, time);
+    slot.eventLastMs = slot.eventLastMs == null ? time : Math.max(slot.eventLastMs, time);
+  }
+
+  // Live token_count records in the run log (Claude runs) carry cumulative
+  // per-thread counters; convert to per-turn deltas.
+  const previousByThread = new Map();
+  const tokenTouched = new Set();
+  for (const record of events) {
+    if (record.eventType !== "codex.session.token_count" || !record.event?.usage) {
+      continue;
+    }
+    const current = normalizeUsage(record.event.usage);
+    if (!hasUsage(current)) {
+      continue;
+    }
+    const threadId = eventThreadId(record) ?? "";
+    const previous = previousByThread.get(threadId) ?? null;
+    const delta = usageDelta(current, previous);
+    previousByThread.set(threadId, current);
+    const slot = slotFor(record);
+    if (slot && hasUsage(delta)) {
+      slot.usage = addUsage(slot.usage, delta);
+      slot.tokenEvents += 1;
+      tokenTouched.add(slot.key);
+    }
+  }
+
+  // turn.completed records back-fill turns with no other usage source and
+  // carry the provider-reported cost (Claude's total_cost_usd) for the turn.
+  for (const record of events) {
+    if (record.eventType !== "turn.completed" || !record.event?.usage) {
+      continue;
+    }
+    const slot = slotFor(record);
+    if (!slot) {
+      continue;
+    }
+    const usage = normalizeUsage(record.event.usage);
+    if (!tokenTouched.has(slot.key) && !hasUsage(slot.usage)) {
+      slot.usage = addUsage(slot.usage, usage);
+    } else if (usage.cost_usd > 0 && !(slot.usage.cost_usd > 0)) {
+      slot.usage = { ...slot.usage, cost_usd: usage.cost_usd };
+    }
+  }
+}
+
+function limitWaitOverlapMs(slot) {
+  // Subtract only the portion of each quota wait that falls inside the
+  // attempt's measured activity span, so a wait aborted by a kill (which the
+  // span never covers) is not over-subtracted.
+  if (!Array.isArray(slot.limitWaits) || !slot.limitWaits.length) {
+    return 0;
+  }
+  const spanStart = slot.eventFirstMs;
+  const spanEnd = slot.eventLastMs;
+  if (spanStart == null || spanEnd == null) {
+    return 0;
+  }
+  let waited = 0;
+  for (const wait of slot.limitWaits) {
+    const start = Math.max(wait.startMs, spanStart);
+    const end = Math.min(wait.startMs + wait.durationMs, spanEnd);
+    waited += Math.max(0, end - start);
+  }
+  return waited;
+}
+
+async function summarizeRun(run, options) {
+  const spec = run.spec;
   const filePath = resolveRunFile(spec, options.ralphDir);
   const state = readRunState(filePath);
   const events = readJsonl(filePath);
@@ -662,9 +809,10 @@ async function summarizeRun(options, side) {
     }
   }
 
+  readRunEventUsageIntoTurns(events, byTurn);
   fillDurationFallbacks(events, byTurn);
 
-  const model = options[`${side}Model`];
+  const model = run.model;
   const byPa = new Map();
   const turnInfos = [...byTurn.values()].sort((a, b) =>
     (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0) ||
@@ -707,7 +855,7 @@ async function summarizeRun(options, side) {
   }
 
   return {
-    side,
+    label: run.label,
     spec,
     filePath,
     state,
@@ -785,71 +933,67 @@ function money(amount) {
   return `$${amount.toFixed(2)}`;
 }
 
-function buildComparison(options, leftRun, rightRun) {
+function buildComparison(options, summaries) {
   const rows = [];
   for (let number = 1; number <= options.throughNumber; number += 1) {
     const pa = `pa${number}`;
     rows.push({
       pa,
-      left: paSummary(leftRun, pa),
-      right: paSummary(rightRun, pa),
+      runs: summaries.map((run) => paSummary(run, pa)),
     });
   }
   return {
     generatedAt: new Date().toISOString(),
     through: `pa${options.throughNumber}`,
     rates: DEFAULT_RATES,
-    left: {
-      label: options.leftLabel,
-      model: options.leftModel,
-      spec: options.left,
-      filePath: leftRun.filePath,
-      total: totalSummary(rows.map((row) => row.left)),
-    },
-    right: {
-      label: options.rightLabel,
-      model: options.rightModel,
-      spec: options.right,
-      filePath: rightRun.filePath,
-      total: totalSummary(rows.map((row) => row.right)),
-    },
+    runs: summaries.map((run, index) => ({
+      label: run.label,
+      model: run.model,
+      spec: run.spec,
+      filePath: run.filePath,
+      total: totalSummary(rows.map((row) => row.runs[index])),
+    })),
     rows,
   };
 }
 
 function renderMarkdown(comparison) {
-  const left = comparison.left.label;
-  const right = comparison.right.label;
   const lines = [];
   lines.push(`Compared through ${comparison.through}. Times are HHH:MM:SS.`);
   lines.push("");
   lines.push("| Run | Turns | Time | Cost | Status |");
   lines.push("|---|---:|---:|---:|---|");
-  lines.push(summaryRow(comparison.left));
-  lines.push(summaryRow(comparison.right));
-  lines.push("");
-  lines.push(
-    `| PA | ${left} turns | ${left} time | ${left} cost | ${left} status | ${right} turns | ${right} time | ${right} cost | ${right} status |`,
-  );
-  lines.push("|---|---:|---:|---:|---|---:|---:|---:|---|");
-  for (const row of comparison.rows) {
-    lines.push(
-      [
-        row.pa,
-        row.left.turns.length,
-        hhhmmss(row.left.durationMs),
-        money(row.left.cost),
-        row.left.status,
-        row.right.turns.length,
-        hhhmmss(row.right.durationMs),
-        money(row.right.cost),
-        row.right.status,
-      ].join(" | ").replace(/^/, "| ").replace(/$/, " |"),
-    );
+  for (const run of comparison.runs) {
+    lines.push(summaryRow(run));
   }
   lines.push("");
-  lines.push(`Pricing: ${left}=${comparison.left.model}, ${right}=${comparison.right.model}.`);
-  lines.push(`Run files: ${comparison.left.filePath}; ${comparison.right.filePath}`);
+  const header = ["PA"];
+  const separators = ["---"];
+  for (const run of comparison.runs) {
+    header.push(`${run.label} turns`, `${run.label} time`, `${run.label} cost`, `${run.label} status`);
+    separators.push("---:", "---:", "---:", "---");
+  }
+  lines.push(`| ${header.join(" | ")} |`);
+  lines.push(`|${separators.join("|")}|`);
+  for (const row of comparison.rows) {
+    const cells = [row.pa];
+    for (const summary of row.runs) {
+      cells.push(
+        summary.turns.length,
+        hhhmmss(summary.durationMs),
+        money(summary.cost),
+        summary.status,
+      );
+    }
+    lines.push(`| ${cells.join(" | ")} |`);
+  }
+  lines.push("");
+  lines.push(
+    `Pricing: ${comparison.runs
+      .map((run) => `${run.label}=${run.model ?? "provider-reported cost only"}`)
+      .join(", ")}.`,
+  );
+  lines.push(`Run files: ${comparison.runs.map((run) => run.filePath).join("; ")}`);
   lines.push("Status `partial` means Ralph is currently in that PA, a required phase check is still failing, a Codex goal hit usage limits, or an included turn has session activity but no task_complete event yet.");
   return lines.join("\n");
 }
@@ -861,11 +1005,8 @@ function summaryRow(run) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const [leftRun, rightRun] = await Promise.all([
-    summarizeRun(options, "left"),
-    summarizeRun(options, "right"),
-  ]);
-  const comparison = buildComparison(options, leftRun, rightRun);
+  const summaries = await Promise.all(options.runs.map((run) => summarizeRun(run, options)));
+  const comparison = buildComparison(options, summaries);
   const format = String(options.format).toLowerCase();
   if (format === "json") {
     console.log(JSON.stringify(comparison, null, 2));

@@ -3359,6 +3359,13 @@ class ClaudeThread {
           `${this._id ? `session ${this._id}` : "with the original prompt"} ` +
           `(attempt ${limitRetries}/${CLAUDE_LIMIT_RETRY_MAX})`,
       );
+      // Recorded so duration accounting can exclude the wait from turn time.
+      yield {
+        type: "claude.limit_wait",
+        thread_id: this._id,
+        wait_ms: waitMs,
+        message: attempt.limitMessage,
+      };
       await sleepMs(waitMs);
       if (this._id) {
         // Resume the same session with a continuation nudge. The loop goal is
@@ -4860,6 +4867,9 @@ function summarizeEvent(event) {
   }
   if (event.type === "codex.session.token_count") {
     return `token_count ${formatUsage(event.usage ?? {})}`;
+  }
+  if (event.type === "claude.limit_wait") {
+    return `limit_wait ${Math.ceil((event.wait_ms ?? 0) / 60000)}m ${previewText(event.message ?? "")}`;
   }
   if (!event.item) {
     return event.type;
