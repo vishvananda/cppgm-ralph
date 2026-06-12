@@ -22,6 +22,7 @@ const DEFAULTS = {
   codexDir: path.join(os.homedir(), ".codex", "sessions"),
   format: "markdown",
 };
+const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 
 function usage() {
   return `Usage: node scripts/compare-pa-costs.js [options] [runSpec ...]
@@ -354,6 +355,8 @@ function buildTurnMeta(events) {
         durationMs: 0,
         sessionFirstMs: null,
         sessionLastMs: null,
+        sessionActiveMs: 0,
+        sessionLastActivityMs: null,
         hasTaskComplete: false,
         hasSessionActivity: false,
         hasUsageLimitedGoal: false,
@@ -608,16 +611,13 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
         ? String(turn)
         : null;
     const slot = key ? byTurn.get(key) : null;
-    if (slot && Number.isFinite(time)) {
-      slot.hasSessionActivity = true;
-      slot.sessionFirstMs = slot.sessionFirstMs == null ? time : Math.min(slot.sessionFirstMs, time);
-      slot.sessionLastMs = slot.sessionLastMs == null ? time : Math.max(slot.sessionLastMs, time);
-    }
-
     if (record.type !== "event_msg") {
       continue;
     }
     if (record.payload?.type === "token_count") {
+      if (slot && Number.isFinite(time)) {
+        recordSessionActivity(slot, time);
+      }
       const current = normalizeUsage(record.payload?.info?.total_token_usage);
       if (!hasUsage(current)) {
         continue;
@@ -629,6 +629,9 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
         slot.tokenEvents += 1;
       }
     } else if (record.payload?.type === "task_complete") {
+      if (slot && Number.isFinite(time)) {
+        recordSessionActivity(slot, time);
+      }
       const durationMs = Number(record.payload.duration_ms ?? 0);
       if (slot && Number.isFinite(durationMs) && durationMs > 0) {
         slot.durationMs += durationMs;
@@ -650,6 +653,19 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
   }
 }
 
+function recordSessionActivity(slot, time) {
+  slot.hasSessionActivity = true;
+  slot.sessionFirstMs = slot.sessionFirstMs == null ? time : Math.min(slot.sessionFirstMs, time);
+  slot.sessionLastMs = slot.sessionLastMs == null ? time : Math.max(slot.sessionLastMs, time);
+  if (slot.sessionLastActivityMs != null) {
+    const gap = time - slot.sessionLastActivityMs;
+    if (gap >= 0 && gap <= ACTIVE_EVENT_GAP_MS) {
+      slot.sessionActiveMs += gap;
+    }
+  }
+  slot.sessionLastActivityMs = time;
+}
+
 function fillDurationFallbacks(events, byTurn) {
   const starts = buildRawTurnAttemptWindows(events);
 
@@ -661,14 +677,17 @@ function fillDurationFallbacks(events, byTurn) {
     let bestDurationMs = Number.isFinite(slot.durationMs) && slot.durationMs > 0
       ? slot.durationMs
       : 0;
-    if (slot.goalTimeUsedMs > 0) {
-      bestDurationMs = Math.max(bestDurationMs, slot.goalTimeUsedMs);
+    if (bestDurationMs <= 0 && slot.sessionActiveMs > 0) {
+      bestDurationMs = slot.sessionActiveMs;
     }
-    if (slot.sessionFirstMs != null && slot.sessionLastMs != null) {
-      bestDurationMs = Math.max(bestDurationMs, Math.max(0, slot.sessionLastMs - slot.sessionFirstMs));
+    if (bestDurationMs <= 0 && slot.sessionFirstMs != null && slot.sessionLastMs != null) {
+      bestDurationMs = Math.max(0, slot.sessionLastMs - slot.sessionFirstMs);
     }
-    if (slot.eventFirstMs != null && slot.eventLastMs != null) {
-      bestDurationMs = Math.max(bestDurationMs, Math.max(0, slot.eventLastMs - slot.eventFirstMs));
+    if (bestDurationMs <= 0 && slot.eventFirstMs != null && slot.eventLastMs != null) {
+      bestDurationMs = Math.max(0, slot.eventLastMs - slot.eventFirstMs);
+    }
+    if (bestDurationMs <= 0 && slot.goalTimeUsedMs > 0) {
+      bestDurationMs = slot.goalTimeUsedMs;
     }
     if (bestDurationMs > 0) {
       slot.durationMs = Math.max(0, bestDurationMs - limitWaitOverlapMs(slot));
@@ -772,6 +791,35 @@ function readRunEventUsageIntoTurns(events, byTurn) {
   }
 }
 
+function applyRunGoalStatuses(events, byTurn) {
+  const attempts = buildRawTurnAttemptWindows(events);
+  for (const record of events) {
+    if (record.eventType !== "ralph.goal") {
+      continue;
+    }
+    const status = record.event?.goal?.status;
+    if (typeof status !== "string" || !status) {
+      continue;
+    }
+    const turn = record.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const time = Date.parse(record.recordedAt ?? "");
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    const slot = byTurn.get(attempt?.key ?? String(turn));
+    if (!slot) {
+      continue;
+    }
+    slot.goalStatus = status;
+    if (status === "usageLimited") {
+      slot.hasUsageLimitedGoal = true;
+    } else if (status === "complete" || status === "blocked") {
+      slot.hasUsageLimitedGoal = false;
+    }
+  }
+}
+
 function limitWaitOverlapMs(slot) {
   // Subtract only the portion of each quota wait that falls inside the
   // attempt's measured activity span, so a wait aborted by a kill (which the
@@ -810,6 +858,7 @@ async function summarizeRun(run, options) {
   }
 
   readRunEventUsageIntoTurns(events, byTurn);
+  applyRunGoalStatuses(events, byTurn);
   fillDurationFallbacks(events, byTurn);
 
   const model = run.model;

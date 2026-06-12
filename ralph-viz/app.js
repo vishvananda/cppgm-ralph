@@ -1406,6 +1406,7 @@ function buildTurnDurationMap(records) {
   const spansByTurnAttemptThread = new Map();
   const sessionTimingByTurnAttempt = new Map();
   const ralphLifecycleByTurnAttempt = new Map();
+  const limitWaitsByTurnAttempt = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1424,6 +1425,14 @@ function buildTurnDurationMap(records) {
 
     const attemptIndex = findTurnAttemptIndex(attempts, turn, time);
     const turnAttemptKey = `${turn}\0${attemptIndex}`;
+    if (record.eventType === "claude.limit_wait") {
+      const waitMs = Number(record.event?.wait_ms ?? 0);
+      if (Number.isFinite(waitMs) && waitMs > 0) {
+        const waits = limitWaitsByTurnAttempt.get(turnAttemptKey) ?? [];
+        waits.push({ startMs: time, durationMs: waitMs });
+        limitWaitsByTurnAttempt.set(turnAttemptKey, waits);
+      }
+    }
     if (durationSpanActivity) {
       const attemptThreadKey = `${turnAttemptKey}\0${record.threadId ?? ""}`;
       const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey) ?? { turn, attemptIndex, first: time, last: time };
@@ -1478,7 +1487,14 @@ function buildTurnDurationMap(records) {
   const attemptDurations = new Map();
   for (const threadSpan of spansByTurnAttemptThread.values()) {
     const key = `${threadSpan.turn}\0${threadSpan.attemptIndex}`;
-    attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + Math.max(0, threadSpan.last - threadSpan.first));
+    const durationMs = Math.max(0, threadSpan.last - threadSpan.first);
+    const activeMs = subtractLimitWaitOverlap(
+      durationMs,
+      threadSpan.first,
+      threadSpan.last,
+      limitWaitsByTurnAttempt.get(key),
+    );
+    attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + activeMs);
   }
   for (const [key, lifecycle] of ralphLifecycleByTurnAttempt.entries()) {
     if (
@@ -1486,7 +1502,15 @@ function buildTurnDurationMap(records) {
       Number.isFinite(lifecycle.checkedMs) &&
       lifecycle.checkedMs >= lifecycle.startMs
     ) {
-      attemptDurations.set(key, lifecycle.checkedMs - lifecycle.startMs);
+      attemptDurations.set(
+        key,
+        subtractLimitWaitOverlap(
+          lifecycle.checkedMs - lifecycle.startMs,
+          lifecycle.startMs,
+          lifecycle.checkedMs,
+          limitWaitsByTurnAttempt.get(key),
+        ),
+      );
     }
   }
   for (const [key, timing] of sessionTimingByTurnAttempt.entries()) {
@@ -1495,10 +1519,26 @@ function buildTurnDurationMap(records) {
       durationMs = Math.max(durationMs, timing.durationMs);
     }
     if (timing.goalTimeUsedMs > 0) {
-      durationMs = Math.max(durationMs, timing.goalTimeUsedMs);
+      durationMs = Math.max(
+        durationMs,
+        subtractLimitWaitOverlap(
+          timing.goalTimeUsedMs,
+          timing.sessionFirstMs,
+          timing.sessionLastMs,
+          limitWaitsByTurnAttempt.get(key),
+        ),
+      );
     }
     if (timing.sessionFirstMs != null && timing.sessionLastMs != null) {
-      durationMs = Math.max(durationMs, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+      durationMs = Math.max(
+        durationMs,
+        subtractLimitWaitOverlap(
+          Math.max(0, timing.sessionLastMs - timing.sessionFirstMs),
+          timing.sessionFirstMs,
+          timing.sessionLastMs,
+          limitWaitsByTurnAttempt.get(key),
+        ),
+      );
     }
     if (durationMs > 0) {
       attemptDurations.set(key, durationMs);
@@ -1518,6 +1558,27 @@ function buildTurnDurationMap(records) {
     }
   }
   return map;
+}
+
+function subtractLimitWaitOverlap(durationMs, spanStartMs, spanEndMs, waits) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0 || !Array.isArray(waits) || !waits.length) {
+    return Math.max(0, durationMs || 0);
+  }
+  if (!Number.isFinite(spanStartMs) || !Number.isFinite(spanEndMs) || spanEndMs <= spanStartMs) {
+    return Math.max(0, durationMs);
+  }
+  let waitedMs = 0;
+  for (const wait of waits) {
+    const waitStartMs = Number(wait?.startMs);
+    const waitDurationMs = Number(wait?.durationMs);
+    if (!Number.isFinite(waitStartMs) || !Number.isFinite(waitDurationMs) || waitDurationMs <= 0) {
+      continue;
+    }
+    const start = Math.max(spanStartMs, waitStartMs);
+    const end = Math.min(spanEndMs, waitStartMs + waitDurationMs);
+    waitedMs += Math.max(0, end - start);
+  }
+  return Math.max(0, durationMs - waitedMs);
 }
 
 function buildTurnAttemptWindows(records) {

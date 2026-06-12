@@ -26,7 +26,7 @@ const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
-const RUN_USAGE_CACHE_VERSION = 7;
+const RUN_USAGE_CACHE_VERSION = 8;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
@@ -787,6 +787,7 @@ function activeEventDurationMs(timedEvents) {
 
 function turnExecutionDurationMs(events, sessionTiming = new Map()) {
   const fallbackDurations = ralphEventTurnDurationFallbacks(events);
+  const limitWaitsByAttempt = limitWaitsByRawTurnAttempt(events);
   let durationMs = 0;
   const coveredAttempts = new Set();
   for (const [attemptKey, timing] of sessionTiming.entries()) {
@@ -796,10 +797,26 @@ function turnExecutionDurationMs(events, sessionTiming = new Map()) {
       attemptDurationMs = Math.max(attemptDurationMs, timing.durationMs);
     }
     if (timing?.goalTimeUsedMs > 0) {
-      attemptDurationMs = Math.max(attemptDurationMs, timing.goalTimeUsedMs);
+      attemptDurationMs = Math.max(
+        attemptDurationMs,
+        subtractLimitWaitOverlap(
+          timing.goalTimeUsedMs,
+          timing.sessionFirstMs,
+          timing.sessionLastMs,
+          limitWaitsByAttempt.get(attemptKey),
+        ),
+      );
     }
     if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
-      attemptDurationMs = Math.max(attemptDurationMs, Math.max(0, timing.sessionLastMs - timing.sessionFirstMs));
+      attemptDurationMs = Math.max(
+        attemptDurationMs,
+        subtractLimitWaitOverlap(
+          Math.max(0, timing.sessionLastMs - timing.sessionFirstMs),
+          timing.sessionFirstMs,
+          timing.sessionLastMs,
+          limitWaitsByAttempt.get(attemptKey),
+        ),
+      );
     }
     if (attemptDurationMs > 0) {
       durationMs += attemptDurationMs;
@@ -819,6 +836,7 @@ function ralphEventTurnDurationFallbacks(events) {
   const attempts = buildRawTurnAttemptWindows(events);
   const spansByAttemptThread = new Map();
   const lifecycleByAttempt = new Map();
+  const limitWaitsByAttempt = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -830,6 +848,14 @@ function ralphEventTurnDurationFallbacks(events) {
     }
     const attempt = rawTurnAttemptForTime(attempts, turn, time);
     const attemptKey = attempt?.key ?? String(turn);
+    if (event.eventType === "claude.limit_wait") {
+      const waitMs = Number(event.event?.wait_ms ?? 0);
+      if (Number.isFinite(waitMs) && waitMs > 0) {
+        const waits = limitWaitsByAttempt.get(attemptKey) ?? [];
+        waits.push({ startMs: time, durationMs: waitMs });
+        limitWaitsByAttempt.set(attemptKey, waits);
+      }
+    }
     const key = `${attemptKey}\0${event.threadId ?? ""}`;
     const span = spansByAttemptThread.get(key) ?? { attemptKey, first: time, last: time };
     span.first = Math.min(span.first, time);
@@ -852,7 +878,14 @@ function ralphEventTurnDurationFallbacks(events) {
 
   const durations = new Map();
   for (const span of spansByAttemptThread.values()) {
-    durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + Math.max(0, span.last - span.first));
+    const durationMs = Math.max(0, span.last - span.first);
+    const activeMs = subtractLimitWaitOverlap(
+      durationMs,
+      span.first,
+      span.last,
+      limitWaitsByAttempt.get(span.attemptKey),
+    );
+    durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + activeMs);
   }
   for (const [attemptKey, lifecycle] of lifecycleByAttempt.entries()) {
     if (
@@ -860,10 +893,64 @@ function ralphEventTurnDurationFallbacks(events) {
       Number.isFinite(lifecycle.checkedMs) &&
       lifecycle.checkedMs >= lifecycle.startMs
     ) {
-      durations.set(attemptKey, lifecycle.checkedMs - lifecycle.startMs);
+      durations.set(
+        attemptKey,
+        subtractLimitWaitOverlap(
+          lifecycle.checkedMs - lifecycle.startMs,
+          lifecycle.startMs,
+          lifecycle.checkedMs,
+          limitWaitsByAttempt.get(attemptKey),
+        ),
+      );
     }
   }
   return durations;
+}
+
+function limitWaitsByRawTurnAttempt(events) {
+  const attempts = buildRawTurnAttemptWindows(events);
+  const waitsByAttempt = new Map();
+  for (const event of events) {
+    if (event.eventType !== "claude.limit_wait") {
+      continue;
+    }
+    const turn = event.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const time = Date.parse(event.recordedAt ?? "");
+    const waitMs = Number(event.event?.wait_ms ?? 0);
+    if (!Number.isFinite(time) || !Number.isFinite(waitMs) || waitMs <= 0) {
+      continue;
+    }
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    const attemptKey = attempt?.key ?? String(turn);
+    const waits = waitsByAttempt.get(attemptKey) ?? [];
+    waits.push({ startMs: time, durationMs: waitMs });
+    waitsByAttempt.set(attemptKey, waits);
+  }
+  return waitsByAttempt;
+}
+
+function subtractLimitWaitOverlap(durationMs, spanStartMs, spanEndMs, waits) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0 || !Array.isArray(waits) || !waits.length) {
+    return Math.max(0, durationMs || 0);
+  }
+  if (!Number.isFinite(spanStartMs) || !Number.isFinite(spanEndMs) || spanEndMs <= spanStartMs) {
+    return Math.max(0, durationMs);
+  }
+  let waitedMs = 0;
+  for (const wait of waits) {
+    const waitStartMs = Number(wait?.startMs);
+    const waitDurationMs = Number(wait?.durationMs);
+    if (!Number.isFinite(waitStartMs) || !Number.isFinite(waitDurationMs) || waitDurationMs <= 0) {
+      continue;
+    }
+    const start = Math.max(spanStartMs, waitStartMs);
+    const end = Math.min(spanEndMs, waitStartMs + waitDurationMs);
+    waitedMs += Math.max(0, end - start);
+  }
+  return Math.max(0, durationMs - waitedMs);
 }
 
 function isCommandStartEvent(event) {
