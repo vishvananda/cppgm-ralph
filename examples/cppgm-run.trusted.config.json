@@ -9,11 +9,42 @@
       "command": "make test-report-through-{{testStage}}",
       "primary": true,
       "required": true,
-      "kind": "test"
+      "kind": "test",
+      "excludeStages": [
+        "pa39"
+      ]
     },
     "fileAudit": {
       "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev/src",
       "required": true
+    },
+    "pa39HostThrough38": {
+      "command": "make test-report-through-pa38",
+      "required": true,
+      "kind": "test",
+      "targetStage": "pa39",
+      "onlyStages": [
+        "pa39"
+      ]
+    },
+    "pa39SelfThroughPa10": {
+      "command": "make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
+      "required": true,
+      "kind": "generic",
+      "targetStage": "pa39",
+      "onlyStages": [
+        "pa39"
+      ]
+    },
+    "pa39Inception": {
+      "command": "make -C pa39 compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
+      "primary": true,
+      "required": true,
+      "kind": "generic",
+      "targetStage": "pa39",
+      "onlyStages": [
+        "pa39"
+      ]
     }
   },
   "phases": [
@@ -21,8 +52,17 @@
       "name": "implement",
       "promptTemplate": "implement",
       "goalTemplate": "implement-goal",
+      "promptTemplates": {
+        "pa39": "pa39-implement"
+      },
+      "goalTemplates": {
+        "pa39": "pa39-implement-goal"
+      },
       "checks": [
         "tests",
+        "pa39HostThrough38",
+        "pa39SelfThroughPa10",
+        "pa39Inception",
         "fileAudit"
       ]
     },
@@ -30,12 +70,24 @@
       "name": "audit",
       "promptTemplate": "audit",
       "goalTemplate": "audit-goal",
+      "promptTemplates": {
+        "pa39": "pa39-audit"
+      },
+      "goalTemplates": {
+        "pa39": "pa39-audit-goal"
+      },
       "runWhenChecksPass": true,
       "checks": [
         "tests",
+        "pa39HostThrough38",
+        "pa39SelfThroughPa10",
+        "pa39Inception",
         "fileAudit"
       ]
     }
+  ],
+  "extraStages": [
+    "pa39"
   ],
   "maxTurns": 100,
   "stateBaseDir": "/work/.ralph",

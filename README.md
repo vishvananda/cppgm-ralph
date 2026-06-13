@@ -200,14 +200,18 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `make test-report-through-paX` becomes `make test-report-through-pa4`.
 - `checks`
   Optional object or array of named checks. Each check has `command`, optional
-  `required` (default `true`), optional `primary`, and optional `kind`. If
-  omitted, Ralph synthesizes a primary required `tests` check from `testCommand`.
-  All required checks in the active phase must pass before the phase can
-  complete.
+  `required` (default `true`), optional `primary`, optional `kind`, optional
+  `targetStage`, optional `onlyStages`, and optional `excludeStages`. If omitted,
+  Ralph synthesizes a primary required `tests` check from `testCommand`. All
+  required checks in the active phase must pass before the phase can complete.
+  `targetStage` binds a non-template command to a PA for state, prompts, and
+  visualization. `onlyStages` and `excludeStages` make a check apply only to
+  selected PA stages.
 - `phases`
   Optional ordered array of phase definitions. Each phase has `name`, optional
   `checks` (defaults to all checks), optional `promptTemplate` (defaults to the
-  phase name), optional `goalTemplate` (defaults to `<phase>-goal`), and optional
+  phase name), optional `goalTemplate` (defaults to `<phase>-goal`), optional
+  `promptTemplates` and `goalTemplates` maps keyed by PA stage, and optional
   `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
   the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
   turn even when checks already pass, which is useful for audit/cleanup phases.
@@ -227,6 +231,11 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `course/paN/*.t` slice. Set `autoTestSubsetMaxFiles` to split small groups
   into exact-file slices, such as `tests/200-basic-floating.t`, while leaving
   larger groups as prefix globs.
+- `extraStages`
+  Optional list of PA stages to include even if the assignment Makefile marks
+  them experimental. This is useful for PA39-style runs where the normal
+  `test-report-through-paX` ladder stops at the last non-experimental PA and
+  the final stage uses custom checks.
 - `initialStage`, `initialSubset`
   Optional starting target for a new run, useful for slice experiments that
   should begin at a later PA such as `pa22`.

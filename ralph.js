@@ -55,6 +55,7 @@ const DEFAULT_CONFIG = {
   autoTestSubsetThreshold: 20,
   autoTestSubsetMaxFiles: 0,
   autoTestSubsetTargetFiles: 0,
+  extraStages: [],
   initialStage: null,
   initialSubset: null,
   maxTurns: 1000,
@@ -139,7 +140,7 @@ async function main() {
   } else {
     await assertDirectoryExists(CONFIG.workdir);
   }
-  TEST_STAGE_NAMES = await discoverStageNames(CONFIG.workdir);
+  TEST_STAGE_NAMES = await discoverStageNames(CONFIG.workdir, CONFIG.extraStages);
   if (TEST_STAGE_NAMES.length > 0) {
     log(`Discovered test stages: ${TEST_STAGE_NAMES.join(", ")}`);
   }
@@ -472,7 +473,7 @@ async function main() {
 
 function buildInitialPrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
   const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
-  if (defaultPromptHasCurrentState(phase)) {
+  if (defaultPromptHasCurrentState(phase, resolveTemplateStage(testStatus, phaseStatus))) {
     return defaultPrompt;
   }
 
@@ -487,7 +488,7 @@ function buildInitialPrompt(testStatus, gitStatus, turnNumber = null, phase = nu
 
 function buildContinuePrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
   const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
-  if (defaultPromptHasCurrentState(phase)) {
+  if (defaultPromptHasCurrentState(phase, resolveTemplateStage(testStatus, phaseStatus))) {
     return defaultPrompt;
   }
 
@@ -510,7 +511,7 @@ function buildContinuePrompt(testStatus, gitStatus, turnNumber = null, phase = n
 
 function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null, phase = null, phaseStatus = null) {
   const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
-  if (defaultPromptHasCurrentState(phase)) {
+  if (defaultPromptHasCurrentState(phase, resolveTemplateStage(testStatus, phaseStatus))) {
     return defaultPrompt;
   }
 
@@ -614,21 +615,34 @@ function buildFailureSummaryLines(testStatus, phaseStatus = null) {
 }
 
 function buildDefaultPrompt({ testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null }) {
-  const template = getDefaultPromptTemplate(phase);
+  const template = getDefaultPromptTemplate(phase, resolveTemplateStage(testStatus, phaseStatus));
   return renderTemplateContent(
     template,
     buildTemplateContext({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
   );
 }
 
-function getDefaultPromptTemplate(phase = null) {
-  return phase && PROMPT_PARTIALS.phasePrompts?.[phase.name]?.content
+function getDefaultPromptTemplate(phase = null, stage = null) {
+  const stageTemplate = phase && stage
+    ? PROMPT_PARTIALS.phaseStagePrompts?.[phase.name]?.[stage]?.content
+    : null;
+  return stageTemplate
+    ?? (phase && PROMPT_PARTIALS.phasePrompts?.[phase.name]?.content
     ? PROMPT_PARTIALS.phasePrompts[phase.name].content
-    : PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT;
+    : PROMPT_PARTIALS.defaultPrompt?.content ?? DEFAULT_PROMPT);
 }
 
-function defaultPromptHasCurrentState(phase = null) {
-  return /\{\{\s*(?:currentState|briefState)\s*\}\}/.test(getDefaultPromptTemplate(phase));
+function defaultPromptHasCurrentState(phase = null, stage = null) {
+  return /\{\{\s*(?:currentState|briefState)\s*\}\}/.test(getDefaultPromptTemplate(phase, stage));
+}
+
+function resolveTemplateStage(testStatus, phaseStatus = null) {
+  return (
+    normalizeStageName(phaseStatus?.stage) ??
+    normalizeStageName(testStatus?.targetStage) ??
+    normalizeStageName(testStatus?.failingStage) ??
+    normalizeStageName(testStatus?.passingThrough)
+  );
 }
 
 function buildTemplateContext({ testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null }) {
@@ -1543,9 +1557,8 @@ function formatPhaseCheckResults(phaseStatus) {
 }
 
 function formatPhaseChecksForTemplate(phase, stage, subset = null) {
-  return phase.checks
-    .map((name) => {
-      const check = getCheckByName(name);
+  return getActivePhaseChecks(phase, stage)
+    .map((check) => {
       const required = check.required ? "required" : "optional";
       const primary = check.primary ? ", primary" : "";
       const command = buildCheckCommandForStage(check, stage, subset);
@@ -1818,7 +1831,10 @@ async function runPhaseChecks(state, phase) {
   const stage = resolveActiveTestStage(state);
   const subset = resolveActiveTestSubset(state, stage);
   const sliceInfo = buildSliceInfo(stage, subset);
-  const checks = phase.checks.map((name) => getCheckByName(name));
+  const checks = getActivePhaseChecks(phase, stage);
+  if (checks.length === 0) {
+    throw new Error(`No checks apply to phase ${phase.name} for ${stage ?? "unknown stage"}`);
+  }
   const results = [];
   let primaryTestStatus = null;
   let previousTestStatus = state.lastTestStatus;
@@ -1942,8 +1958,19 @@ async function runCheckCommand(context) {
 }
 
 function analyzeCheckTestStatus(check, context, run, previousTestStatus) {
-  if (!check.primary && check.kind !== "test") {
-    return null;
+  if (check.kind !== "test") {
+    if (!check.primary) {
+      return null;
+    }
+    return buildGenericTestStatus({
+      name: check.name,
+      command: context.command,
+      commandTemplate: context.template,
+      usesStageTemplate: context.usesStageTemplate,
+      usesSubsetTemplate: context.usesSubsetTemplate,
+      exitCode: run.exitCode,
+      passed: run.exitCode === 0,
+    }, context.stage, context.subset);
   }
   return analyzeTestProgress(run.output, previousTestStatus, {
     command: context.command,
@@ -2256,15 +2283,20 @@ function getPortableGoalPath() {
 
 function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = null, phaseStatus = null }) {
   phase = phase ?? CONFIG.phases[0];
-  const goalTemplate = phase ? PROMPT_PARTIALS.phaseGoals?.[phase.name]?.content : null;
-  if (goalTemplate) {
+  const stage = resolveTemplateStage(testStatus, phaseStatus);
+  const goalTemplate = phase && stage
+    ? PROMPT_PARTIALS.phaseStageGoals?.[phase.name]?.[stage]?.content
+    : null;
+  const fallbackGoalTemplate = phase ? PROMPT_PARTIALS.phaseGoals?.[phase.name]?.content : null;
+  const selectedGoalTemplate = goalTemplate ?? fallbackGoalTemplate;
+  if (selectedGoalTemplate) {
     return truncateGoalObjective(renderTemplateContent(
-      goalTemplate,
+      selectedGoalTemplate,
       buildTemplateContext({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
     ));
   }
 
-  const stage = getObjectiveTargetStage(testStatus) ?? "";
+  const objectiveStage = getObjectiveTargetStage(testStatus) ?? "";
   const subset = testStatus?.targetSubset ?? phaseStatus?.subset ?? "";
   const validationLines = buildModelValidationLines({ testStatus, phaseStatus });
   const lines = [
@@ -2274,8 +2306,8 @@ function buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase = nul
     "",
   ];
 
-  if (stage) {
-    lines.push(`Current stage: ${stage}.`);
+  if (objectiveStage) {
+    lines.push(`Current stage: ${objectiveStage}.`);
   }
   if (subset) {
     lines.push(`Current test subset: ${subset}.`);
@@ -2376,7 +2408,7 @@ function buildTestCommandForStage(stageName, subset = null) {
 }
 
 function buildCheckCommandForStage(check, stageName, subset = null) {
-  const normalizedStage = normalizeStageName(stageName);
+  const normalizedStage = normalizeStageName(check.targetStage) ?? normalizeStageName(stageName);
   const normalizedSubset = normalizeTestSubset(subset);
   if (
     (normalizedStage && hasTestCommandStagePlaceholder(check.command)) ||
@@ -2395,7 +2427,10 @@ function buildTestCommandContext(state) {
 function buildCheckCommandContext(check, activeStage, activeSubset = null) {
   const usesStageTemplate = hasTestCommandStagePlaceholder(check.command);
   const usesSubsetTemplate = hasTestCommandSubsetPlaceholder(check.command);
-  const stage = usesStageTemplate ? normalizeStageName(activeStage) : null;
+  const targetStage = normalizeStageName(check.targetStage);
+  const activeNormalizedStage = normalizeStageName(activeStage);
+  const commandStage = targetStage ?? activeNormalizedStage;
+  const stage = usesStageTemplate || targetStage ? commandStage : null;
   const subset = usesSubsetTemplate ? normalizeTestSubset(activeSubset) : null;
   const command = usesStageTemplate || usesSubsetTemplate
     ? renderTestCommandTemplate(check.command, stage, subset)
@@ -2407,9 +2442,27 @@ function buildCheckCommandContext(check, activeStage, activeSubset = null) {
     internalCheck: parseInternalCheckCommand(command),
     stage,
     subset,
+    targetStage,
     usesStageTemplate,
     usesSubsetTemplate,
   };
+}
+
+function getActivePhaseChecks(phase, stageName) {
+  return phase.checks
+    .map((name) => getCheckByName(name))
+    .filter((check) => checkAppliesToStage(check, stageName));
+}
+
+function checkAppliesToStage(check, stageName) {
+  const stage = normalizeStageName(stageName);
+  if (check.onlyStages.length > 0 && (!stage || !check.onlyStages.includes(stage))) {
+    return false;
+  }
+  if (stage && check.excludeStages.includes(stage)) {
+    return false;
+  }
+  return true;
 }
 
 function getPrimaryCheck() {
@@ -2569,6 +2622,10 @@ function resolveActiveTestStage(state) {
   if (savedStage) {
     return savedStage;
   }
+  const explicitTargetStage = normalizeStageName(state?.lastTestStatus?.targetStage);
+  if (explicitTargetStage && state?.lastTestStatus?.usesStageTemplate === false) {
+    return explicitTargetStage;
+  }
   const failingStage = normalizeStageName(state?.lastTestStatus?.failingStage);
   if (failingStage) {
     return failingStage;
@@ -2707,11 +2764,15 @@ function getNextTargetAfterCompletedPhase(state, testStatus) {
 }
 
 function getStateActiveStageAfterTest(testStatus) {
+  const targetStage = normalizeStageName(testStatus?.targetStage);
+  if (!testStatus?.usesStageTemplate && targetStage) {
+    return targetStage;
+  }
   if (!testStatus?.usesStageTemplate) {
     return null;
   }
   return (
-    normalizeStageName(testStatus.targetStage) ??
+    targetStage ??
     normalizeStageName(testStatus.failingStage) ??
     getNextStageName(testStatus.passingThrough)
   );
@@ -4461,6 +4522,10 @@ async function loadConfig() {
     checks,
     phases,
     testSubsets: normalizeTestSubsets(fileConfig.testSubsets),
+    extraStages: normalizeStageList(
+      process.env.RALPH_EXTRA_STAGES ?? fileConfig.extraStages ?? DEFAULT_CONFIG.extraStages,
+      "extraStages",
+    ),
     autoTestSubsets: parseBoolean(
       process.env.RALPH_AUTO_TEST_SUBSETS ?? fileConfig.autoTestSubsets,
       DEFAULT_CONFIG.autoTestSubsets,
@@ -4614,6 +4679,8 @@ async function loadPromptPartials() {
 
   partials.phasePrompts = {};
   partials.phaseGoals = {};
+  partials.phaseStagePrompts = {};
+  partials.phaseStageGoals = {};
   for (const phase of CONFIG.phases ?? []) {
     if (phase.promptTemplate) {
       const loaded = await readFirstExistingFile([
@@ -4625,6 +4692,16 @@ async function loadPromptPartials() {
         partials.phasePrompts[phase.name] = loaded;
       }
     }
+    partials.phaseStagePrompts[phase.name] = {};
+    for (const [stage, templateName] of Object.entries(phase.promptTemplates ?? {})) {
+      const loaded = await readFirstExistingFile([
+        `${sidecarBasePath}.${templateName}.md`,
+        path.join(DEFAULT_TEMPLATE_DIR, `${templateName}.md`),
+      ]);
+      if (loaded) {
+        partials.phaseStagePrompts[phase.name][stage] = loaded;
+      }
+    }
     if (phase.goalTemplate) {
       const loaded = await readFirstExistingFile([
         `${sidecarBasePath}.${phase.goalTemplate}.md`,
@@ -4632,6 +4709,16 @@ async function loadPromptPartials() {
       ]);
       if (loaded) {
         partials.phaseGoals[phase.name] = loaded;
+      }
+    }
+    partials.phaseStageGoals[phase.name] = {};
+    for (const [stage, templateName] of Object.entries(phase.goalTemplates ?? {})) {
+      const loaded = await readFirstExistingFile([
+        `${sidecarBasePath}.${templateName}.md`,
+        path.join(DEFAULT_TEMPLATE_DIR, `${templateName}.md`),
+      ]);
+      if (loaded) {
+        partials.phaseStageGoals[phase.name][stage] = loaded;
       }
     }
   }
@@ -5338,15 +5425,19 @@ async function assertDirectoryExists(directoryPath) {
   }
 }
 
-async function discoverStageNames(workdir) {
+async function discoverStageNames(workdir, extraStages = []) {
   const entries = await fs.readdir(workdir, { withFileTypes: true });
   const stages = entries
     .filter((entry) => entry.isDirectory() && /^pa\d+$/.test(entry.name))
     .map((entry) => entry.name);
   const experimentalStages = await readExperimentalStageNames(workdir);
-  return stages
+  const configuredExtraStages = new Set(extraStages.map((stage) => normalizeStageName(stage)).filter(Boolean));
+  return Array.from(new Set([
+    ...stages
     .filter((stage) => !experimentalStages.has(stage))
-    .sort(compareStageNames);
+    .filter((stage) => !configuredExtraStages.has(stage)),
+    ...stages.filter((stage) => configuredExtraStages.has(stage)),
+  ])).sort(compareStageNames);
 }
 
 async function discoverAutoTestSubsets(workdir) {
@@ -5636,10 +5727,14 @@ function normalizeCheckConfig(rawChecks, legacyTestCommand) {
     throw new Error("Config checks must define at least one check");
   }
 
-  let primaryIndex = checks.findIndex((check) => check.primary);
-  if (primaryIndex < 0) {
-    primaryIndex = checks.findIndex((check) => check.name === "tests");
+  if (checks.some((check) => check.primary)) {
+    return checks.map((check) => ({
+      ...check,
+      kind: check.kind ?? (check.primary ? "test" : "generic"),
+    }));
   }
+
+  let primaryIndex = checks.findIndex((check) => check.name === "tests");
   if (primaryIndex < 0) {
     primaryIndex = 0;
   }
@@ -5666,6 +5761,9 @@ function normalizeCheckDefinition(name, definition) {
     required: parseBoolean(value.required, true),
     primary: parseBoolean(value.primary, false),
     kind: typeof value.kind === "string" ? value.kind : null,
+    targetStage: normalizeOptionalStageConfig(value.targetStage, `checks.${normalizedName}.targetStage`),
+    onlyStages: normalizeStageList(value.onlyStages, `checks.${normalizedName}.onlyStages`),
+    excludeStages: normalizeStageList(value.excludeStages, `checks.${normalizedName}.excludeStages`),
   };
 }
 
@@ -5715,11 +5813,45 @@ function normalizePhaseDefinition(phase, checks) {
     name,
     promptTemplate: sanitizeOptionalTemplateName(phase.promptTemplate ?? name),
     goalTemplate: sanitizeOptionalTemplateName(phase.goalTemplate ?? `${name}-goal`),
+    promptTemplates: normalizeStageTemplateMap(phase.promptTemplates, `phases.${name}.promptTemplates`),
+    goalTemplates: normalizeStageTemplateMap(phase.goalTemplates, `phases.${name}.goalTemplates`),
     checks: normalizedChecks,
     runWhenChecksPass: parseBoolean(phase.runWhenChecksPass, false),
     runOnFirstSubsetOnly: parseBoolean(phase.runOnFirstSubsetOnly, false),
     runOnLastSubsetOnly: parseBoolean(phase.runOnLastSubsetOnly, false),
   };
+}
+
+function normalizeStageTemplateMap(value, label) {
+  if (value == null || value === "") {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Config ${label} must be an object keyed by pa stage`);
+  }
+  const normalized = {};
+  for (const [rawStage, rawTemplateName] of Object.entries(value)) {
+    const stage = normalizeOptionalStageConfig(rawStage, `${label} stage`);
+    if (!stage) {
+      throw new Error(`Config ${label} stage key must be a pa stage: ${rawStage}`);
+    }
+    const templateName = sanitizeOptionalTemplateName(rawTemplateName);
+    if (templateName) {
+      normalized[stage] = templateName;
+    }
+  }
+  return normalized;
+}
+
+function normalizeOptionalStageConfig(value, label) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const stage = normalizeStageName(String(value).trim());
+  if (!stage) {
+    throw new Error(`Config ${label} must be a pa stage: ${value}`);
+  }
+  return stage;
 }
 
 function sanitizeIdentifier(value, label) {
@@ -5783,6 +5915,30 @@ function normalizeTestSubsetList(value, label) {
   return value
     .map((entry) => normalizeTestSubset(entry))
     .filter(Boolean);
+}
+
+function normalizeStageList(value, label) {
+  if (value == null || value === "") {
+    return [];
+  }
+  const entries = Array.isArray(value)
+    ? value
+    : String(value).split(/[,\s]+/);
+  const stages = [];
+  for (const entry of entries) {
+    const text = String(entry).trim();
+    if (!text) {
+      continue;
+    }
+    const stage = normalizeStageName(text);
+    if (!stage) {
+      throw new Error(`Config ${label} must contain only pa stages: ${text}`);
+    }
+    if (!stages.includes(stage)) {
+      stages.push(stage);
+    }
+  }
+  return stages;
 }
 
 function normalizeProvider(value) {

@@ -17,6 +17,11 @@ my %opt = (
     max_function_lines => 120,
     warn_nesting => 6,
     max_nesting => 8,
+    max_line_semicolons => 24,
+    max_dense_line_chars => 900,
+    max_dense_line_score => 28,
+    max_very_long_line_chars => 1600,
+    max_very_long_line_score => 18,
     duplicate_window => 28,
     duplicate_min_chars => 240,
     warnings_fail => 0,
@@ -36,6 +41,11 @@ GetOptions(
     'max-function-lines=i' => \$opt{max_function_lines},
     'warn-nesting=i' => \$opt{warn_nesting},
     'max-nesting=i' => \$opt{max_nesting},
+    'max-line-semicolons=i' => \$opt{max_line_semicolons},
+    'max-dense-line-chars=i' => \$opt{max_dense_line_chars},
+    'max-dense-line-score=i' => \$opt{max_dense_line_score},
+    'max-very-long-line-chars=i' => \$opt{max_very_long_line_chars},
+    'max-very-long-line-score=i' => \$opt{max_very_long_line_score},
     'duplicate-window=i' => \$opt{duplicate_window},
     'duplicate-min-chars=i' => \$opt{duplicate_min_chars},
     'warnings-fail!' => \$opt{warnings_fail},
@@ -87,6 +97,7 @@ for my $file (@files) {
     check_file_name($rel, $line_count, \@fatal, \@warning);
     check_includes($rel, $text, $comment_masked_text, $code_masked_text, \%included_by, \@fatal, \@warning);
     check_shortcut_smells($rel, $text, $comment_masked_text, $code_masked_text, \@fatal, \@warning);
+    check_compressed_code_lines($rel, $code_masked_text, \@fatal);
     check_functions($rel, $code_masked_text, \@fatal, \@warning);
     check_header_body_weight($rel, $code_masked_text, \@fatal, \@warning);
 }
@@ -637,6 +648,38 @@ sub check_header_body_weight {
     if ($body_lines > 180) {
         add_finding($warning, 'bad-division', $rel, 1,
             "header contains substantial implementation body; prefer .cpp ownership");
+    }
+}
+
+sub check_compressed_code_lines {
+    my ($rel, $code_masked_text, $fatal) = @_;
+    my @lines = split /\n/, $code_masked_text;
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        next if !line_is_real_code($line);
+        my $trimmed = $line;
+        $trimmed =~ s/^\s+|\s+$//g;
+        next if $trimmed =~ /^#/;
+
+        my $length = length($trimmed);
+        my $semicolons = count_char($trimmed, ';');
+        my $braces = count_char($trimmed, '{') + count_char($trimmed, '}');
+        my $control = () = $trimmed =~ /\b(?:if|for|while|switch|else|catch|return|break|continue|throw)\b/g;
+        my $score = $semicolons + $braces + $control;
+        my $too_many_statements = $semicolons >= $opt{max_line_semicolons};
+        my $dense_long_line =
+            $length >= $opt{max_dense_line_chars} &&
+            $score >= $opt{max_dense_line_score};
+        my $very_long_dense_line =
+            $length >= $opt{max_very_long_line_chars} &&
+            $score >= $opt{max_very_long_line_score};
+        next if !$too_many_statements && !$dense_long_line && !$very_long_dense_line;
+
+        add_finding($fatal, 'line-density', $rel, $i + 1,
+            "physical code line is compressed ($length chars, $semicolons semicolon(s), " .
+            "$control control keyword(s), $braces brace(s)); expand it into normal block " .
+            "structure and extract cohesive helpers instead of compressing implementation " .
+            "to satisfy file or function line limits");
     }
 }
 
