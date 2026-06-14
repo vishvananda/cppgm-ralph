@@ -204,6 +204,12 @@ function newestJsonl(directory) {
   return files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
 }
 
+function compareCachePath(runFilePath) {
+  const runDir = path.dirname(path.dirname(runFilePath));
+  const fileBase = path.basename(runFilePath, ".jsonl");
+  return path.join(runDir, "usage-cache", `compare-pa-costs-${fileBase}.json`);
+}
+
 function expandHome(filePath) {
   if (filePath === "~") {
     return os.homedir();
@@ -582,10 +588,11 @@ function walkCodexSessions(directory, visit, depth = 0) {
   }
 }
 
-async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
+async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn, options = {}) {
   let previousUsage = null;
   const stream = fs.createReadStream(filePath);
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const usageKeys = options.usageKeys instanceof Set ? options.usageKeys : null;
 
   for await (const line of lines) {
     if (
@@ -624,7 +631,7 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn) {
       }
       const delta = usageDelta(current, previousUsage);
       previousUsage = current;
-      if (slot && hasUsage(delta)) {
+      if (slot && hasUsage(delta) && (!usageKeys || usageKeys.has(slot.key))) {
         slot.usage = addUsage(slot.usage, delta);
         slot.tokenEvents += 1;
       }
@@ -791,6 +798,216 @@ function readRunEventUsageIntoTurns(events, byTurn) {
   }
 }
 
+function includedMissingUsageKeys(byTurn, throughNumber) {
+  const keys = new Set();
+  for (const slot of byTurn.values()) {
+    const number = stageNumber(slot.stage);
+    if (!number || number < 1 || number > throughNumber) {
+      continue;
+    }
+    if (!hasUsage(slot.usage)) {
+      keys.add(slot.key);
+    }
+  }
+  return keys;
+}
+
+function eventTypeCarriesActiveThread(eventType) {
+  const type = String(eventType ?? "");
+  return (
+    type === "thread.started" ||
+    type === "ralph.prompt" ||
+    type === "ralph.goal" ||
+    type === "codex.session.token_count" ||
+    type.startsWith("item.") ||
+    type.startsWith("turn.")
+  );
+}
+
+function threadIdsForTurnKeys(events, byTurn, wantedKeys) {
+  if (!(wantedKeys instanceof Set) || !wantedKeys.size) {
+    return [];
+  }
+  const attempts = buildRawTurnAttemptWindows(events);
+  const threadIds = new Set();
+  for (const record of events) {
+    if (!eventTypeCarriesActiveThread(record.eventType)) {
+      continue;
+    }
+    const threadId = eventThreadId(record);
+    if (!threadId) {
+      continue;
+    }
+    const turn = record.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const time = Date.parse(record.recordedAt ?? "");
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    const key = attempt?.key ?? String(turn);
+    if (wantedKeys.has(key) && byTurn.has(key)) {
+      threadIds.add(threadId);
+    }
+  }
+  return [...threadIds];
+}
+
+function sessionFileStats(sessionFiles) {
+  const stats = [];
+  for (const [threadId, files] of sessionFiles.entries()) {
+    for (const filePath of files) {
+      try {
+        const stat = fs.statSync(filePath);
+        stats.push({
+          threadId,
+          filePath,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+        });
+      } catch (_) {
+        stats.push({
+          threadId,
+          filePath,
+          missing: true,
+        });
+      }
+    }
+  }
+  return stats.sort((a, b) =>
+    a.threadId.localeCompare(b.threadId) ||
+    a.filePath.localeCompare(b.filePath));
+}
+
+function sessionStatsCover(cached, requested) {
+  if (!Array.isArray(cached) || !Array.isArray(requested) || cached.length < requested.length) {
+    return false;
+  }
+  const cachedByKey = new Map(cached.map((entry) => [`${entry.threadId}\0${entry.filePath}`, entry]));
+  for (const b of requested) {
+    const a = cachedByKey.get(`${b.threadId}\0${b.filePath}`);
+    if (
+      !a ||
+      a.threadId !== b.threadId ||
+      a.filePath !== b.filePath ||
+      a.size !== b.size ||
+      a.missing !== b.missing ||
+      Math.abs((a.mtimeMs ?? 0) - (b.mtimeMs ?? 0)) > 1
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cachedSlotMatches(slot, cached) {
+  return (
+    slot &&
+    cached &&
+    slot.turn === cached.turn &&
+    slot.attemptIndex === cached.attemptIndex &&
+    slot.startedAtMs === cached.startedAtMs &&
+    slot.stage === cached.stage &&
+    slot.phase === cached.phase
+  );
+}
+
+function applySessionFallbackCache(cache, byTurn, missingUsageKeys, sessionStats, throughNumber) {
+  if (
+    !cache ||
+    cache.version !== 1 ||
+    !Number.isInteger(cache.throughNumber) ||
+    cache.throughNumber < throughNumber ||
+    !sessionStatsCover(cache.sessionFiles, sessionStats) ||
+    !Array.isArray(cache.slots)
+  ) {
+    return false;
+  }
+  const slotsByKey = new Map(cache.slots.map((slot) => [slot.key, slot]));
+  for (const key of missingUsageKeys) {
+    const slot = byTurn.get(key);
+    const cached = slotsByKey.get(key);
+    if (!cachedSlotMatches(slot, cached)) {
+      return false;
+    }
+  }
+  for (const key of missingUsageKeys) {
+    const slot = byTurn.get(key);
+    const cached = slotsByKey.get(key);
+    slot.usage = addUsage(slot.usage, cached.usage);
+    slot.durationMs += Math.max(0, Number(cached.durationMs ?? 0));
+    slot.sessionFirstMs = cached.sessionFirstMs ?? slot.sessionFirstMs;
+    slot.sessionLastMs = cached.sessionLastMs ?? slot.sessionLastMs;
+    slot.sessionActiveMs += Math.max(0, Number(cached.sessionActiveMs ?? 0));
+    slot.sessionLastActivityMs = cached.sessionLastActivityMs ?? slot.sessionLastActivityMs;
+    slot.hasTaskComplete = Boolean(slot.hasTaskComplete || cached.hasTaskComplete);
+    slot.hasSessionActivity = Boolean(slot.hasSessionActivity || cached.hasSessionActivity);
+    slot.hasUsageLimitedGoal = Boolean(slot.hasUsageLimitedGoal || cached.hasUsageLimitedGoal);
+    slot.goalStatus = cached.goalStatus ?? slot.goalStatus;
+    slot.goalTimeUsedMs = Math.max(slot.goalTimeUsedMs, Number(cached.goalTimeUsedMs ?? 0));
+    slot.tokenEvents += Math.max(0, Number(cached.tokenEvents ?? 0));
+  }
+  return true;
+}
+
+function readSessionFallbackCache(cachePath, byTurn, missingUsageKeys, sessionStats, throughNumber) {
+  if (!fs.existsSync(cachePath)) {
+    return false;
+  }
+  try {
+    const cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    return applySessionFallbackCache(cache, byTurn, missingUsageKeys, sessionStats, throughNumber);
+  } catch (_) {
+    return false;
+  }
+}
+
+function writeSessionFallbackCache(cachePath, runFilePath, byTurn, usageKeys, sessionStats, throughNumber) {
+  const slots = [...usageKeys]
+    .map((key) => byTurn.get(key))
+    .filter(Boolean)
+    .map((slot) => ({
+      key: slot.key,
+      turn: slot.turn,
+      attemptIndex: slot.attemptIndex,
+      startedAtMs: slot.startedAtMs,
+      stage: slot.stage,
+      phase: slot.phase,
+      usage: normalizeUsage(slot.usage) ?? emptyUsage(),
+      durationMs: slot.durationMs,
+      sessionFirstMs: slot.sessionFirstMs,
+      sessionLastMs: slot.sessionLastMs,
+      sessionActiveMs: slot.sessionActiveMs,
+      sessionLastActivityMs: slot.sessionLastActivityMs,
+      hasTaskComplete: slot.hasTaskComplete,
+      hasSessionActivity: slot.hasSessionActivity,
+      hasUsageLimitedGoal: slot.hasUsageLimitedGoal,
+      goalStatus: slot.goalStatus,
+      goalTimeUsedMs: slot.goalTimeUsedMs,
+      tokenEvents: slot.tokenEvents,
+    }));
+  try {
+    const runStat = fs.statSync(runFilePath);
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(
+      cachePath,
+      `${JSON.stringify({
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        throughNumber,
+        runFile: {
+          filePath: runFilePath,
+          size: runStat.size,
+          mtimeMs: runStat.mtimeMs,
+        },
+        sessionFiles: sessionStats,
+        slots,
+      })}\n`,
+    );
+  } catch (_) {
+    // The cache is only an optimization; ignore failures.
+  }
+}
+
 function applyRunGoalStatuses(events, byTurn) {
   const attempts = buildRawTurnAttemptWindows(events);
   for (const record of events) {
@@ -849,15 +1066,25 @@ async function summarizeRun(run, options) {
   const byTurn = buildTurnMeta(events);
   const resolveTurn = buildTurnResolver(events);
   const threadIds = [...new Set(events.map(eventThreadId).filter(Boolean))];
-  const sessionFiles = findSessionFiles(options.codexDir, threadIds);
-
-  for (const threadId of threadIds) {
-    for (const sessionFile of (sessionFiles.get(threadId) ?? []).sort()) {
-      await readSessionUsageIntoTurns(sessionFile, byTurn, resolveTurn);
-    }
-  }
 
   readRunEventUsageIntoTurns(events, byTurn);
+  const missingUsageKeys = includedMissingUsageKeys(byTurn, options.throughNumber);
+  if (missingUsageKeys.size) {
+    const missingThreadIds = threadIdsForTurnKeys(events, byTurn, missingUsageKeys);
+    const fallbackThreadIds = missingThreadIds.length ? missingThreadIds : threadIds;
+    const sessionFiles = findSessionFiles(options.codexDir, fallbackThreadIds);
+    const stats = sessionFileStats(sessionFiles);
+    const cachePath = compareCachePath(filePath);
+    const usedCache = readSessionFallbackCache(cachePath, byTurn, missingUsageKeys, stats, options.throughNumber);
+    if (!usedCache) {
+      for (const threadId of fallbackThreadIds) {
+        for (const sessionFile of (sessionFiles.get(threadId) ?? []).sort()) {
+          await readSessionUsageIntoTurns(sessionFile, byTurn, resolveTurn, { usageKeys: missingUsageKeys });
+        }
+      }
+      writeSessionFallbackCache(cachePath, filePath, byTurn, missingUsageKeys, stats, options.throughNumber);
+    }
+  }
   applyRunGoalStatuses(events, byTurn);
   fillDurationFallbacks(events, byTurn);
 
