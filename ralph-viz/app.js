@@ -359,7 +359,7 @@ function codexDetailSummaryHtml(detail) {
     return "Ralph only";
   }
   if (detail.mode === "all") {
-    return "All Codex";
+    return "All detail";
   }
   if (detail.mode === "turns") {
     const turns = Array.isArray(detail.turns) ? detail.turns.join(", ") : "";
