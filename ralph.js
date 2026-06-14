@@ -874,7 +874,12 @@ function normalizeRenderedPrompt(value) {
 }
 
 function attachPortableGoalPrompt(prompt, goal) {
-  if (!goal || CONFIG.provider === "codex") {
+  if (!goal) {
+    return prompt;
+  }
+
+  const isPortableGoal = goal.provider === "ralph-portable";
+  if (CONFIG.provider === "codex" && !isPortableGoal) {
     return prompt;
   }
 
@@ -893,7 +898,9 @@ function attachPortableGoalPrompt(prompt, goal) {
     "## Ralph Portable Goal",
     "",
     "This is the active Ralph loop goal. Treat it as mandatory state for this turn.",
-    "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
+    CONFIG.provider === "codex"
+      ? "Ralph will verify the external checks after this turn; keep working until the goal and prompt criteria are actually satisfied."
+      : "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
     "",
     goal.objective,
   ].join("\n"));
@@ -2135,38 +2142,36 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
     return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
   }
 
-  return withCodexAppServer(async (client) => {
-    let activeThreadId = threadId;
-    let startedThread = false;
+  if (!threadId) {
+    log("Using portable loop goal for new Codex exec thread; no local rollout exists yet.");
+    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  }
 
-    if (!activeThreadId) {
-      const response = await client.request("thread/start", buildAppServerThreadStartParams());
-      activeThreadId = response?.thread?.id ?? null;
-      if (!activeThreadId) {
-        throw new Error(`thread/start did not return a thread id: ${JSON.stringify(response)}`);
+  try {
+    return await withCodexAppServer(async (client) => {
+      const activeThreadId = threadId;
+      await client.request("thread/goal/clear", { threadId: activeThreadId });
+
+      const params = {
+        threadId: activeThreadId,
+        objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
+        status: "active",
+      };
+      if (CONFIG.goalTokenBudget != null) {
+        params.tokenBudget = CONFIG.goalTokenBudget;
       }
-      startedThread = true;
-      log(`Pre-created Codex thread ${activeThreadId} for loop goals`);
-    }
 
-    await client.request("thread/goal/clear", { threadId: activeThreadId });
-
-    const params = {
-      threadId: activeThreadId,
-      objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
-      status: "active",
-    };
-    if (CONFIG.goalTokenBudget != null) {
-      params.tokenBudget = CONFIG.goalTokenBudget;
-    }
-
-    const response = await client.request("thread/goal/set", params);
-    if (!response?.goal) {
-      throw new Error(`thread/goal/set did not return a goal: ${JSON.stringify(response)}`);
-    }
-    log(`Set Codex loop goal: ${previewText(response.goal.objective)}`);
-    return { threadId: activeThreadId, goal: response.goal, startedThread };
-  });
+      const response = await client.request("thread/goal/set", params);
+      if (!response?.goal) {
+        throw new Error(`thread/goal/set did not return a goal: ${JSON.stringify(response)}`);
+      }
+      log(`Set Codex loop goal: ${previewText(response.goal.objective)}`);
+      return { threadId: activeThreadId, goal: response.goal, startedThread: false };
+    });
+  } catch (error) {
+    log(`Failed to set Codex loop goal; using portable prompt goal: ${formatErrorMessage(error)}`);
+    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  }
 }
 
 async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
@@ -2203,14 +2208,15 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
   } catch (error) {
     log(`Failed to mark Codex loop goal complete: ${formatErrorMessage(error)}`);
   }
+  await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
 }
 
 async function preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
-  // Antigravity and Claude mint their own conversation/session ids on the first
-  // turn, so leave the thread id unset until the provider reports it.
+  // These providers mint their own conversation/session ids on the first turn,
+  // so leave the thread id unset until the provider reports it.
   const activeThreadId =
     threadId ??
-    (CONFIG.provider === "antigravity" || CONFIG.provider === "claude"
+    (CONFIG.provider === "antigravity" || CONFIG.provider === "claude" || CONFIG.provider === "codex"
       ? null
       : generateProviderThreadId(CONFIG.provider));
   const startedThread = !threadId;
