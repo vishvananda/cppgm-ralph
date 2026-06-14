@@ -199,6 +199,7 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
 
   const resolveTurnNumber = buildSessionTurnResolver(events);
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
+  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(withRunProgress);
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
@@ -2171,9 +2172,16 @@ function inferThreadIdsForDetail(filePath, events, selectedWindows, detailOption
 }
 
 function mergeEventStreams(primary, secondary) {
+  const primaryItemCardStreams = primaryItemCardStreamKeys(primary);
   const seen = new Set(primary.map(eventKey));
   const merged = [...primary];
   for (const event of secondary) {
+    if (
+      isDisplayItemCardEvent(event) &&
+      primaryItemCardStreams.has(eventTurnThreadKey(event))
+    ) {
+      continue;
+    }
     const key = eventKey(event);
     if (!seen.has(key)) {
       seen.add(key);
@@ -2181,6 +2189,45 @@ function mergeEventStreams(primary, secondary) {
     }
   }
   return merged.sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+}
+
+function primaryItemCardStreamKeys(events) {
+  const keys = new Set();
+  for (const event of events ?? []) {
+    if (isDisplayItemCardEvent(event)) {
+      keys.add(eventTurnThreadKey(event));
+    }
+  }
+  return keys;
+}
+
+function eventTurnThreadKey(record) {
+  return [
+    record?.threadId ?? "",
+    Number.isInteger(record?.turnNumber) && record.turnNumber > 0 ? record.turnNumber : "setup",
+  ].join("|");
+}
+
+function isDisplayItemCardEvent(record) {
+  const item = record?.event?.item;
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  if (record?.eventType === "item.started" && item.type === "command_execution") {
+    return true;
+  }
+  if (record?.eventType !== "item.completed") {
+    return false;
+  }
+  return [
+    "agent_message",
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "reasoning",
+    "todo_list",
+    "web_search",
+  ].includes(item.type);
 }
 
 function eventKey(record) {
@@ -2797,7 +2844,7 @@ async function readCachedClosedCodexSessionWindow(filePath, threadId, resolveTur
   const cachePath = codexSessionWindowCachePath(filePath, threadId, readOptions, window);
   const cached = cachePath ? await readCodexSessionWindowCache(cachePath, stat) : null;
   if (cached) {
-    return cached;
+    return filterSuppressedSessionEvents(cached, readOptions);
   }
 
   const windowOptions = {
@@ -2907,6 +2954,7 @@ function codexSessionWindowCachePath(filePath, threadId, readOptions, window) {
     endTime: window.endTime,
     maxEventsPerTurn: readOptions.maxEventsPerTurn ?? null,
     outputLimit: readOptions.outputLimit ?? null,
+    suppressedItemCardStreams: [...(readOptions.suppressedItemCardStreams ?? [])].sort(),
   });
   const digest = createHash("sha256").update(key).digest("hex");
   return path.join(RALPH_DIR, CODEX_SESSION_WINDOW_CACHE_DIR, `${digest}.json`);
@@ -2935,6 +2983,9 @@ function processCodexSessionLine(rawLine, readOptions, context, events) {
   } catch (_) {
     return "continue";
   }
+  if (shouldSkipSuppressedSessionResponseItem(record, readOptions, context)) {
+    return "continue";
+  }
   const converted = convertCodexSessionRecord(record, context);
   if (!converted) {
     return "continue";
@@ -2949,9 +3000,45 @@ function processCodexSessionLine(rawLine, readOptions, context, events) {
   if (readOptions.skipTokenCounts && converted.eventType === "codex.session.token_count") {
     return "continue";
   }
+  if (shouldSkipSuppressedSessionItemCard(converted, readOptions)) {
+    return "continue";
+  }
   emitTokenBaselineIfNeeded(converted, readOptions, context, events);
   events.push(compactConvertedSessionEvent(converted, readOptions.outputLimit));
   return "continue";
+}
+
+function shouldSkipSuppressedSessionResponseItem(record, readOptions, context) {
+  if (
+    record?.type !== "response_item" ||
+    !(readOptions?.suppressedItemCardStreams instanceof Set) ||
+    readOptions.suppressedItemCardStreams.size === 0
+  ) {
+    return false;
+  }
+  const turnNumber = context.resolveTurnNumber(record.timestamp);
+  return readOptions.suppressedItemCardStreams.has(eventTurnThreadKey({
+    threadId: context.threadId,
+    turnNumber,
+  }));
+}
+
+function shouldSkipSuppressedSessionItemCard(record, readOptions) {
+  return (
+    readOptions?.suppressedItemCardStreams instanceof Set &&
+    readOptions.suppressedItemCardStreams.has(eventTurnThreadKey(record)) &&
+    isDisplayItemCardEvent(record)
+  );
+}
+
+function filterSuppressedSessionEvents(events, readOptions) {
+  if (
+    !(readOptions?.suppressedItemCardStreams instanceof Set) ||
+    readOptions.suppressedItemCardStreams.size === 0
+  ) {
+    return events;
+  }
+  return (events ?? []).filter((event) => !shouldSkipSuppressedSessionItemCard(event, readOptions));
 }
 
 function rememberTokenBaseline(record, readOptions, context) {
