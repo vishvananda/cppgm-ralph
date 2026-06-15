@@ -1,12 +1,15 @@
 const runSelect = document.getElementById("runSelect");
 const refreshRuns = document.getElementById("refreshRuns");
 const reloadRun = document.getElementById("reloadRun");
+const viewerMode = document.getElementById("viewerMode");
 const codexDetail = document.getElementById("codexDetail");
 const summaryTitle = document.getElementById("summaryTitle");
 const timelineTitle = document.getElementById("timelineTitle");
 const summaryEl = document.getElementById("summary");
 const timelineEl = document.getElementById("timeline");
 const progressDock = document.getElementById("progressDock");
+const runDocsCard = document.getElementById("runDocsCard");
+const runDocsEl = document.getElementById("runDocs");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
@@ -27,6 +30,7 @@ const SCROLL_DEBUG_DEFAULT = false;
 const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
 const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v1";
 const PROGRESS_BEST_CACHE_LIMIT = 600;
+const STATIC_DATA_ROOT = staticDataRootFromUrl();
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -37,6 +41,12 @@ const API_PRICE_RATES = new Map([
   ["claude-haiku-4-5", { input: 1.00, cachedInput: 0.10, output: 5.00 }],
 ]);
 
+function staticDataRootFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const root = params.get("data")?.trim();
+  return root ? root.replace(/\/+$/, "") : "data";
+}
+
 const state = {
   runs: [],
   selectedRun: null,
@@ -46,6 +56,13 @@ const state = {
   events: [],
   combinedRuns: [],
   raw: [],
+  staticMode: false,
+  staticManifest: null,
+  staticRunSummaries: new Map(),
+  staticRunDocs: new Map(),
+  staticComparison: null,
+  compareThrough: null,
+  selectedDocName: null,
   autoRefreshTimer: null,
   openTurnReloadTimer: null,
   refreshInFlight: false,
@@ -3941,6 +3958,8 @@ function getUrlParams() {
   return {
     run: p.get("run"),
     view: p.get("view"),
+    page: p.get("page"),
+    doc: p.get("doc"),
     turns: p.get("turns")?.split(",").filter(Boolean) ?? [],
   };
 }
@@ -3983,6 +4002,123 @@ function scheduleOpenTurnDetailReload() {
 
 // --- Data loading ---
 
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Load failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchText(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Load failed: ${response.status}`);
+  }
+  return response.text();
+}
+
+function staticDataPath(relativePath) {
+  return `${STATIC_DATA_ROOT}/${String(relativePath ?? "").replace(/^\/+/, "")}`;
+}
+
+function staticModeForced() {
+  return new URLSearchParams(window.location.search).get("static") === "1";
+}
+
+async function loadRunCatalog() {
+  if (!state.staticMode && !staticModeForced()) {
+    try {
+      const [stateData, data] = await Promise.all([
+        fetchJson("/api/state"),
+        fetchJson("/api/runs"),
+      ]);
+      state.staticMode = false;
+      document.body.classList.toggle("is-static-viz", false);
+      return {
+        currentThread: stateData.currentThread ?? null,
+        runs: data.runs ?? [],
+      };
+    } catch (error) {
+      console.warn("live Ralph API unavailable; trying static export data", error);
+    }
+  }
+
+  const manifest = await fetchJson(staticDataPath("runs.json"));
+  state.staticMode = true;
+  state.staticManifest = manifest;
+  document.body.classList.toggle("is-static-viz", true);
+  if (autoRefreshToggle) {
+    autoRefreshToggle.checked = false;
+  }
+  stopAutoRefresh();
+  return {
+    currentThread: manifest.currentRun ?? null,
+    runs: manifest.runs ?? [],
+  };
+}
+
+async function loadStaticRunSummary(run) {
+  if (!run?.dataPath) {
+    throw new Error("Static run is missing dataPath");
+  }
+  if (state.staticRunSummaries.has(run.id)) {
+    return state.staticRunSummaries.get(run.id);
+  }
+  const summary = await fetchJson(staticDataPath(run.dataPath));
+  state.staticRunSummaries.set(run.id, summary);
+  return summary;
+}
+
+async function loadStaticRunData(id, detailParams) {
+  const run = state.runs.find((candidate) => candidate.id === id);
+  if (!run) {
+    throw new Error(`Run not found: ${id}`);
+  }
+  const summary = await loadStaticRunSummary(run);
+  const turnEntries = selectStaticTurnEntries(summary.turns ?? [], detailParams);
+  const turnPayloads = await Promise.all(turnEntries.map((turn) => fetchJson(staticDataPath(turn.path))));
+  const events = turnPayloads.flatMap((payload) => payload.events ?? []);
+  return {
+    events,
+    shapeUsage: summary.shapeUsage ?? null,
+    codexDetail: staticCodexDetail(detailParams, turnEntries),
+    staticSummary: summary,
+  };
+}
+
+function selectStaticTurnEntries(turns, detailParams) {
+  const sorted = [...turns].sort((a, b) => compareTurnKeys(a.turn, b.turn));
+  const mode = detailParams.get("codex") ?? "tail";
+  if (mode === "all" || mode === "none") {
+    return sorted;
+  }
+  if (mode === "turns") {
+    const wanted = new Set((detailParams.get("turns") ?? "").split(",").filter(Boolean));
+    return sorted.filter((turn) => wanted.has(String(turn.turn)));
+  }
+  const tailTurns = Math.max(1, Number.parseInt(detailParams.get("tailTurns") ?? "2", 10) || 2);
+  const numeric = sorted.filter((turn) => turn.turn !== "setup").slice(-tailTurns);
+  return numeric.length ? numeric : sorted.slice(-tailTurns);
+}
+
+function compareTurnKeys(a, b) {
+  if (a === "setup") return b === "setup" ? 0 : -1;
+  if (b === "setup") return 1;
+  return Number.parseInt(a, 10) - Number.parseInt(b, 10);
+}
+
+function staticCodexDetail(detailParams, turns) {
+  const mode = detailParams.get("codex") ?? "tail";
+  if (mode === "tail") {
+    return { mode, tailTurns: Number.parseInt(detailParams.get("tailTurns") ?? "2", 10) || 2, static: true };
+  }
+  if (mode === "turns") {
+    return { mode, turns: turns.map((turn) => turn.turn), static: true };
+  }
+  return { mode, static: true };
+}
+
 function codexDetailQueryParams() {
   const params = new URLSearchParams();
   const value = codexDetail?.value ?? "tail:2";
@@ -4021,21 +4157,30 @@ function requestedCombinedViewFromUrl() {
 }
 
 function initializeViewControls() {
+  if (viewerMode) {
+    const page = getUrlParams().page;
+    viewerMode.value = ["compare", "runs"].includes(page) ? page : "runs";
+  }
   if (combinedViewToggle) {
     combinedViewToggle.checked = requestedCombinedViewFromUrl();
   }
 }
 
+function currentViewerMode() {
+  return viewerMode?.value ?? "runs";
+}
+
+function isRunsPage() {
+  return currentViewerMode() === "runs";
+}
+
 function isCombinedView() {
-  return combinedViewToggle?.checked ?? requestedCombinedViewFromUrl();
+  return isRunsPage() && (combinedViewToggle?.checked ?? requestedCombinedViewFromUrl());
 }
 
 async function loadRuns(options = {}) {
-  const [stateData, data] = await Promise.all([
-    fetch("/api/state").then(r => r.json()),
-    fetch("/api/runs").then(r => r.json()),
-  ]);
-  state.currentRun = stateData.currentThread ?? null;
+  const data = await loadRunCatalog();
+  state.currentRun = data.currentThread ?? null;
   state.runs = data.runs ?? [];
 
   runSelect.innerHTML = "";
@@ -4072,6 +4217,12 @@ async function loadRuns(options = {}) {
     : urlRun && state.runs.some(r => r.id === urlRun) ? urlRun
     : state.runs[0].id;
   runSelect.value = preferred;
+
+  if (currentViewerMode() === "compare") {
+    await renderComparisonView();
+    return;
+  }
+
   if (isCombinedView()) {
     await loadCombinedRuns({
       scrollSnapshot: options.scrollSnapshot,
@@ -4086,16 +4237,16 @@ async function loadRuns(options = {}) {
 
 async function loadCombinedRuns(options = {}) {
   setCombinedModeActive(true);
+  hideRunDocsPanel();
   setViewTitles("Active Runs", "Recent Cards");
   state.selectedRun = runSelect.value || state.selectedRun;
-  const activeRuns = state.runs.filter(isActiveRunMeta);
+  const activeRuns = state.staticMode ? staticCombinedRuns() : state.runs.filter(isActiveRunMeta);
   const query = combinedRunQueryParams().toString();
   const loaded = await Promise.all(activeRuns.map(async (run) => {
     try {
-      const data = await fetch(`/api/run/${encodeURIComponent(run.id)}?${query}`).then(r => {
-        if (!r.ok) throw new Error(`Load failed: ${r.status}`);
-        return r.json();
-      });
+      const data = state.staticMode
+        ? await loadStaticRunData(run.id, combinedRunQueryParams())
+        : await fetchJson(`/api/run/${encodeURIComponent(run.id)}?${query}`);
       const events = data.events ?? [];
       const shapeUsage = normalizeShapeUsage(data.shapeUsage);
       return {
@@ -4139,16 +4290,16 @@ async function loadCombinedRuns(options = {}) {
 async function loadRun(id, options = {}) {
   if (!id) return;
   setCombinedModeActive(false);
+  hideRunDocsPanel();
   setViewTitles("Summary", "Turns");
   scrollDebug("load-run-start", { id, hasScrollSnapshot: Boolean(options.scrollSnapshot) });
   state.selectedRun = id;
   setUrlParam("run", id);
   const detailParams = codexDetailQueryParams();
   const detailQuery = detailParams.toString();
-  const data = await fetch(`/api/run/${encodeURIComponent(id)}${detailQuery ? `?${detailQuery}` : ""}`).then(r => {
-    if (!r.ok) throw new Error(`Load failed: ${r.status}`);
-    return r.json();
-  });
+  const data = state.staticMode
+    ? await loadStaticRunData(id, detailParams)
+    : await fetchJson(`/api/run/${encodeURIComponent(id)}${detailQuery ? `?${detailQuery}` : ""}`);
 
   state.events = data.events ?? [];
   state.combinedRuns = [];
@@ -4167,6 +4318,7 @@ async function loadRun(id, options = {}) {
     });
   }
   renderSummary(state.events);
+  await renderRunDocsPanel(state.runs.find((run) => run.id === id) ?? null, data.staticSummary ?? null);
   scrollDebug("load-run-before-render", {
     id,
     eventCount: state.events.length,
@@ -4176,6 +4328,337 @@ async function loadRun(id, options = {}) {
   renderTimeline(state.events);
   restoreScrollAfterRender(scrollSnapshot, { immediate: true });
   scrollDebug("load-run-after-render", { id, eventCount: state.events.length });
+}
+
+function staticCombinedRuns() {
+  return state.runs.slice(0, 6);
+}
+
+async function renderComparisonView() {
+  setCombinedModeActive(false);
+  hideRunDocsPanel();
+  setViewTitles("Comparison", "PA Costs");
+  state.events = [];
+  state.combinedRuns = [];
+  state.shapeUsage = null;
+  state.codexDetail = null;
+  state.raw = [];
+  if (!state.staticMode) {
+    summaryEl.innerHTML = '<div class="summary-wide muted">Comparison data is available in static exports.</div>';
+    timelineEl.innerHTML = "";
+    eventCountEl.textContent = "";
+    if (progressDock) {
+      progressDock.innerHTML = '<span class="muted">No static comparison data</span>';
+      updateProgressDockSpace();
+    }
+    return;
+  }
+  const comparison = await loadStaticComparison();
+  if (!comparison) {
+    summaryEl.innerHTML = '<div class="summary-wide muted">No comparison data exported.</div>';
+    timelineEl.innerHTML = "";
+    eventCountEl.textContent = "";
+    return;
+  }
+  const maxPa = comparison.rows?.length ?? 0;
+  const requested = Number.parseInt(state.compareThrough ?? maxPa, 10);
+  const through = Math.max(1, Math.min(maxPa, Number.isFinite(requested) ? requested : maxPa));
+  state.compareThrough = through;
+  const rows = comparison.rows.slice(0, through);
+  const runOrder = comparisonRunOrder(comparison.runs);
+  const orderedRuns = runOrder.map((index) => comparison.runs[index]);
+  const totals = runOrder.map((index) => comparisonTotalForRows(rows, index));
+  const layoutNotes = comparison.assignmentLayoutNotes?.length
+    ? comparison.assignmentLayoutNotes.join(" ")
+    : "";
+  summaryEl.innerHTML = `
+    <div><strong>through</strong><input id="compareThrough" class="compact-number" type="number" min="1" max="${maxPa}" value="${through}" /></div>
+    <div><strong>runs</strong>${fmtInt(comparison.runs.length)}</div>
+    <div><strong>generated</strong>${fmt(comparison.generatedAt)}</div>
+    <div class="summary-wide"><strong>pricing</strong>${escapeHtml(comparison.runs.map((run) => `${run.label}=${run.model ?? "provider"}`).join(", "))}</div>
+    ${layoutNotes ? `<div class="summary-wide"><strong>layouts</strong>${escapeHtml(layoutNotes)}</div>` : ""}
+  `;
+  const input = document.getElementById("compareThrough");
+  input?.addEventListener("change", () => {
+    state.compareThrough = Number.parseInt(input.value, 10);
+    renderComparisonView().catch((error) => console.error("comparison render failed", error));
+  });
+
+  const table = document.createElement("table");
+  table.className = "comparison-table";
+  const header = document.createElement("thead");
+  const groups = comparisonLayoutGroups(orderedRuns);
+  header.innerHTML = `
+    <tr class="comparison-layout-row">
+      <th rowspan="2">PA</th>
+      ${groups.map((group) => `<th colspan="${group.count}" class="${group.boundary ? "comparison-layout-boundary" : ""}">${escapeHtml(group.label)}</th>`).join("")}
+    </tr>
+    <tr>
+      ${orderedRuns.map((run, position) => `<th class="${comparisonBoundaryClass(position, orderedRuns)}">${escapeHtml(run.label)}</th>`).join("")}
+    </tr>
+  `;
+  table.append(header);
+  const body = document.createElement("tbody");
+  const totalRow = document.createElement("tr");
+  totalRow.className = "comparison-total";
+  totalRow.innerHTML = `<th>Total</th>${totals.map((total, position) => `<td class="${comparisonBoundaryClass(position, orderedRuns)}">${comparisonCellHtml(total)}</td>`).join("")}`;
+  body.append(totalRow);
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <th>${comparisonPaCellHtml(row.pa, comparison.runs, runOrder)}</th>
+      ${runOrder.map((index, position) => `<td class="${comparisonBoundaryClass(position, orderedRuns)}">${comparisonCellHtml(row.runs[index])}</td>`).join("")}
+    `;
+    body.append(tr);
+  }
+  table.append(body);
+  timelineEl.replaceChildren(table);
+  eventCountEl.textContent = `${fmtInt(rows.length)} PAs / ${fmtInt(comparison.runs.length)} runs`;
+  if (progressDock) {
+    progressDock.innerHTML = `
+      <strong>Compare</strong>
+      <span class="dock-main">through pa${fmtInt(through)}</span>
+      <span class="dock-meta">${fmtInt(comparison.runs.length)} runs</span>
+    `;
+    updateProgressDockSpace();
+  }
+}
+
+async function loadStaticComparison() {
+  if (state.staticComparison) {
+    return state.staticComparison;
+  }
+  const comparisonEntry = state.staticManifest?.comparisons?.[0];
+  if (!comparisonEntry?.path) {
+    return null;
+  }
+  state.staticComparison = await fetchJson(staticDataPath(comparisonEntry.path));
+  return state.staticComparison;
+}
+
+function comparisonRunOrder(runs) {
+  const layoutRank = new Map([["v1", 0], ["v2", 1]]);
+  return runs
+    .map((run, index) => ({
+      index,
+      rank: layoutRank.get(run.layout?.id) ?? 99,
+    }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.index);
+}
+
+function comparisonLayoutGroups(orderedRuns) {
+  const groups = [];
+  for (const run of orderedRuns) {
+    const id = run.layout?.id ?? "unknown";
+    const label = run.layout?.label ?? id;
+    const current = groups.at(-1);
+    if (current?.id === id) {
+      current.count += 1;
+    } else {
+      groups.push({ id, label, count: 1, boundary: groups.length > 0 });
+    }
+  }
+  return groups;
+}
+
+function comparisonBoundaryClass(position, orderedRuns) {
+  if (position <= 0) {
+    return "";
+  }
+  const previous = orderedRuns[position - 1]?.layout?.id ?? "unknown";
+  const current = orderedRuns[position]?.layout?.id ?? "unknown";
+  return previous !== current ? "comparison-layout-boundary" : "";
+}
+
+function comparisonPaCellHtml(pa, runs, runOrder) {
+  const byLayout = new Map();
+  for (const index of runOrder) {
+    const run = runs[index];
+    const layoutId = run?.layout?.shortLabel ?? run?.layout?.id ?? "layout";
+    const title = run?.assignmentTitles?.[pa] ?? null;
+    if (title && !byLayout.has(layoutId)) {
+      byLayout.set(layoutId, title);
+    }
+  }
+  const uniqueTitles = new Set(byLayout.values());
+  if (uniqueTitles.size <= 1) {
+    return escapeHtml(pa);
+  }
+  return `
+    <div>${escapeHtml(pa)}</div>
+    <div class="comparison-pa-map">
+      ${[...byLayout.entries()].map(([layout, title]) => `<span>${escapeHtml(layout)}: ${escapeHtml(title)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function comparisonTotalForRows(rows, runIndex) {
+  return rows.reduce((total, row) => {
+    const summary = row.runs?.[runIndex];
+    return {
+      turns: [...total.turns, ...(summary?.turns ?? [])],
+      durationMs: total.durationMs + (summary?.durationMs ?? 0),
+      cost: total.cost + (summary?.cost ?? 0),
+      status: total.status === "partial" || summary?.status === "partial" ? "partial" : "complete",
+    };
+  }, { turns: [], durationMs: 0, cost: 0, status: "complete" });
+}
+
+function comparisonCellHtml(summary) {
+  const turns = Array.isArray(summary?.turns) ? summary.turns.length : 0;
+  const status = summary?.status ?? "n/a";
+  return `
+    <div>${escapeHtml(formatHhhMmSs(summary?.durationMs ?? 0))} / ${escapeHtml(formatUsd(summary?.cost ?? 0))}</div>
+    <div class="comparison-meta">${fmtInt(turns)} turn${turns === 1 ? "" : "s"} / ${escapeHtml(status)}</div>
+  `;
+}
+
+function formatHhhMmSs(durationMs) {
+  const seconds = Math.max(0, Math.round((durationMs ?? 0) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remaining = seconds % 60;
+  return `${String(hours).padStart(3, "0")}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+}
+
+function formatUsd(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "n/a";
+  }
+  return `$${amount.toFixed(2)}`;
+}
+
+function hideRunDocsPanel() {
+  if (runDocsCard) {
+    runDocsCard.hidden = true;
+  }
+  if (runDocsEl) {
+    runDocsEl.innerHTML = "";
+  }
+}
+
+async function renderRunDocsPanel(run, summary) {
+  if (!runDocsCard || !runDocsEl || !state.staticMode || !run || !summary) {
+    hideRunDocsPanel();
+    return;
+  }
+  const docs = await loadRunDocs(run, summary);
+  if (!docs.length) {
+    hideRunDocsPanel();
+    return;
+  }
+  const urlDoc = getUrlParams().doc;
+  const selectedDoc =
+    docs.find((doc) => doc.name === state.selectedDocName) ??
+    docs.find((doc) => doc.name === urlDoc) ??
+    preferredRunDoc(docs);
+  state.selectedDocName = selectedDoc?.name ?? null;
+  if (!selectedDoc) {
+    hideRunDocsPanel();
+    return;
+  }
+
+  const content = await fetchText(staticDataPath(selectedDoc.path));
+  const layout = run.assignmentLayout;
+  const groups = groupRunDocs(docs);
+  runDocsEl.innerHTML = `
+    <div class="run-docs-meta">
+      <span>${escapeHtml(run.label ?? run.id)}</span>
+      ${layout ? `<span>${escapeHtml(layout.label ?? layout.id)}</span>` : ""}
+      <span>${fmtInt(docs.length)} docs</span>
+    </div>
+    <div class="run-docs-body">
+      <nav class="run-docs-nav">${groups.map((group) => runDocGroupHtml(group, selectedDoc)).join("")}</nav>
+      <pre class="doc-content">${escapeHtml(prettyDocContent(content, selectedDoc))}</pre>
+    </div>
+  `;
+  for (const button of runDocsEl.querySelectorAll("[data-doc-name]")) {
+    button.addEventListener("click", () => {
+      state.selectedDocName = button.getAttribute("data-doc-name");
+      setUrlParam("doc", state.selectedDocName);
+      renderRunDocsPanel(run, summary).catch((error) => console.error("run docs render failed", error));
+    });
+  }
+  runDocsCard.hidden = false;
+}
+
+async function loadRunDocs(run, summary) {
+  if (state.staticRunDocs.has(run.id)) {
+    return state.staticRunDocs.get(run.id);
+  }
+  let docs = Array.isArray(summary.docs) ? summary.docs : [];
+  if (!docs.length && run.docsPath) {
+    try {
+      const index = await fetchJson(staticDataPath(run.docsPath));
+      docs = index.docs ?? [];
+    } catch (_) {
+      docs = [];
+    }
+  }
+  state.staticRunDocs.set(run.id, docs);
+  return docs;
+}
+
+function preferredRunDoc(docs) {
+  return (
+    docs.find((doc) => doc.name.endsWith(".config.json")) ??
+    docs.find((doc) => /implement.*\.md$/i.test(doc.name)) ??
+    docs.find((doc) => /\.md$/i.test(doc.name)) ??
+    docs[0] ??
+    null
+  );
+}
+
+function groupRunDocs(docs) {
+  const groups = [
+    { label: "Config", docs: [] },
+    { label: "Prompts", docs: [] },
+    { label: "Goals", docs: [] },
+    { label: "State", docs: [] },
+  ];
+  for (const doc of docs) {
+    if (doc.name.endsWith(".config.json")) {
+      groups[0].docs.push(doc);
+    } else if (/goal\.md$/i.test(doc.name) || /-goal\.md$/i.test(doc.name)) {
+      groups[2].docs.push(doc);
+    } else if (doc.name === "state.json" || doc.name === "current-goal.json") {
+      groups[3].docs.push(doc);
+    } else {
+      groups[1].docs.push(doc);
+    }
+  }
+  return groups.filter((group) => group.docs.length);
+}
+
+function runDocGroupHtml(group, selectedDoc) {
+  return `
+    <div class="run-doc-group">
+      <div class="run-doc-group-title">${escapeHtml(group.label)}</div>
+      ${group.docs.map((doc) => `
+        <button type="button" class="doc-tab ${doc.name === selectedDoc.name ? "is-selected" : ""}" data-doc-name="${escapeHtml(doc.name)}">
+          ${escapeHtml(shortDocName(doc.name))}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function shortDocName(name) {
+  return String(name ?? "")
+    .replace(/^(trusted|phases|fable|opus|spark)\./, "")
+    .replace(/\.md$/i, "")
+    .replace(/\.json$/i, "");
+}
+
+function prettyDocContent(content, doc) {
+  if (doc?.kind === "json" || /\.json$/i.test(doc?.name ?? "")) {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2);
+    } catch (_) {}
+  }
+  return content;
 }
 
 function setViewTitles(summaryText, timelineText) {
@@ -4632,6 +5115,9 @@ function scrollDebug(label, extra = {}) {
     extra,
   };
   console.debug("[ralph-viz scroll]", payload);
+  if (state.staticMode) {
+    return;
+  }
   const body = JSON.stringify(payload);
   if (navigator.sendBeacon) {
     try {
@@ -4755,6 +5241,18 @@ function renderTimelinePreservingScroll() {
   restoreScrollAfterRender(scrollSnapshot, { immediate: true });
 }
 
+function rerenderCurrentViewPreservingScroll() {
+  if (!isRunsPage()) {
+    loadRuns({
+      preserveSelection: true,
+      ignoreUrl: true,
+      scrollSnapshot: captureScrollSnapshot(),
+    }).catch((error) => console.error("view refresh failed", error));
+    return;
+  }
+  renderTimelinePreservingScroll();
+}
+
 async function refreshActiveRun() {
   if (!isAutoRefreshEnabled() || state.refreshInFlight) {
     scrollDebug("refresh-skipped", {
@@ -4796,6 +5294,10 @@ refreshRuns.addEventListener("click", () => loadRuns({
 }));
 reloadRun.addEventListener("click", () => {
   const scrollSnapshot = captureScrollSnapshot();
+  if (!isRunsPage()) {
+    loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
+    return;
+  }
   if (isCombinedView()) {
     loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
   } else {
@@ -4803,15 +5305,34 @@ reloadRun.addEventListener("click", () => {
   }
 });
 runSelect.addEventListener("change", e => {
+  if (currentViewerMode() === "compare") {
+    state.selectedRun = e.target.value;
+    setUrlParam("run", e.target.value);
+    return;
+  }
   if (combinedViewToggle?.checked) {
     combinedViewToggle.checked = false;
     setUrlParam("view", "run");
   }
   loadRun(e.target.value);
 });
+if (viewerMode) {
+  viewerMode.addEventListener("change", () => {
+    const mode = currentViewerMode();
+    setUrlParam("page", mode === "runs" ? null : mode);
+    loadRuns({
+      preserveSelection: true,
+      ignoreUrl: true,
+      scrollSnapshot: captureScrollSnapshot({ preferScrollTop: true }),
+    }).catch((error) => console.error("view mode change failed", error));
+  });
+}
 if (codexDetail) {
   codexDetail.addEventListener("change", () => {
     const scrollSnapshot = captureScrollSnapshot();
+    if (!isRunsPage()) {
+      return;
+    }
     if (isCombinedView()) {
       loadRuns({ preserveSelection: true, ignoreUrl: true, scrollSnapshot });
     } else {
@@ -4819,8 +5340,8 @@ if (codexDetail) {
     }
   });
 }
-eventFilter.addEventListener("input", renderTimelinePreservingScroll);
-hideNoiseToggle.addEventListener("change", renderTimelinePreservingScroll);
+eventFilter.addEventListener("input", rerenderCurrentViewPreservingScroll);
+hideNoiseToggle.addEventListener("change", rerenderCurrentViewPreservingScroll);
 if (combinedViewToggle) {
   combinedViewToggle.addEventListener("change", () => {
     setUrlParam("view", combinedViewToggle.checked ? null : "run");
@@ -4832,7 +5353,7 @@ if (combinedViewToggle) {
   });
 }
 if (fullViewToggle) {
-  fullViewToggle.addEventListener("change", renderTimelinePreservingScroll);
+  fullViewToggle.addEventListener("change", rerenderCurrentViewPreservingScroll);
 }
 window.addEventListener("scroll", handleObservedScroll, { passive: true });
 window.addEventListener("resize", scheduleProgressDockSpaceUpdate, { passive: true });
@@ -4852,7 +5373,7 @@ window.addEventListener("keydown", (event) => {
 });
 if (autoRefreshToggle) {
   autoRefreshToggle.addEventListener("change", () => {
-    renderTimelinePreservingScroll();
+    rerenderCurrentViewPreservingScroll();
     if (autoRefreshToggle.checked) {
       startAutoRefresh();
       refreshActiveRun();

@@ -8,12 +8,18 @@ import process from "node:process";
 import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  codexEventKey,
+  createCodexSessionTailer,
+} from "./codex-session-events.js";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
 const CODEX_GOAL_CONTINUATION_GRACE_MS = 60_000;
 const CODEX_SESSION_WATCH_TAIL_BYTES = 4 * 1024 * 1024;
+const CODEX_RESUME_STDOUT_SILENCE_MS = 5000;
+const CODEX_RESUME_SESSION_FALLBACK_POLL_MS = 1000;
 const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
 const CLAUDE_LIMIT_RETRY_MAX = 20;
 const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET_BUFFER_MS ?? 90_000);
@@ -3169,6 +3175,66 @@ class CodexThread {
   }
 }
 
+class AsyncLineQueue {
+  constructor() {
+    this.values = [];
+    this.waiters = [];
+    this.closed = false;
+    this.error = null;
+  }
+
+  push(value) {
+    if (this.closed || this.error) {
+      return;
+    }
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.resolve({ value, done: false });
+      return;
+    }
+    this.values.push(value);
+  }
+
+  close() {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.resolve({ value: undefined, done: true });
+    }
+  }
+
+  fail(error) {
+    if (this.error) {
+      return;
+    }
+    this.error = error;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(error);
+    }
+  }
+
+  next() {
+    if (this.values.length > 0) {
+      return Promise.resolve({ value: this.values.shift(), done: false });
+    }
+    if (this.error) {
+      return Promise.reject(this.error);
+    }
+    if (this.closed) {
+      return Promise.resolve({ value: undefined, done: true });
+    }
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
+    });
+  }
+
+  [Symbol.asyncIterator]() {
+    return this;
+  }
+}
+
 class CodexExec {
   constructor({ codexPath, configOverrides, env }) {
     this.codexPath = codexPath || "codex";
@@ -3286,24 +3352,117 @@ class CodexExec {
     child.stdin.write(args.input ?? "");
     child.stdin.end();
 
-    try {
+    const lineQueue = new AsyncLineQueue();
+    const seenEventKeys = new Set();
+    let threadStartedOnStdout = false;
+    let stdoutNonThreadEventCount = 0;
+    let lastStdoutEventMs = Date.now();
+    let sessionTailer = null;
+    let fallbackActivated = false;
+
+    const pushStdoutLine = (line) => {
+      let event = null;
+      try {
+        event = JSON.parse(line);
+      } catch (_) {
+        lineQueue.push(line);
+        return;
+      }
+
+      if (event.type === "thread.started") {
+        threadStartedOnStdout = true;
+      } else {
+        stdoutNonThreadEventCount += 1;
+      }
+      lastStdoutEventMs = Date.now();
+      seenEventKeys.add(codexEventKey(event));
+
+      // Once the session fallback is active, the rollout file is the more
+      // complete source for item cards. Keep terminal stdout events, but avoid
+      // duplicate item cards if stdout recovers later.
+      if (fallbackActivated && event.type?.startsWith?.("item.")) {
+        return;
+      }
+      lineQueue.push(line);
+    };
+
+    const startSessionFallback = () => {
+      if (fallbackActivated || !args.threadId) {
+        return;
+      }
+      fallbackActivated = true;
+      log(
+        `Codex resume stdout is quiet; backfilling events from session log for ${args.threadId}`,
+      );
+      sessionTailer = createCodexSessionTailer({
+        codexDir: CODEX_DIR,
+        threadId: args.threadId,
+        sinceMs: startedAtMs - 1000,
+        pollMs: CODEX_RESUME_SESSION_FALLBACK_POLL_MS,
+        seenKeys: seenEventKeys,
+        onEvent: (event) => {
+          lineQueue.push(JSON.stringify(event));
+        },
+        onError: (error) => {
+          log(`Codex session fallback read failed: ${error.message}`);
+        },
+      });
+      sessionTailer.start();
+    };
+
+    const fallbackTimer = args.threadId
+      ? setInterval(() => {
+          if (
+            threadStartedOnStdout &&
+            stdoutNonThreadEventCount === 0 &&
+            Date.now() - lastStdoutEventMs >= CODEX_RESUME_STDOUT_SILENCE_MS
+          ) {
+            startSessionFallback();
+          }
+        }, Math.min(1000, CODEX_RESUME_STDOUT_SILENCE_MS))
+      : null;
+    fallbackTimer?.unref?.();
+
+    const stdoutTask = (async () => {
       for await (const line of rl) {
         if (line.trim()) {
-          yield line;
+          pushStdoutLine(line);
         }
       }
-      if (spawnError) {
-        throw spawnError;
+    })();
+
+    const completionTask = (async () => {
+      try {
+        await stdoutTask;
+        if (spawnError) {
+          throw spawnError;
+        }
+        const { code, signal } = await exitPromise;
+        if (args.threadId && stdoutNonThreadEventCount === 0) {
+          startSessionFallback();
+        }
+        await sessionTailer?.flush();
+        if (codexSessionFailure) {
+          throw codexSessionFailure;
+        }
+        if ((code !== 0 || signal) && !expectedTaskCompleteTermination) {
+          const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+          throw new Error(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+        }
+        lineQueue.close();
+      } catch (error) {
+        lineQueue.fail(error);
       }
-      const { code, signal } = await exitPromise;
-      if (codexSessionFailure) {
-        throw codexSessionFailure;
+    })();
+
+    try {
+      for await (const line of lineQueue) {
+        yield line;
       }
-      if ((code !== 0 || signal) && !expectedTaskCompleteTermination) {
-        const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-        throw new Error(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
-      }
+      await completionTask;
     } finally {
+      fallbackTimer && clearInterval(fallbackTimer);
+      sessionTailer?.stop();
       stopTaskCompleteWatcher?.();
       rl.close();
       child.removeAllListeners();

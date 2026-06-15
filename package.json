@@ -7,6 +7,7 @@
     "start": "node ralph.js",
     "ralph": "node ralph.js",
     "ralph-viz": "node ralph-viz/server.js",
+    "export-viz": "node scripts/export-viz-static.js",
     "fork-run": "node scripts/fork-run.js",
     "compare-pa-costs": "node scripts/compare-pa-costs.js"
   },

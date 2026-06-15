@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ralph Run Viewer</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="page">
@@ -18,6 +18,12 @@
         <select id="runSelect"></select>
         <button id="refreshRuns">Refresh</button>
         <button id="reloadRun">Reload</button>
+        <div class="toolbar-sep"></div>
+        <label for="viewerMode">View</label>
+        <select id="viewerMode">
+          <option value="runs" selected>Runs</option>
+          <option value="compare">Compare</option>
+        </select>
         <div class="toolbar-sep"></div>
         <label for="codexDetail">Detail</label>
         <select id="codexDetail">
@@ -42,6 +48,11 @@
         <div id="summary" class="summary"></div>
       </section>
 
+      <section id="runDocsCard" class="card run-docs-card" hidden>
+        <h2>Run Config And Prompts</h2>
+        <div id="runDocs" class="run-docs"></div>
+      </section>
+
       <section class="card timeline-card">
         <h2 id="timelineTitle">Turns</h2>
         <div id="timeline" class="timeline"></div>
@@ -49,6 +60,6 @@
     </main>
 
     <div id="progressDock" class="progress-dock" aria-live="polite"></div>
-    <script src="/app.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>
