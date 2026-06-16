@@ -264,10 +264,83 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // log. In that case reading the session file again is duplicate work and can
   // dominate local page loads for very large active turns.
   if (primaryItemCardStreamKeys(responseBaseEvents).size > 0) {
-    return responseBaseEvents;
+    return appendLatestThreadUsageEvents(responseBaseEvents);
   }
 
   return null;
+}
+
+async function appendLatestThreadUsageEvents(events) {
+  const additions = [];
+  for (const threadId of inferThreadIdsFromRun("", events)) {
+    const usage = await readCodexThreadUsageFast(threadId);
+    if (!hasTokenUsage(usage)) {
+      continue;
+    }
+    const latest = latestEventForThread(events, threadId);
+    if (!latest) {
+      continue;
+    }
+    const latestExisting = latestTokenUsageForThread(events, threadId);
+    if (latestExisting && !usageDominates(usage, latestExisting)) {
+      continue;
+    }
+    additions.push({
+      recordedAt: new Date(Math.max(Date.parse(latest.recordedAt ?? "") || Date.now(), Date.now())).toISOString(),
+      threadId,
+      turnNumber: latest.turnNumber,
+      eventType: "codex.session.token_count",
+      event: {
+        type: "codex.session.token_count",
+        usage,
+        fast: true,
+      },
+    });
+  }
+  return additions.length ? mergeEventStreams(events, additions) : events;
+}
+
+function latestEventForThread(events, threadId) {
+  let latest = null;
+  for (const event of events) {
+    if (eventThreadId(event) !== threadId) {
+      continue;
+    }
+    if (!latest || String(event.recordedAt ?? "") > String(latest.recordedAt ?? "")) {
+      latest = event;
+    }
+  }
+  return latest;
+}
+
+function latestTokenUsageForThread(events, threadId) {
+  let latest = null;
+  for (const event of events) {
+    if (
+      event.eventType !== "codex.session.token_count" ||
+      eventThreadId(event) !== threadId ||
+      !event.event?.usage
+    ) {
+      continue;
+    }
+    if (!latest || String(event.recordedAt ?? "") > String(latest.recordedAt ?? "")) {
+      latest = event;
+    }
+  }
+  return latest?.event?.usage ?? null;
+}
+
+function usageDominates(candidate, existing) {
+  const current = normalizeUsage(candidate);
+  const previous = normalizeUsage(existing);
+  if (!current || !previous) {
+    return false;
+  }
+  return current.total_tokens > previous.total_tokens ||
+    current.input_tokens > previous.input_tokens ||
+    current.output_tokens > previous.output_tokens ||
+    current.cached_input_tokens > previous.cached_input_tokens ||
+    current.reasoning_output_tokens > previous.reasoning_output_tokens;
 }
 
 async function readRecentRunTailEvents(filePath, detailOptions) {
@@ -527,6 +600,104 @@ function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
       usage: hasTokenUsage(usage) ? usage : null,
     }],
   };
+}
+
+async function readFastShapeUsage(shape, fileBase, events, usageMode) {
+  const stat = await fs.stat(path.join(RALPH_DIR, shape, "events", `${fileBase}.jsonl`));
+  const cached = await readLooseRunUsageCacheEntry(shape, fileBase);
+  const summary = cached?.summary
+    ? normalizeRunUsageSummary(cached.summary, stat, fileBase)
+    : null;
+  const selectedThreadIds = inferThreadIdsFromRun("", events);
+
+  if (summary) {
+    const threadUsageById = new Map(
+      summary.threadUsages.map((entry) => [entry.threadId, entry.usage]),
+    );
+    const seenThreadIds = new Set(summary.threadIds);
+    if (usageMode !== "skip") {
+      for (const threadId of selectedThreadIds) {
+        seenThreadIds.add(threadId);
+        const usage = await readCodexThreadUsageFast(threadId);
+        if (hasTokenUsage(usage)) {
+          threadUsageById.set(threadId, usage);
+        }
+      }
+    }
+    summary.threadIds = [...seenThreadIds].sort();
+    summary.threadUsages = [...threadUsageById.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([threadId, usage]) => ({ threadId, usage }));
+
+    const selectedBounds = eventTimeBounds(events);
+    if (selectedBounds.firstAt && (!summary.firstAt || selectedBounds.firstAt < summary.firstAt)) {
+      summary.firstAt = selectedBounds.firstAt;
+    }
+    if (selectedBounds.lastAt && (!summary.lastAt || selectedBounds.lastAt > summary.lastAt)) {
+      summary.lastAt = selectedBounds.lastAt;
+    }
+    summary.durationMs = Math.max(summary.durationMs, selectedBounds.durationMs);
+    return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
+  }
+
+  return readSelectedShapeUsage(shape, fileBase, events, usageMode);
+}
+
+function shapeUsageFromRunSummaries(shape, entries) {
+  const seenThreads = new Set();
+  let total = emptyUsage();
+  let firstAt = null;
+  let lastAt = null;
+  let durationMs = 0;
+  const runs = [];
+
+  for (const { fileBase, summary } of entries) {
+    const usage = applyRunUsageSummaryToShape(summary, seenThreads);
+    if (hasTokenUsage(usage)) {
+      total = addUsage(total, usage);
+    }
+    if (summary.firstAt && (!firstAt || summary.firstAt < firstAt)) {
+      firstAt = summary.firstAt;
+    }
+    if (summary.lastAt && (!lastAt || summary.lastAt > lastAt)) {
+      lastAt = summary.lastAt;
+    }
+    durationMs += summary.durationMs;
+    runs.push({
+      id: `${shape}/${fileBase}`,
+      threadId: summary.threadIds[0] ?? fileBase,
+      threadIds: summary.threadIds,
+      firstAt: summary.firstAt,
+      lastAt: summary.lastAt,
+      durationMs: summary.durationMs,
+      mtime: summary.mtime,
+      usage: hasTokenUsage(usage) ? usage : null,
+    });
+  }
+
+  return {
+    shape,
+    runCount: runs.length,
+    threadCount: seenThreads.size,
+    firstAt,
+    lastAt,
+    durationMs,
+    usage: hasTokenUsage(total) ? total : null,
+    runs,
+  };
+}
+
+async function readLooseRunUsageCacheEntry(shape, fileBase) {
+  const cachePath = runUsageCachePath(shape, fileBase);
+  if (!cachePath) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, "utf8"));
+    return parsed?.version === RUN_USAGE_CACHE_VERSION ? parsed : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
@@ -3987,7 +4158,7 @@ async function requestHandler(req, res) {
             sessionComplete: detailOptions.mode === "all",
             usageMode,
           })
-        : readSelectedShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
+        : await readFastShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return sendJson(res, { error: "Run not found" }, 404);
