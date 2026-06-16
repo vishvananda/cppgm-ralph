@@ -21,6 +21,8 @@ Implementation bar:
 - Keep `make test-report-through-pa38` passing.
 - Use `make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
   to debug the self-built checkpoint ladder.
+- Use `make -C pa39 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
+  as the first reproducibility compare before the full compiler compare.
 - Final success requires
   `make -C pa39 compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`.
 - When a failure reduces to parser, semantic, lowering, optimizer, backend,

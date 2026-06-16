@@ -22,6 +22,8 @@ Audit for:
 - fixture gates, timeout workarounds, weakened harnesses, or skipped checks;
 - reproducibility hazards such as unstable output order, embedded absolute
   paths, timestamps, generated config drift, or linker nondeterminism;
+- `pptoken` inception drift that has not been fixed before the full
+  `cppgm++` inception compare;
 - missing reducers for earlier compiler bugs discovered while reaching
   inception;
 - stringly semantic facts, ownership problems, avoidable hot-path recomputation,

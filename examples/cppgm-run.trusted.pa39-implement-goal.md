@@ -7,6 +7,8 @@ Completion criteria:
   surface that owns it, and the validation plan.
 - `make test-report-through-pa38` passes.
 - `make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++` passes.
+- `make -C pa39 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
+  passes.
 - `make -C pa39 compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
   passes.
 - File audit passes.

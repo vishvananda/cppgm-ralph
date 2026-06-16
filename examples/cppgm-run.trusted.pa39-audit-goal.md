@@ -8,9 +8,9 @@ Completion criteria:
   grounded in the actual implementation.
 - Any PA39-only shortcuts, self-hosting special cases, generated source-set
   scans, skipped work, embedded payloads, fixture gates, timeout workarounds,
-  harness weakening, reproducibility hazards, missing reducers, stringly facts,
-  ownership problems, performance blockers, or file-audit bypasses found during
-  audit are fixed, not deferred.
+  harness weakening, `pptoken` inception drift, reproducibility hazards,
+  missing reducers, stringly facts, ownership problems, performance blockers,
+  or file-audit bypasses found during audit are fixed, not deferred.
 - Required exit criteria pass:
 {{modelValidation}}
 - Intended changes are committed as cohesive progress commits.

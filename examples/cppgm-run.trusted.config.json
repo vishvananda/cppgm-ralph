@@ -39,13 +39,27 @@
         "pa39"
       ]
     },
+    "pa39PptokenInception": {
+      "command": "make -C pa39 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
+      "required": true,
+      "dependsOn": [
+        "pa39HostThrough38",
+        "pa39SelfThroughPa10"
+      ],
+      "kind": "generic",
+      "targetStage": "pa39",
+      "onlyStages": [
+        "pa39"
+      ]
+    },
     "pa39Inception": {
       "command": "make -C pa39 compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
       "primary": true,
       "required": true,
       "dependsOn": [
         "pa39HostThrough38",
-        "pa39SelfThroughPa10"
+        "pa39SelfThroughPa10",
+        "pa39PptokenInception"
       ],
       "kind": "generic",
       "targetStage": "pa39",
@@ -69,6 +83,7 @@
         "tests",
         "pa39HostThrough38",
         "pa39SelfThroughPa10",
+        "pa39PptokenInception",
         "pa39Inception",
         "fileAudit"
       ]
@@ -88,6 +103,7 @@
         "tests",
         "pa39HostThrough38",
         "pa39SelfThroughPa10",
+        "pa39PptokenInception",
         "pa39Inception",
         "fileAudit"
       ]
