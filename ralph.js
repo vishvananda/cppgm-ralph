@@ -205,13 +205,15 @@ async function main() {
   let turnNumber = continueThreadId
     ? state.turnsCompleted ?? 0
     : await reconcileTurnsCompletedWithEventLog(state);
+  let phaseCheckReuse = null;
   while (turnNumber < CONFIG.maxTurns) {
     if (await consumeStopAfterTurnRequest()) {
       log("Found stop-after-turn file; exiting cleanly before the next turn.");
       return;
     }
     const phase = resolveActivePhase(state);
-    const phaseStatus = await runPhaseChecks(state, phase);
+    const phaseStatus = await runPhaseChecks(state, phase, phaseCheckReuse);
+    phaseCheckReuse = null;
     const testStatus = phaseStatus.testStatus;
     let gitStatus = await getGitStatus(CONFIG.workdir);
     if (phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
@@ -252,6 +254,7 @@ async function main() {
       await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
       const nextPhase = getNextPhase(phase, state);
       if (nextPhase) {
+        phaseCheckReuse = buildPhaseCheckReuse(phaseStatus, nextPhase);
         await saveState({
           threadId,
           eventLogPath: buildEventLogPath(threadId),
@@ -1563,9 +1566,10 @@ function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
 
 function formatPhaseCheckResults(phaseStatus) {
   return phaseStatus.checks
-    .map((check) =>
-      `${check.name} ${check.passed ? "pass" : "fail"} (${check.exitCode})`,
-    )
+    .map((check) => {
+      const reuse = check.reused ? ", reused" : "";
+      return `${check.name} ${check.passed ? "pass" : "fail"}${reuse} (${check.exitCode})`;
+    })
     .join("; ");
 }
 
@@ -1840,7 +1844,7 @@ async function autoCommitPassingChanges({ phase, phaseStatus, gitStatus }) {
   return getGitStatus(CONFIG.workdir);
 }
 
-async function runPhaseChecks(state, phase) {
+async function runPhaseChecks(state, phase, reuse = null) {
   const stage = resolveActiveTestStage(state);
   const subset = resolveActiveTestSubset(state, stage);
   const sliceInfo = buildSliceInfo(stage, subset);
@@ -1854,6 +1858,20 @@ async function runPhaseChecks(state, phase) {
 
   for (const check of checks) {
     const context = buildCheckCommandContext(check, stage, subset);
+    const reusable = getReusablePhaseCheckResult(reuse, phase, check, context);
+    if (reusable) {
+      log(`Reusing ${phase.name} check ${check.name} from ${reusable.fromPhase}: ${context.command}`);
+      const result = clonePhaseCheckResultForReuse(reusable, check, context);
+      if (result.testStatus) {
+        previousTestStatus = result.testStatus;
+        if (check.primary || !primaryTestStatus) {
+          primaryTestStatus = result.testStatus;
+        }
+      }
+      results.push(result);
+      continue;
+    }
+
     log(`Running ${phase.name} check ${check.name}: ${context.command}`);
     const { run, testStatus, retryAttempts } = await runCheckWithTimeoutRetries({
       phase,
@@ -1869,6 +1887,7 @@ async function runPhaseChecks(state, phase) {
       primary: check.primary,
       command: context.command,
       commandTemplate: context.template,
+      internalCheck: context.internalCheck,
       usesStageTemplate: context.usesStageTemplate,
       usesSubsetTemplate: context.usesSubsetTemplate,
       targetStage: context.stage,
@@ -1907,6 +1926,97 @@ async function runPhaseChecks(state, phase) {
     allRequiredPassed: failedRequired.length === 0,
     failedRequiredChecks: failedRequired,
   };
+}
+
+function buildPhaseCheckReuse(phaseStatus, nextPhase) {
+  if (!phaseStatus?.checks?.length || !nextPhase?.name) {
+    return null;
+  }
+
+  const resultsByKey = new Map();
+  for (const result of phaseStatus.checks) {
+    if (!result?.passed) {
+      continue;
+    }
+    resultsByKey.set(phaseCheckReuseKeyFromResult(result), result);
+  }
+
+  if (resultsByKey.size === 0) {
+    return null;
+  }
+
+  return {
+    fromPhase: phaseStatus.phase,
+    toPhase: nextPhase.name,
+    stage: phaseStatus.stage ?? null,
+    subset: phaseStatus.subset ?? null,
+    resultsByKey,
+  };
+}
+
+function getReusablePhaseCheckResult(reuse, phase, check, context) {
+  if (!reuse || reuse.toPhase !== phase?.name) {
+    return null;
+  }
+  if ((reuse.stage ?? null) !== (context.stage ?? null) ||
+      (reuse.subset ?? null) !== (context.subset ?? null)) {
+    return null;
+  }
+  const result = reuse.resultsByKey.get(phaseCheckReuseKeyFromContext(check, context));
+  if (!result) {
+    return null;
+  }
+  if (check.primary && !result.testStatus) {
+    return null;
+  }
+  return {
+    fromPhase: reuse.fromPhase,
+    result,
+  };
+}
+
+function phaseCheckReuseKeyFromContext(check, context) {
+  return JSON.stringify({
+    command: context.command,
+    internalCheck: context.internalCheck ?? null,
+    kind: check.kind ?? null,
+    targetStage: context.stage ?? null,
+    targetSubset: context.subset ?? null,
+  });
+}
+
+function phaseCheckReuseKeyFromResult(result) {
+  return JSON.stringify({
+    command: result.command,
+    internalCheck: result.internalCheck ?? null,
+    kind: result.kind ?? null,
+    targetStage: result.targetStage ?? null,
+    targetSubset: result.targetSubset ?? null,
+  });
+}
+
+function clonePhaseCheckResultForReuse(reusable, check, context) {
+  const result = cloneJson(reusable.result);
+  return {
+    ...result,
+    name: check.name,
+    kind: check.kind,
+    required: check.required,
+    primary: check.primary,
+    command: context.command,
+    commandTemplate: context.template,
+    internalCheck: context.internalCheck,
+    usesStageTemplate: context.usesStageTemplate,
+    usesSubsetTemplate: context.usesSubsetTemplate,
+    targetStage: context.stage,
+    targetSubset: context.subset,
+    reused: true,
+    reusedFromPhase: reusable.fromPhase,
+  };
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 async function runCheckWithTimeoutRetries({ phase, check, context, previousTestStatus }) {
