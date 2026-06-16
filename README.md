@@ -203,12 +203,14 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 - `checks`
   Optional object or array of named checks. Each check has `command`, optional
   `required` (default `true`), optional `primary`, optional `kind`, optional
-  `targetStage`, optional `onlyStages`, and optional `excludeStages`. If omitted,
-  Ralph synthesizes a primary required `tests` check from `testCommand`. All
-  required checks in the active phase must pass before the phase can complete.
-  `targetStage` binds a non-template command to a PA for state, prompts, and
-  visualization. `onlyStages` and `excludeStages` make a check apply only to
-  selected PA stages.
+  `dependsOn`, optional `targetStage`, optional `onlyStages`, and optional
+  `excludeStages`. If omitted, Ralph synthesizes a primary required `tests`
+  check from `testCommand`. All required checks in the active phase must pass
+  before the phase can complete. `dependsOn` names checks that must pass earlier
+  in the same phase before this check runs; a skipped required check still keeps
+  the phase from completing. `targetStage` binds a non-template command to a PA
+  for state, prompts, and visualization. `onlyStages` and `excludeStages` make a
+  check apply only to selected PA stages.
 - `phases`
   Optional ordered array of phase definitions. Each phase has `name`, optional
   `checks` (defaults to all checks), optional `promptTemplate` (defaults to the

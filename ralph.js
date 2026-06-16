@@ -1475,6 +1475,12 @@ function buildCheckResultLines(phaseStatus) {
     `Phase checks (${phaseStatus.phase}): ${formatPhaseCheckResults(phaseStatus)}`,
   ];
   for (const check of phaseStatus.failedRequiredChecks ?? []) {
+    if (check.skipped) {
+      lines.push(
+        `Required check \`${check.name}\` was skipped: ${check.skipReason ?? "dependency did not pass"}`,
+      );
+      continue;
+    }
     lines.push(
       `Required check \`${check.name}\` failed with exit ${check.exitCode}; output: \`${check.outputPath}\``,
     );
@@ -1504,6 +1510,10 @@ function buildFailedRequiredCheckDetailsLines(phaseStatus) {
 
   const lines = ["Failed required checks:"];
   for (const check of failedChecks) {
+    if (check.skipped) {
+      lines.push(`- ${check.name}: skipped; reason: ${check.skipReason ?? "dependency did not pass"}; command: \`${check.command}\``);
+      continue;
+    }
     const logPath = check.outputPath ? `; log: \`${check.outputPath}\`` : "";
     lines.push(`- ${check.name}: exit ${check.exitCode}; command: \`${check.command}\`${logPath}`);
     if (isPriorStageSubsetCheck(check)) {
@@ -1518,7 +1528,7 @@ function buildFailedRequiredCheckDetailsLines(phaseStatus) {
 }
 
 function buildCheckValidationLines(check, phaseStatus) {
-  const status = check.passed ? "pass" : "BLOCKER";
+  const status = check.skipped ? "SKIPPED" : check.passed ? "pass" : "BLOCKER";
   if (isPriorStageSubsetCheck(check)) {
     const commands = buildPriorStageSubsetValidationCommands(phaseStatus?.stage, phaseStatus?.subset);
     const lines = [
@@ -1539,6 +1549,9 @@ function buildCheckValidationLines(check, phaseStatus) {
   const line = check.command
     ? `- ${check.name} [${status}]: \`${check.command}\``
     : `- ${check.name} [${status}]`;
+  if (check.skipped) {
+    return [line, `  Skipped because ${check.skipReason ?? "a dependency did not pass"}.`];
+  }
   return !check.passed && check.outputPath
     ? [line, `  Failure log: \`${check.outputPath}\``]
     : [line];
@@ -1568,7 +1581,10 @@ function formatPhaseCheckResults(phaseStatus) {
   return phaseStatus.checks
     .map((check) => {
       const reuse = check.reused ? ", reused" : "";
-      return `${check.name} ${check.passed ? "pass" : "fail"}${reuse} (${check.exitCode})`;
+      const skipped = check.skipped ? ", skipped" : "";
+      const status = check.skipped ? "skip" : check.passed ? "pass" : "fail";
+      const exitCode = check.exitCode == null ? "n/a" : check.exitCode;
+      return `${check.name} ${status}${reuse}${skipped} (${exitCode})`;
     })
     .join("; ");
 }
@@ -1578,12 +1594,13 @@ function formatPhaseChecksForTemplate(phase, stage, subset = null) {
     .map((check) => {
       const required = check.required ? "required" : "optional";
       const primary = check.primary ? ", primary" : "";
+      const dependsOn = check.dependsOn.length > 0 ? `, after ${check.dependsOn.join(", ")}` : "";
       const command = buildCheckCommandForStage(check, stage, subset);
       const internalCheck = parseInternalCheckCommand(command);
       if (internalCheck === "prior-stage-subsets") {
-        return `- ${check.name}: Ralph internal prior same-stage subset gate (${required}${primary}; not a shell command)`;
+        return `- ${check.name}: Ralph internal prior same-stage subset gate (${required}${primary}${dependsOn}; not a shell command)`;
       }
-      return `- ${check.name}: \`${command}\` (${required}${primary})`;
+      return `- ${check.name}: \`${command}\` (${required}${primary}${dependsOn})`;
     })
     .join("\n");
 }
@@ -1855,9 +1872,45 @@ async function runPhaseChecks(state, phase, reuse = null) {
   const results = [];
   let primaryTestStatus = null;
   let previousTestStatus = state.lastTestStatus;
+  const resultsByName = new Map();
 
   for (const check of checks) {
     const context = buildCheckCommandContext(check, stage, subset);
+    const failedDependencies = check.dependsOn.filter((name) => {
+      const dependency = resultsByName.get(name);
+      return !dependency || !dependency.passed;
+    });
+    if (failedDependencies.length > 0) {
+      const dependencyList = failedDependencies.join(", ");
+      log(`Skipping ${phase.name} check ${check.name}; dependency check(s) did not pass: ${dependencyList}`);
+      const result = {
+        name: check.name,
+        kind: check.kind,
+        required: check.required,
+        primary: check.primary,
+        dependsOn: check.dependsOn,
+        command: context.command,
+        commandTemplate: context.template,
+        internalCheck: context.internalCheck,
+        usesStageTemplate: context.usesStageTemplate,
+        usesSubsetTemplate: context.usesSubsetTemplate,
+        targetStage: context.stage,
+        targetSubset: context.subset,
+        exitCode: null,
+        passed: false,
+        skipped: true,
+        skipReason: `dependency check(s) did not pass: ${dependencyList}`,
+        outputPath: null,
+        outputPreview: "",
+      };
+      if (check.primary || !primaryTestStatus) {
+        primaryTestStatus = buildGenericTestStatus(result, stage, subset);
+      }
+      results.push(result);
+      resultsByName.set(check.name, result);
+      continue;
+    }
+
     const reusable = getReusablePhaseCheckResult(reuse, phase, check, context);
     if (reusable) {
       log(`Reusing ${phase.name} check ${check.name} from ${reusable.fromPhase}: ${context.command}`);
@@ -1869,6 +1922,7 @@ async function runPhaseChecks(state, phase, reuse = null) {
         }
       }
       results.push(result);
+      resultsByName.set(check.name, result);
       continue;
     }
 
@@ -1885,6 +1939,7 @@ async function runPhaseChecks(state, phase, reuse = null) {
       kind: check.kind,
       required: check.required,
       primary: check.primary,
+      dependsOn: check.dependsOn,
       command: context.command,
       commandTemplate: context.template,
       internalCheck: context.internalCheck,
@@ -1911,18 +1966,23 @@ async function runPhaseChecks(state, phase, reuse = null) {
     }
 
     results.push(result);
+    resultsByName.set(check.name, result);
+    if (shutdownInProgress) {
+      throw new Error("Ralph shutdown requested while running phase checks");
+    }
   }
 
   const required = results.filter((result) => result.required);
   const failedRequired = required.filter((result) => !result.passed);
+  const primaryCheck = results.find((result) => result.primary) ?? results[0] ?? null;
   return {
     phase: phase.name,
     stage,
     subset,
     ...sliceInfo,
     checks: results,
-    primaryCheck: results.find((result) => result.primary) ?? results[0] ?? null,
-    testStatus: primaryTestStatus ?? buildGenericTestStatus(results[0], stage, subset),
+    primaryCheck,
+    testStatus: primaryTestStatus ?? buildGenericTestStatus(primaryCheck, stage, subset),
     allRequiredPassed: failedRequired.length === 0,
     failedRequiredChecks: failedRequired,
   };
@@ -2003,6 +2063,7 @@ function clonePhaseCheckResultForReuse(reusable, check, context) {
     kind: check.kind,
     required: check.required,
     primary: check.primary,
+    dependsOn: check.dependsOn,
     command: context.command,
     commandTemplate: context.template,
     internalCheck: context.internalCheck,
@@ -6036,6 +6097,7 @@ function normalizeCheckDefinition(name, definition) {
     required: parseBoolean(value.required, true),
     primary: parseBoolean(value.primary, false),
     kind: typeof value.kind === "string" ? value.kind : null,
+    dependsOn: normalizeCheckDependencyList(value.dependsOn, `checks.${normalizedName}.dependsOn`),
     targetStage: normalizeOptionalStageConfig(value.targetStage, `checks.${normalizedName}.targetStage`),
     onlyStages: normalizeStageList(value.onlyStages, `checks.${normalizedName}.onlyStages`),
     excludeStages: normalizeStageList(value.excludeStages, `checks.${normalizedName}.excludeStages`),
@@ -6069,6 +6131,7 @@ function normalizePhaseDefinition(phase, checks) {
     throw new Error("Config phase must be an object");
   }
   const checkNames = new Set(checks.map((check) => check.name));
+  const checksByName = new Map(checks.map((check) => [check.name, check]));
   const normalizedChecks = (Array.isArray(phase.checks) && phase.checks.length > 0
     ? phase.checks
     : checks.map((check) => check.name))
@@ -6079,6 +6142,22 @@ function normalizePhaseDefinition(phase, checks) {
     if (!checkNames.has(name)) {
       throw new Error(`Config phase ${phase.name} references unknown check ${name}`);
     }
+  }
+  const earlierChecks = new Set();
+  for (const name of normalizedChecks) {
+    const check = checksByName.get(name);
+    for (const dependencyName of check.dependsOn) {
+      if (!checkNames.has(dependencyName)) {
+        throw new Error(`Config check ${name} depends on unknown check ${dependencyName}`);
+      }
+      if (!normalizedChecks.includes(dependencyName)) {
+        throw new Error(`Config check ${name} depends on ${dependencyName}, but ${dependencyName} is not in phase ${phase.name}`);
+      }
+      if (!earlierChecks.has(dependencyName)) {
+        throw new Error(`Config check ${name} depends on ${dependencyName}, but ${dependencyName} is not earlier in phase ${phase.name}`);
+      }
+    }
+    earlierChecks.add(name);
   }
   if (normalizedChecks.length === 0) {
     throw new Error(`Config phase ${phase.name} must include at least one check`);
@@ -6142,6 +6221,27 @@ function sanitizeOptionalTemplateName(value) {
     return null;
   }
   return sanitizeIdentifier(value, "template name");
+}
+
+function normalizeCheckDependencyList(value, label) {
+  if (value == null || value === "") {
+    return [];
+  }
+  const entries = Array.isArray(value)
+    ? value
+    : String(value).split(/[,\s]+/);
+  const dependencies = [];
+  for (const entry of entries) {
+    const text = String(entry).trim();
+    if (!text) {
+      continue;
+    }
+    const name = sanitizeIdentifier(text, label);
+    if (!dependencies.includes(name)) {
+      dependencies.push(name);
+    }
+  }
+  return dependencies;
 }
 
 function normalizeDriverMode(value) {

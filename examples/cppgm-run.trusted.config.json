@@ -30,6 +30,9 @@
     "pa39SelfThroughPa10": {
       "command": "make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
       "required": true,
+      "dependsOn": [
+        "pa39HostThrough38"
+      ],
       "kind": "generic",
       "targetStage": "pa39",
       "onlyStages": [
@@ -40,6 +43,10 @@
       "command": "make -C pa39 compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
       "primary": true,
       "required": true,
+      "dependsOn": [
+        "pa39HostThrough38",
+        "pa39SelfThroughPa10"
+      ],
       "kind": "generic",
       "targetStage": "pa39",
       "onlyStages": [
