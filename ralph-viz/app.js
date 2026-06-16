@@ -4122,10 +4122,12 @@ function staticCodexDetail(detailParams, turns) {
 function codexDetailQueryParams() {
   const params = new URLSearchParams();
   const value = codexDetail?.value ?? "tail:2";
+  params.set("usage", "fast");
   if (value === "none") {
     params.set("codex", "none");
   } else if (value === "all") {
     params.set("codex", "all");
+    params.set("usage", "full");
   } else if (value === "open") {
     const turns = getUrlParams().turns;
     if (turns.length) {

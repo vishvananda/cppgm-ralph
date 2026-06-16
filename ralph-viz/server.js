@@ -26,6 +26,7 @@ const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
+const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_CACHE_VERSION = 8;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
@@ -171,7 +172,29 @@ async function readRunFile(filePath) {
   return events;
 }
 
+async function readFileSlice(filePath, start, end) {
+  const length = Math.max(0, end - start);
+  if (!length) {
+    return "";
+  }
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDetailOptions()) {
+  if (detailOptions.mode === "tail") {
+    const tailEvents = await readTailRunWithCodexSession(filePath, detailOptions);
+    if (tailEvents) {
+      return tailEvents;
+    }
+  }
+
   const events = await readRunFile(filePath);
   await augmentLatestTestStatusFromLog(events, filePath);
   // Mid-turn progress for providers without session-file scanning (Claude,
@@ -182,14 +205,19 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
   const withRunProgress = runProgressEvents.length
     ? mergeEventStreams(events, runProgressEvents)
     : events;
-  if (detailOptions.mode === "none") {
-    return withRunProgress;
-  }
-
   const turnWindows = buildTurnWindows(events);
   const selectedWindows = selectTurnWindows(turnWindows, detailOptions);
+  const responseBaseEvents = selectRunEventsForResponse(
+    withRunProgress,
+    detailOptions,
+    selectedWindows,
+  );
+  if (detailOptions.mode === "none") {
+    return responseBaseEvents;
+  }
+
   if (detailOptions.mode !== "all" && selectedWindows.length === 0) {
-    return withRunProgress;
+    return responseBaseEvents;
   }
 
   const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
@@ -199,17 +227,148 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
 
   const resolveTurnNumber = buildSessionTurnResolver(events);
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
-  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(withRunProgress);
+  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
   const sessionEvents = sessionEventGroups.flat();
   const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
   if (!sessionEvents.length && !progressEvents.length) {
-    return withRunProgress;
+    return responseBaseEvents;
   }
 
-  return mergeEventStreams(mergeEventStreams(withRunProgress, sessionEvents), progressEvents);
+  return mergeEventStreams(mergeEventStreams(responseBaseEvents, sessionEvents), progressEvents);
+}
+
+async function readTailRunWithCodexSession(filePath, detailOptions) {
+  const events = await readRecentRunTailEvents(filePath, detailOptions);
+  if (!events.length) {
+    return null;
+  }
+  await augmentLatestTestStatusFromLog(events, filePath);
+  const runProgressEvents = progressEventsFromRunEvents(events);
+  const withRunProgress = runProgressEvents.length
+    ? mergeEventStreams(events, runProgressEvents)
+    : events;
+  const selectedWindows = tailTurnWindowsFromEvents(
+    withRunProgress,
+    detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS,
+  );
+  const responseBaseEvents = selectRunEventsForResponse(
+    withRunProgress,
+    detailOptions,
+    selectedWindows,
+  );
+
+  // A resumed Codex run may already have item cards backfilled into the Ralph
+  // log. In that case reading the session file again is duplicate work and can
+  // dominate local page loads for very large active turns.
+  if (primaryItemCardStreamKeys(responseBaseEvents).size > 0) {
+    return responseBaseEvents;
+  }
+
+  return null;
+}
+
+async function readRecentRunTailEvents(filePath, detailOptions) {
+  const stat = await fs.stat(filePath);
+  if (!stat.size) {
+    return [];
+  }
+  const bytesToRead = Math.min(stat.size, RUN_RESPONSE_TURN_MAX_BYTES);
+  const start = stat.size - bytesToRead;
+  const text = await readFileSlice(filePath, start, stat.size);
+  let lines = text.split(/\r?\n/);
+  if (start > 0) {
+    lines = lines.slice(1);
+  }
+  const events = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      events.push(JSON.parse(trimmed));
+    } catch (_) {
+      // The first line of a tail slice can be partial.
+    }
+  }
+  const wantedTurns = latestTurnNumbersFromEvents(
+    events,
+    detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS,
+  );
+  return events.filter((event) => wantedTurns.has(event.turnNumber));
+}
+
+function latestTurnNumbersFromEvents(events, count) {
+  const ordered = [];
+  const seen = new Set();
+  for (const event of events) {
+    const turn = Number.isInteger(event?.turnNumber) && event.turnNumber > 0
+      ? event.turnNumber
+      : null;
+    if (turn == null || seen.has(turn)) {
+      continue;
+    }
+    seen.add(turn);
+    ordered.push(turn);
+  }
+  return new Set(ordered.slice(-Math.max(1, count)));
+}
+
+function tailTurnWindowsFromEvents(events, count) {
+  const wantedTurns = latestTurnNumbersFromEvents(events, count);
+  const byTurn = new Map();
+  for (const event of events) {
+    if (!wantedTurns.has(event.turnNumber)) {
+      continue;
+    }
+    const time = Date.parse(event.recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const current = byTurn.get(event.turnNumber) ?? {
+      turnNumber: event.turnNumber,
+      startTime: time,
+      endTime: time + 1,
+    };
+    current.startTime = Math.min(current.startTime, time);
+    current.endTime = Math.max(current.endTime, time + 1);
+    byTurn.set(event.turnNumber, current);
+  }
+  return [...byTurn.values()].sort((a, b) => a.startTime - b.startTime);
+}
+
+function selectRunEventsForResponse(events, detailOptions, selectedWindows) {
+  let selected = events;
+  if (detailOptions.mode !== "all" && detailOptions.mode !== "none") {
+    selected = filterEventsToWindows(events, selectedWindows);
+  }
+  const compacted = selected.map((event) =>
+    compactConvertedSessionEvent(event, detailOptions.outputLimit ?? CODEX_SESSION_OUTPUT_LIMIT));
+  if (detailOptions.mode === "all") {
+    return compacted;
+  }
+  return limitSessionEventsByTurn(compacted, detailOptions.maxEventsPerTurn);
+}
+
+function filterEventsToWindows(events, selectedWindows) {
+  if (!selectedWindows?.length) {
+    return events;
+  }
+  const selectedTurns = new Set(selectedWindows.map((window) => window.turnNumber));
+  return events.filter((event) => {
+    const turn = Number.isInteger(event?.turnNumber) && event.turnNumber > 0
+      ? event.turnNumber
+      : null;
+    if (turn != null && selectedTurns.has(turn)) {
+      return true;
+    }
+    const time = Date.parse(event?.recordedAt ?? "");
+    return Number.isFinite(time) &&
+      selectedWindows.some((window) => time >= window.startTime && time < window.endTime);
+  });
 }
 
 function progressEventsFromRunEvents(events) {
@@ -330,6 +489,43 @@ async function readShapeUsage(shape, selected = {}) {
     durationMs,
     usage: hasTokenUsage(total) ? total : null,
     runs,
+  };
+}
+
+function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
+  const bounds = eventTimeBounds(events);
+  const threadIds = inferThreadIdsFromRun("", events);
+  let usage = null;
+  if (usageMode !== "skip") {
+    const tokenUsage = usageFromTokenEventsByThread(events);
+    for (const entry of tokenUsage.threadUsages) {
+      usage = addUsage(usage, entry.usage);
+    }
+    if (hasTokenUsage(tokenUsage.unthreadedUsage)) {
+      usage = addUsage(usage, tokenUsage.unthreadedUsage);
+    }
+    if (!hasTokenUsage(usage)) {
+      usage = usageFromVizEvents(events);
+    }
+  }
+  return {
+    shape,
+    runCount: 1,
+    threadCount: threadIds.length,
+    firstAt: bounds.firstAt,
+    lastAt: bounds.lastAt,
+    durationMs: bounds.durationMs,
+    usage: hasTokenUsage(usage) ? usage : null,
+    runs: [{
+      id: `${shape}/${fileBase}`,
+      threadId: threadIds[0] ?? fileBase,
+      threadIds,
+      firstAt: bounds.firstAt,
+      lastAt: bounds.lastAt,
+      durationMs: bounds.durationMs,
+      mtime: null,
+      usage: hasTokenUsage(usage) ? usage : null,
+    }],
   };
 }
 
@@ -2382,11 +2578,11 @@ function parseCodexDetailOptions(params) {
 }
 
 function normalizeUsageMode(raw) {
-  const mode = String(raw ?? "full").toLowerCase();
+  const mode = String(raw ?? "fast").toLowerCase();
   if (mode === "full" || mode === "fast" || mode === "skip" || mode === "none" || mode === "off") {
     return mode === "none" || mode === "off" ? "skip" : mode;
   }
-  return "full";
+  return "fast";
 }
 
 function parseOptionalBoundedInt(raw, fallback, min, max) {
@@ -3157,6 +3353,16 @@ function compactConvertedSessionEvent(record, outputLimit = CODEX_SESSION_OUTPUT
   if (typeof compactItem.aggregated_output === "string") {
     compactItem.aggregated_output = truncateSessionOutput(compactItem.aggregated_output, outputLimit);
   }
+  if (Array.isArray(compactItem.changes)) {
+    compactItem.changes = compactItem.changes.map((change) => {
+      const compactChange = { ...change };
+      delete compactChange.raw;
+      if (typeof compactChange.diff === "string") {
+        compactChange.diff = truncateSessionOutput(compactChange.diff, outputLimit);
+      }
+      return compactChange;
+    });
+  }
   return {
     ...record,
     event: {
@@ -3239,7 +3445,17 @@ function keepSessionBoundaryEvents(group, keep) {
 }
 
 function isAlwaysKeptSessionEvent(event) {
-  return event.eventType === "codex.task_complete";
+  return [
+    "codex.task_complete",
+    "ralph.agent-progress",
+    "ralph.goal",
+    "ralph.phase-status",
+    "ralph.prompt",
+    "ralph.test-status",
+    "turn.completed",
+    "turn.failed",
+    "turn.started",
+  ].includes(event.eventType);
 }
 
 async function findCodexSessionFiles(threadId) {
@@ -3764,13 +3980,14 @@ async function requestHandler(req, res) {
     try {
       events = await readRunWithCodexSession(runRef.filePath, detailOptions);
       await augmentSliceMetadataForRun(events, runRef.shape);
-      shapeUsage = await readShapeUsage(runRef.shape, {
-        filePath: runRef.filePath,
-        events,
-        sessionComplete: detailOptions.mode === "all",
-        skipCodexUsage: usageMode === "skip",
-        usageMode,
-      });
+      shapeUsage = usageMode === "full"
+        ? await readShapeUsage(runRef.shape, {
+            filePath: runRef.filePath,
+            events,
+            sessionComplete: detailOptions.mode === "all",
+            usageMode,
+          })
+        : readSelectedShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return sendJson(res, { error: "Run not found" }, 404);
