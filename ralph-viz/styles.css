@@ -849,21 +849,23 @@ pre.file-diff > code[class*="language-"] {
   white-space: pre;
 }
 
-pre.file-diff .token.inserted,
-pre.file-diff .token.inserted-sign {
+pre.file-diff .token.inserted:not(.prefix) {
   background: rgba(46, 160, 67, 0.22);
 }
 
-pre.file-diff .token.deleted,
-pre.file-diff .token.deleted-sign {
+pre.file-diff .token.deleted:not(.prefix) {
   background: rgba(248, 81, 73, 0.22);
 }
 
-pre.file-diff .token.inserted,
-pre.file-diff .token.deleted {
+pre.file-diff .token.inserted:not(.prefix),
+pre.file-diff .token.deleted:not(.prefix) {
   display: block;
   min-width: 100%;
   color: inherit;
+}
+
+pre.file-diff .token.prefix {
+  background: transparent;
 }
 
 /* Todo */

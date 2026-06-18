@@ -846,7 +846,7 @@ function renderFileChangeCard(record) {
     list.append(row);
     if (c.diff) {
       const pre = document.createElement("pre");
-      pre.className = "file-diff language-diff-cpp diff-highlight";
+      pre.className = "file-diff";
       pre.dataset.contentScrollKey = `diff:${fileChangeEntryKey(record)}:${fileChangePathText(c)}`;
       const code = document.createElement("code");
       code.className = "language-diff-cpp diff-highlight";
