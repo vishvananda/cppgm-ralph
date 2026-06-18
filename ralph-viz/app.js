@@ -3892,7 +3892,9 @@ function renderTimeline(records) {
     const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
-    const duration = durationText(durationMap.get(turn));
+    const duration = durationText(
+      shapeUsageTurnDuration(state.shapeUsage, turn) ?? durationMap.get(turn),
+    );
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const displayEntries = buildDisplayEntries(items);
     const entryWindow = displayEntryWindow(displayEntries);
