@@ -213,12 +213,23 @@ function latestTurnOverview(events, priceModel, shapeUsage = null) {
   if (turn == null) {
     return null;
   }
-  const duration = durationText(
-    shapeUsageTurnDuration(shapeUsage, turn) ?? buildTurnDurationMap(events).get(turn),
-  );
+  const durationMap = buildTurnDurationMap(events);
+  const duration = durationText(bestTurnDurationSpan(shapeUsage, turn, durationMap));
   const usage = buildUsageMap(events).get(turn);
   const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
   return { turn, duration, cost };
+}
+
+function bestTurnDurationSpan(shapeUsage, turn, durationMap) {
+  const cached = shapeUsageTurnDuration(shapeUsage, turn);
+  const live = durationMap?.get(turn) ?? null;
+  if (!cached) {
+    return live;
+  }
+  if (!live) {
+    return cached;
+  }
+  return (live.durationMs ?? 0) > (cached.durationMs ?? 0) ? live : cached;
 }
 
 function shapeUsageTurnDuration(shapeUsage, turn) {
@@ -1442,13 +1453,16 @@ function buildTurnMap(events) {
   return turns;
 }
 
-function buildTurnDurationMap(records) {
+function buildTurnDurationMap(records, options = {}) {
+  const includeOpenCommandTail = options.includeOpenCommandTail !== false;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const map = new Map();
   const attempts = buildTurnAttemptWindows(records);
   const spansByTurnAttemptThread = new Map();
   const sessionTimingByTurnAttempt = new Map();
   const ralphLifecycleByTurnAttempt = new Map();
   const limitWaitsByTurnAttempt = new Map();
+  const openCommandsByTurnAttemptThread = new Map();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1481,6 +1495,17 @@ function buildTurnDurationMap(records) {
       threadSpan.first = Math.min(threadSpan.first, time);
       threadSpan.last = Math.max(threadSpan.last, time);
       spansByTurnAttemptThread.set(attemptThreadKey, threadSpan);
+      if (isCommandStartEvent(record)) {
+        openCommandsByTurnAttemptThread.set(
+          attemptThreadKey,
+          (openCommandsByTurnAttemptThread.get(attemptThreadKey) ?? 0) + 1,
+        );
+      } else if (isCommandEndEvent(record)) {
+        openCommandsByTurnAttemptThread.set(
+          attemptThreadKey,
+          Math.max(0, (openCommandsByTurnAttemptThread.get(attemptThreadKey) ?? 0) - 1),
+        );
+      }
     }
 
     if (isCodexTimingActivity(record)) {
@@ -1524,6 +1549,22 @@ function buildTurnDurationMap(records) {
         lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
       }
       ralphLifecycleByTurnAttempt.set(turnAttemptKey, lifecycle);
+    }
+  }
+  if (includeOpenCommandTail) {
+    for (const [attemptThreadKey, openCommands] of openCommandsByTurnAttemptThread.entries()) {
+      if (openCommands <= 0) {
+        continue;
+      }
+      const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey);
+      if (threadSpan) {
+        threadSpan.last = Math.max(threadSpan.last, nowMs);
+      }
+      const [turn, attemptIndex] = attemptThreadKey.split("\0");
+      const timing = sessionTimingByTurnAttempt.get(`${turn}\0${attemptIndex}`);
+      if (timing && timing.sessionLastMs != null) {
+        timing.sessionLastMs = Math.max(timing.sessionLastMs, nowMs);
+      }
     }
   }
   const attemptDurations = new Map();
@@ -1583,7 +1624,7 @@ function buildTurnDurationMap(records) {
       );
     }
     if (durationMs > 0) {
-      attemptDurations.set(key, durationMs);
+      attemptDurations.set(key, Math.max(attemptDurations.get(key) ?? 0, durationMs));
     }
   }
   const totalByTurn = new Map();
@@ -1702,7 +1743,9 @@ function durationText(span) {
   return `${hours}h ${remainingMinutes}m`;
 }
 
-function activeEventDurationMs(records) {
+function activeEventDurationMs(records, options = {}) {
+  const includeOpenCommandTail = options.includeOpenCommandTail !== false;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const events = records
     .map((record) => ({ record, time: Date.parse(record.recordedAt ?? "") }))
     .filter((entry) => Number.isFinite(entry.time))
@@ -1726,6 +1769,10 @@ function activeEventDurationMs(records) {
     if (openCommands > 0 || gap <= ACTIVE_EVENT_GAP_MS) {
       durationMs += gap;
     }
+  }
+  const last = events.at(-1);
+  if (includeOpenCommandTail && openCommands > 0 && last) {
+    durationMs += Math.max(0, nowMs - last.time);
   }
 
   return durationMs;
@@ -3892,9 +3939,7 @@ function renderTimeline(records) {
     const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
-    const duration = durationText(
-      shapeUsageTurnDuration(state.shapeUsage, turn) ?? durationMap.get(turn),
-    );
+    const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const displayEntries = buildDisplayEntries(items);
     const entryWindow = displayEntryWindow(displayEntries);

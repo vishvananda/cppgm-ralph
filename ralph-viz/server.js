@@ -567,7 +567,7 @@ async function readShapeUsage(shape, selected = {}) {
 }
 
 function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
-  const bounds = eventTimeBounds(events);
+  const bounds = eventTimeBounds(events, { includeOpenCommandTail: true });
   const threadIds = inferThreadIdsFromRun("", events);
   let usage = null;
   if (usageMode !== "skip") {
@@ -597,7 +597,7 @@ function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
       firstAt: bounds.firstAt,
       lastAt: bounds.lastAt,
       durationMs: bounds.durationMs,
-      turnDurations: turnExecutionDurationEntries(events),
+      turnDurations: turnExecutionDurationEntries(events, new Map(), { includeOpenCommandTail: true }),
       mtime: null,
       usage: hasTokenUsage(usage) ? usage : null,
     }],
@@ -643,14 +643,19 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
       .sort((left, right) => left[0].localeCompare(right[0]))
       .map(([threadId, usage]) => ({ threadId, usage }));
 
-    const selectedBounds = eventTimeBounds(events);
+    const selectedBounds = eventTimeBounds(events, { includeOpenCommandTail: true });
+    const liveTurnDurations = turnExecutionDurationEntries(events, new Map(), { includeOpenCommandTail: true });
     if (selectedBounds.firstAt && (!summary.firstAt || selectedBounds.firstAt < summary.firstAt)) {
       summary.firstAt = selectedBounds.firstAt;
     }
     if (selectedBounds.lastAt && (!summary.lastAt || selectedBounds.lastAt > summary.lastAt)) {
       summary.lastAt = selectedBounds.lastAt;
     }
-    summary.durationMs = Math.max(summary.durationMs, selectedBounds.durationMs);
+    summary.durationMs = Math.max(
+      summary.durationMs + turnDurationPositiveDelta(summary.turnDurations, liveTurnDurations),
+      selectedBounds.durationMs,
+    );
+    summary.turnDurations = mergeTurnDurationEntriesMax(summary.turnDurations, liveTurnDurations);
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
@@ -803,6 +808,40 @@ function mergeTurnDurationEntries(existingEntries, newEntries) {
     }
   }
   return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
+function mergeTurnDurationEntriesMax(existingEntries, newEntries) {
+  const byTurn = new Map();
+  for (const entry of normalizeTurnDurationEntries(existingEntries)) {
+    byTurn.set(entry.turnNumber, { ...entry });
+  }
+  for (const entry of normalizeTurnDurationEntries(newEntries)) {
+    const current = byTurn.get(entry.turnNumber);
+    if (!current) {
+      byTurn.set(entry.turnNumber, { ...entry });
+      continue;
+    }
+    current.durationMs = Math.max(current.durationMs, entry.durationMs);
+    if (entry.firstAt && (!current.firstAt || entry.firstAt < current.firstAt)) {
+      current.firstAt = entry.firstAt;
+    }
+    if (entry.lastAt && (!current.lastAt || entry.lastAt > current.lastAt)) {
+      current.lastAt = entry.lastAt;
+    }
+  }
+  return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
+function turnDurationPositiveDelta(existingEntries, newEntries) {
+  const existingByTurn = new Map();
+  for (const entry of normalizeTurnDurationEntries(existingEntries)) {
+    existingByTurn.set(entry.turnNumber, entry.durationMs);
+  }
+  let deltaMs = 0;
+  for (const entry of normalizeTurnDurationEntries(newEntries)) {
+    deltaMs += Math.max(0, entry.durationMs - (existingByTurn.get(entry.turnNumber) ?? 0));
+  }
+  return deltaMs;
 }
 
 function shapeUsageFromRunSummaries(shape, entries) {
@@ -1293,7 +1332,7 @@ function normalizeTurnDurationEntries(rawEntries) {
   return entries.sort((left, right) => left.turnNumber - right.turnNumber);
 }
 
-function eventTimeBounds(events) {
+function eventTimeBounds(events, options = {}) {
   let firstAt = null;
   let lastAt = null;
   const timedEvents = [];
@@ -1311,11 +1350,13 @@ function eventTimeBounds(events) {
       lastAt = recordedAt;
     }
   }
-  const durationMs = activeEventDurationMs(timedEvents);
+  const durationMs = activeEventDurationMs(timedEvents, options);
   return { firstAt, lastAt, durationMs };
 }
 
-function activeEventDurationMs(timedEvents) {
+function activeEventDurationMs(timedEvents, options = {}) {
+  const includeOpenCommandTail = options.includeOpenCommandTail === true;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const events = [...timedEvents].sort((a, b) => a.time - b.time);
   let durationMs = 0;
   let openCommands = 0;
@@ -1337,17 +1378,21 @@ function activeEventDurationMs(timedEvents) {
       durationMs += gap;
     }
   }
+  const last = events.at(-1);
+  if (includeOpenCommandTail && openCommands > 0 && last) {
+    durationMs += Math.max(0, nowMs - last.time);
+  }
 
   return durationMs;
 }
 
-function turnExecutionDurationMs(events, sessionTiming = new Map()) {
-  return turnExecutionDurationEntries(events, sessionTiming)
+function turnExecutionDurationMs(events, sessionTiming = new Map(), options = {}) {
+  return turnExecutionDurationEntries(events, sessionTiming, options)
     .reduce((sum, entry) => sum + entry.durationMs, 0);
 }
 
-function turnExecutionDurationEntries(events, sessionTiming = new Map()) {
-  const fallbackDurations = ralphEventTurnDurationFallbacks(events);
+function turnExecutionDurationEntries(events, sessionTiming = new Map(), options = {}) {
+  const fallbackDurations = ralphEventTurnDurationFallbacks(events, options);
   const limitWaitsByAttempt = limitWaitsByRawTurnAttempt(events);
   const attemptDurations = new Map();
   for (const [attemptKey, timing] of sessionTiming.entries()) {
@@ -1377,10 +1422,11 @@ function turnExecutionDurationEntries(events, sessionTiming = new Map()) {
         ),
       );
     }
+    const fallbackMs = fallbackDurations.get(attemptKey) ?? 0;
     if (attemptDurationMs > 0) {
-      attemptDurations.set(attemptKey, attemptDurationMs);
+      attemptDurations.set(attemptKey, Math.max(attemptDurationMs, fallbackMs));
     } else if (fallbackDurations.has(attemptKey)) {
-      attemptDurations.set(attemptKey, fallbackDurations.get(attemptKey));
+      attemptDurations.set(attemptKey, fallbackMs);
     }
   }
   for (const [attemptKey, fallbackMs] of fallbackDurations.entries()) {
@@ -1431,11 +1477,14 @@ function turnTimeBounds(events) {
   return bounds;
 }
 
-function ralphEventTurnDurationFallbacks(events) {
+function ralphEventTurnDurationFallbacks(events, options = {}) {
+  const includeOpenCommandTail = options.includeOpenCommandTail === true;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const attempts = buildRawTurnAttemptWindows(events);
   const spansByAttemptThread = new Map();
   const lifecycleByAttempt = new Map();
   const limitWaitsByAttempt = new Map();
+  const openCommandsByAttemptThread = new Map();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -1460,6 +1509,11 @@ function ralphEventTurnDurationFallbacks(events) {
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
     spansByAttemptThread.set(key, span);
+    if (isCommandStartEvent(event)) {
+      openCommandsByAttemptThread.set(key, (openCommandsByAttemptThread.get(key) ?? 0) + 1);
+    } else if (isCommandEndEvent(event)) {
+      openCommandsByAttemptThread.set(key, Math.max(0, (openCommandsByAttemptThread.get(key) ?? 0) - 1));
+    }
 
     if (event.eventType === "ralph.phase-status") {
       const lifecycle = lifecycleByAttempt.get(attemptKey) ?? { startMs: null, checkedMs: null };
@@ -1472,6 +1526,17 @@ function ralphEventTurnDurationFallbacks(events) {
         lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
       }
       lifecycleByAttempt.set(attemptKey, lifecycle);
+    }
+  }
+  if (includeOpenCommandTail) {
+    for (const [key, openCommands] of openCommandsByAttemptThread.entries()) {
+      if (openCommands <= 0) {
+        continue;
+      }
+      const span = spansByAttemptThread.get(key);
+      if (span) {
+        span.last = Math.max(span.last, nowMs);
+      }
     }
   }
 
