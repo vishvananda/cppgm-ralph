@@ -544,6 +544,7 @@ function dockUsageText(usageSummary, priceModel) {
 function buildDisplayEntries(records) {
   const entries = [];
   const cmdStarts = new Map();
+  const todoEntries = new Map();
   // Gemini: accumulate content chunks by traceId into messages
   const contentByTrace = new Map();
 
@@ -564,6 +565,23 @@ function buildDisplayEntries(records) {
       } else {
         // Claude emits completed-only command events (no item.started)
         entries.push({ kind: "command", startRecord: null, endRecord: record });
+      }
+      continue;
+    }
+
+    if (
+      item?.type === "todo_list" &&
+      (record.eventType === "item.started" ||
+        record.eventType === "item.updated" ||
+        record.eventType === "item.completed")
+    ) {
+      const key = todoEntryKey(record);
+      if (todoEntries.has(key)) {
+        todoEntries.get(key).record = record;
+      } else {
+        const entry = { kind: "todo", record };
+        todoEntries.set(key, entry);
+        entries.push(entry);
       }
       continue;
     }
@@ -610,6 +628,16 @@ function buildDisplayEntries(records) {
     entries.push({ kind: "event", record });
   }
   return entries;
+}
+
+function todoEntryKey(record) {
+  const item = record?.event?.item ?? {};
+  return [
+    "todo",
+    record?.threadId ?? "thread",
+    displayTurnForRecord(record),
+    item.id ?? record?.recordedAt ?? "",
+  ].join(":");
 }
 
 // --- Card renderers ---
@@ -910,7 +938,9 @@ function renderTodoCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-todo";
-  const { header: summary, body } = createAccordion(card);
+  const { header: summary, body } = createAccordion(card, {
+    key: todoEntryKey(record),
+  });
   const done = items.filter(t => t.completed).length;
   summary.innerHTML = `<span class="pill">${done}/${items.length} tasks</span>`;
 
@@ -1313,6 +1343,7 @@ function renderGeminiThoughtCard(record) {
 
 function renderDisplayEntry(entry) {
   if (entry.kind === "command") return renderCommandCard(entry);
+  if (entry.kind === "todo") return renderTodoCard(entry.record);
   if (entry.kind === "gemini-message") return renderGeminiMessageCard(entry);
   if (entry.kind === "gemini-tool-call") return renderGeminiToolCallCard(entry);
   if (entry.kind === "gemini-thought") return renderGeminiThoughtCard(entry.record);
@@ -1330,7 +1361,12 @@ function renderDisplayEntry(entry) {
     return renderMessageCard(record);
   if (record.eventType === "item.completed" && item?.type === "file_change")
     return renderFileChangeCard(record);
-  if ((record.eventType === "item.started" || record.eventType === "item.completed") && item?.type === "todo_list")
+  if (
+    (record.eventType === "item.started" ||
+      record.eventType === "item.updated" ||
+      record.eventType === "item.completed") &&
+    item?.type === "todo_list"
+  )
     return renderTodoCard(record);
   if (record.eventType === "item.completed" && item?.type === "reasoning")
     return renderReasoningCard(record);
@@ -1345,6 +1381,7 @@ function renderDisplayEntry(entry) {
 
 function scrollKeyForEntry(entry, index = null) {
   if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "todo") return todoEntryKey(entry.record);
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
   if (entry.kind === "gemini-message") return recordScrollKey(entry.record, "gemini-message", index);
   if (entry.kind === "gemini-thought") return recordScrollKey(entry.record, "gemini-thought", index);

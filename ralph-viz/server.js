@@ -2969,7 +2969,13 @@ function isDisplayItemCardEvent(record) {
   if (!item || typeof item !== "object") {
     return false;
   }
-  if (record?.eventType === "item.started" && item.type === "command_execution") {
+  if (
+    record?.eventType === "item.started" &&
+    (item.type === "command_execution" || item.type === "todo_list")
+  ) {
+    return true;
+  }
+  if (record?.eventType === "item.updated" && item.type === "todo_list") {
     return true;
   }
   if (record?.eventType !== "item.completed") {
