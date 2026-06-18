@@ -27,7 +27,7 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
-const RUN_USAGE_CACHE_VERSION = 11;
+const RUN_USAGE_CACHE_VERSION = 12;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
@@ -682,7 +682,10 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
     if (usageMode !== "skip") {
       summary.turnUsages = mergeTurnUsageEntriesMax(
         summary.turnUsages,
-        turnUsageEntriesFromEvents(events),
+        mergeTurnUsageEntriesMax(
+          turnUsageEntriesFromEvents(events),
+          await readLiveCodexTurnUsageEntries(summary, selectedThreadIds, events),
+        ),
       );
     }
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
@@ -713,9 +716,16 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
 
   if (deltaEvents.length) {
     await extendRunUsageSummaryFromEvents(summary, filePath, deltaEvents, usageMode);
-    summary.turnUsages = usageMode === "skip"
-      ? []
-      : turnUsageEntriesFromEvents(await readRunFile(filePath));
+    if (usageMode === "skip") {
+      summary.turnUsages = [];
+    } else {
+      const fullEvents = await readRunFile(filePath);
+      const fullThreadIds = inferThreadIdsFromRun(filePath, fullEvents);
+      summary.turnUsages = mergeTurnUsageEntriesMax(
+        turnUsageEntriesFromEvents(fullEvents),
+        await readCodexThreadUsageByTurn(fullThreadIds, buildSessionTurnAttemptResolver(fullEvents)),
+      );
+    }
   }
 
   const latestSessionStats = usageMode === "skip"
@@ -1025,7 +1035,11 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
 async function buildRunUsageSummary(filePath, fileBase, stat, events, precision) {
   const bounds = eventTimeBounds(events);
   const threadIds = inferThreadIdsFromRun(filePath, events);
-  const sessionTiming = await readCodexThreadTiming(threadIds, buildSessionTurnAttemptResolver(events));
+  const resolveSessionTurn = buildSessionTurnAttemptResolver(events);
+  const sessionTiming = await readCodexThreadTiming(threadIds, resolveSessionTurn);
+  const sessionTurnUsages = precision
+    ? await readCodexThreadUsageByTurn(threadIds, resolveSessionTurn)
+    : [];
   const tokenUsage = usageFromTokenEventsByThread(events);
   const threadUsages = [...tokenUsage.threadUsages];
   const coveredThreadIds = new Set(threadUsages.map((entry) => entry.threadId));
@@ -1086,7 +1100,7 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
     lastAt: bounds.lastAt,
     durationMs: turnExecutionDurationMs(events, sessionTiming) || bounds.durationMs,
     turnDurations: turnExecutionDurationEntries(events, sessionTiming),
-    turnUsages: turnUsageEntriesFromEvents(events),
+    turnUsages: mergeTurnUsageEntriesMax(turnUsageEntriesFromEvents(events), sessionTurnUsages),
     mtime: stat.mtime.toISOString(),
   }, stat, fileBase);
 }
@@ -1878,6 +1892,184 @@ async function readCodexThreadUsage(threadId, mode = "full") {
   }
 
   return hasTokenUsage(total) ? total : null;
+}
+
+async function readCodexThreadUsageByTurn(threadIds, resolveTurn) {
+  const totalsByTurn = new Map();
+  for (const threadId of threadIds ?? []) {
+    if (!threadId) {
+      continue;
+    }
+    const files = await findCodexSessionFiles(threadId);
+    let previous = null;
+    for (const filePath of files.sort()) {
+      previous = await readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previous);
+    }
+  }
+  return normalizeTurnUsageEntries([...totalsByTurn.entries()].map(([turnNumber, usage]) => ({
+    turnNumber,
+    usage,
+  })));
+}
+
+async function readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previousUsage) {
+  let previous = previousUsage;
+  const lines = readline.createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.includes('"type":"token_count"')) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    const current = record?.type === "event_msg" && record.payload?.type === "token_count"
+      ? normalizeUsage(record.payload.info?.total_token_usage)
+      : null;
+    if (!hasTokenUsage(current)) {
+      continue;
+    }
+    const resolvedTurn = resolveTurn(record.timestamp);
+    const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turnNumber : resolvedTurn;
+    const delta = usageDelta(current, previous);
+    previous = current;
+    if (!Number.isInteger(turn) || turn <= 0 || !hasTokenUsage(delta)) {
+      continue;
+    }
+    totalsByTurn.set(turn, addUsage(totalsByTurn.get(turn), delta));
+  }
+  return previous;
+}
+
+async function readLiveCodexTurnUsageEntries(summary, threadIds, events) {
+  const windows = selectedTurnUsageWindows(summary, events);
+  if (!windows.length) {
+    return [];
+  }
+  const totalsByTurn = new Map();
+  for (const threadId of threadIds ?? []) {
+    if (!threadId) {
+      continue;
+    }
+    for (const window of windows) {
+      const usage = await readCodexThreadUsageForWindow(
+        threadId,
+        window.startMs,
+        window.endMs,
+      );
+      if (hasTokenUsage(usage)) {
+        totalsByTurn.set(window.turnNumber, addUsage(totalsByTurn.get(window.turnNumber), usage));
+      }
+    }
+  }
+  return normalizeTurnUsageEntries([...totalsByTurn.entries()].map(([turnNumber, usage]) => ({
+    turnNumber,
+    usage,
+  })));
+}
+
+function selectedTurnUsageWindows(summary, events) {
+  const selectedTurns = [...new Set(
+    (events ?? [])
+      .map((event) => eventTurnNumber(event))
+      .filter((turn) => turn != null),
+  )].sort((a, b) => a - b);
+  if (!selectedTurns.length) {
+    return [];
+  }
+  const durations = normalizeTurnDurationEntries(summary?.turnDurations);
+  const durationByTurn = new Map(durations.map((entry) => [entry.turnNumber, entry]));
+  return selectedTurns
+    .map((turnNumber) => {
+      const duration = durationByTurn.get(turnNumber);
+      let startMs = Date.parse(duration?.firstAt ?? "");
+      if (!Number.isFinite(startMs)) {
+        startMs = selectedTurnFirstEventMs(events, turnNumber);
+      }
+      if (!Number.isFinite(startMs)) {
+        return null;
+      }
+      const nextDuration = durations.find((entry) =>
+        entry.turnNumber > turnNumber && Date.parse(entry.firstAt ?? "") > startMs);
+      const endMs = nextDuration ? Date.parse(nextDuration.firstAt ?? "") : Infinity;
+      return { turnNumber, startMs, endMs };
+    })
+    .filter(Boolean);
+}
+
+function selectedTurnFirstEventMs(events, turnNumber) {
+  let first = null;
+  for (const event of events ?? []) {
+    if (eventTurnNumber(event) !== turnNumber) {
+      continue;
+    }
+    const time = Date.parse(event.recordedAt ?? "");
+    if (Number.isFinite(time)) {
+      first = first == null ? time : Math.min(first, time);
+    }
+  }
+  return first;
+}
+
+async function readCodexThreadUsageForWindow(threadId, startMs, endMs) {
+  const files = await findCodexSessionFiles(threadId);
+  let total = emptyUsage();
+  let previous = null;
+
+  for (const filePath of files.sort()) {
+    const result = await readCodexSessionUsageForWindow(filePath, startMs, endMs, previous, total);
+    previous = result.previous;
+    total = result.total;
+    if (result.done) {
+      break;
+    }
+  }
+
+  return hasTokenUsage(total) ? total : null;
+}
+
+async function readCodexSessionUsageForWindow(filePath, startMs, endMs, previousUsage, totalUsage) {
+  let previous = previousUsage;
+  let total = normalizeUsage(totalUsage) ?? emptyUsage();
+  const lines = readline.createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.includes('"type":"token_count"')) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    const time = Date.parse(record.timestamp ?? "");
+    const current = record?.type === "event_msg" && record.payload?.type === "token_count"
+      ? normalizeUsage(record.payload.info?.total_token_usage)
+      : null;
+    if (!Number.isFinite(time) || !hasTokenUsage(current)) {
+      continue;
+    }
+    if (time < startMs) {
+      previous = current;
+      continue;
+    }
+    if (Number.isFinite(endMs) && time >= endMs) {
+      return { previous, total, done: true };
+    }
+    total = addUsage(total, usageDelta(current, previous));
+    previous = current;
+  }
+  return { previous, total, done: false };
 }
 
 async function readCodexThreadUsageFast(threadId) {
