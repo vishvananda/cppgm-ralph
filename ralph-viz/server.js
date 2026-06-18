@@ -27,12 +27,13 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
-const RUN_USAGE_CACHE_VERSION = 8;
+const RUN_USAGE_CACHE_VERSION = 10;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 1;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
+const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
 const RALPH_DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.5-flash";
 const RALPH_DEFAULT_REASONING_EFFORT = "high";
@@ -679,6 +680,11 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
+  if (usageMode !== "skip") {
+    const summary = await readRunUsageSummary(shape, filePath, fileBase, usageMode);
+    return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
+  }
+
   return readSelectedShapeUsage(shape, fileBase, events, usageMode);
 }
 
@@ -1190,10 +1196,6 @@ async function refreshFastRunUsageSummary(rawSummary, stat, fileBase, threadIds,
     .sort((left, right) => left[0].localeCompare(right[0]))
     .map(([threadId, usage]) => ({ threadId, usage }));
 
-  const elapsedDelta = sessionStatsElapsedDeltaMs(cachedSessionStats, currentSessionStats);
-  if (elapsedDelta > 0) {
-    summary.durationMs += elapsedDelta;
-  }
   const latestSessionMtimeMs = maxSessionMtimeMs(currentSessionStats);
   if (Number.isFinite(latestSessionMtimeMs)) {
     const latestSessionAt = new Date(latestSessionMtimeMs).toISOString();
@@ -1233,15 +1235,6 @@ async function codexSessionStatsForThreadIds(threadIds) {
   return stats.sort((left, right) =>
     left.threadId.localeCompare(right.threadId) ||
     left.file.localeCompare(right.file));
-}
-
-function sessionStatsElapsedDeltaMs(cachedStats, currentStats) {
-  const previous = maxSessionMtimeMs(cachedStats);
-  const current = maxSessionMtimeMs(currentStats);
-  if (!Number.isFinite(previous) || !Number.isFinite(current) || current <= previous) {
-    return 0;
-  }
-  return current - previous;
 }
 
 function maxSessionMtimeMs(stats) {
@@ -1431,11 +1424,11 @@ function turnExecutionDurationEntries(events, sessionTiming = new Map(), options
         ),
       );
     }
-    if (timing?.sessionFirstMs != null && timing?.sessionLastMs != null) {
+    if (timing?.sessionActiveMs > 0) {
       attemptDurationMs = Math.max(
         attemptDurationMs,
         subtractLimitWaitOverlap(
-          Math.max(0, timing.sessionLastMs - timing.sessionFirstMs),
+          timing.sessionActiveMs,
           timing.sessionFirstMs,
           timing.sessionLastMs,
           limitWaitsByAttempt.get(attemptKey),
@@ -1502,7 +1495,6 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const attempts = buildRawTurnAttemptWindows(events);
   const spansByAttemptThread = new Map();
-  const lifecycleByAttempt = new Map();
   const limitWaitsByAttempt = new Map();
   const openCommandsByAttemptThread = new Map();
   for (const event of events) {
@@ -1525,27 +1517,20 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
       }
     }
     const key = `${attemptKey}\0${event.threadId ?? ""}`;
-    const span = spansByAttemptThread.get(key) ?? { attemptKey, first: time, last: time };
+    const span = spansByAttemptThread.get(key) ?? {
+      attemptKey,
+      first: time,
+      last: time,
+      events: [],
+    };
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
+    span.events.push({ ...event, time });
     spansByAttemptThread.set(key, span);
     if (isCommandStartEvent(event)) {
       openCommandsByAttemptThread.set(key, (openCommandsByAttemptThread.get(key) ?? 0) + 1);
     } else if (isCommandEndEvent(event)) {
       openCommandsByAttemptThread.set(key, Math.max(0, (openCommandsByAttemptThread.get(key) ?? 0) - 1));
-    }
-
-    if (event.eventType === "ralph.phase-status") {
-      const lifecycle = lifecycleByAttempt.get(attemptKey) ?? { startMs: null, checkedMs: null };
-      if (event.event?.action === "turn-start") {
-        lifecycle.startMs = lifecycle.startMs == null ? time : Math.max(lifecycle.startMs, time);
-        if (lifecycle.checkedMs != null && lifecycle.checkedMs < lifecycle.startMs) {
-          lifecycle.checkedMs = null;
-        }
-      } else if (event.event?.action === "checked") {
-        lifecycle.checkedMs = lifecycle.checkedMs == null ? time : Math.max(lifecycle.checkedMs, time);
-      }
-      lifecycleByAttempt.set(attemptKey, lifecycle);
     }
   }
   if (includeOpenCommandTail) {
@@ -1562,7 +1547,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
 
   const durations = new Map();
   for (const span of spansByAttemptThread.values()) {
-    const durationMs = Math.max(0, span.last - span.first);
+    const durationMs = activeEventDurationMs(span.events, { includeOpenCommandTail, nowMs });
     const activeMs = subtractLimitWaitOverlap(
       durationMs,
       span.first,
@@ -1570,23 +1555,6 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
       limitWaitsByAttempt.get(span.attemptKey),
     );
     durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + activeMs);
-  }
-  for (const [attemptKey, lifecycle] of lifecycleByAttempt.entries()) {
-    if (
-      Number.isFinite(lifecycle.startMs) &&
-      Number.isFinite(lifecycle.checkedMs) &&
-      lifecycle.checkedMs >= lifecycle.startMs
-    ) {
-      durations.set(
-        attemptKey,
-        subtractLimitWaitOverlap(
-          lifecycle.checkedMs - lifecycle.startMs,
-          lifecycle.startMs,
-          lifecycle.checkedMs,
-          limitWaitsByAttempt.get(attemptKey),
-        ),
-      );
-    }
   }
   return durations;
 }
@@ -1698,10 +1666,19 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
       goalTimeUsedMs: 0,
       sessionFirstMs: null,
       sessionLastMs: null,
+      sessionActiveMs: 0,
+      sessionLastActivityMs: null,
     };
     if (Number.isFinite(time)) {
       timing.sessionFirstMs = timing.sessionFirstMs == null ? time : Math.min(timing.sessionFirstMs, time);
       timing.sessionLastMs = timing.sessionLastMs == null ? time : Math.max(timing.sessionLastMs, time);
+      if (timing.sessionLastActivityMs != null) {
+        const gap = time - timing.sessionLastActivityMs;
+        if (gap >= 0 && gap <= ACTIVE_EVENT_GAP_MS) {
+          timing.sessionActiveMs += gap;
+        }
+      }
+      timing.sessionLastActivityMs = time;
     }
 
     if (record.type === "event_msg" && record.payload?.type === "task_complete") {
@@ -2889,6 +2866,9 @@ function findMergeableFileChangeIndex(events, candidate) {
     return -1;
   }
   const streamKey = eventTurnThreadKey(candidate);
+  const candidateTime = Date.parse(candidate?.recordedAt ?? "");
+  let bestIndex = -1;
+  let bestDistance = Infinity;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (
@@ -2897,10 +2877,23 @@ function findMergeableFileChangeIndex(events, candidate) {
       event?.event?.item?.type === "file_change" &&
       fileChangeEventSignature(event) === candidateSignature
     ) {
-      return index;
+      if (isFileChangeWithDiff(event)) {
+        continue;
+      }
+      const eventTime = Date.parse(event?.recordedAt ?? "");
+      const distance = Number.isFinite(candidateTime) && Number.isFinite(eventTime)
+        ? Math.abs(candidateTime - eventTime)
+        : 0;
+      if (distance > FILE_CHANGE_DIFF_MERGE_WINDOW_MS) {
+        continue;
+      }
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
     }
   }
-  return -1;
+  return bestIndex;
 }
 
 function mergeFileChangeEventDiffs(existing, rich) {
