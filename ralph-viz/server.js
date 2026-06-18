@@ -548,6 +548,7 @@ async function readShapeUsage(shape, selected = {}) {
       firstAt: summary.firstAt,
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
+      turnDurations: summary.turnDurations,
       mtime: summary.mtime,
       usage: hasTokenUsage(usage) ? usage : null,
     });
@@ -596,6 +597,7 @@ function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
       firstAt: bounds.firstAt,
       lastAt: bounds.lastAt,
       durationMs: bounds.durationMs,
+      turnDurations: turnExecutionDurationEntries(events),
       mtime: null,
       usage: hasTokenUsage(usage) ? usage : null,
     }],
@@ -603,14 +605,26 @@ function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
 }
 
 async function readFastShapeUsage(shape, fileBase, events, usageMode) {
-  const stat = await fs.stat(path.join(RALPH_DIR, shape, "events", `${fileBase}.jsonl`));
+  const filePath = path.join(RALPH_DIR, shape, "events", `${fileBase}.jsonl`);
+  const stat = await fs.stat(filePath);
   const cached = await readLooseRunUsageCacheEntry(shape, fileBase);
-  const summary = cached?.summary
+  let summary = cached?.summary
     ? normalizeRunUsageSummary(cached.summary, stat, fileBase)
     : null;
   const selectedThreadIds = inferThreadIdsFromRun("", events);
 
   if (summary) {
+    if (!cacheStatMatches(cached.file, stat)) {
+      summary = await refreshStaleFastRunUsageSummary(
+        shape,
+        filePath,
+        fileBase,
+        stat,
+        cached,
+        usageMode,
+      ) ?? summary;
+    }
+
     const threadUsageById = new Map(
       summary.threadUsages.map((entry) => [entry.threadId, entry.usage]),
     );
@@ -643,6 +657,154 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
   return readSelectedShapeUsage(shape, fileBase, events, usageMode);
 }
 
+async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, cacheEntry, usageMode) {
+  const cachedSize = Number(cacheEntry?.file?.size);
+  if (!Number.isFinite(cachedSize) || cachedSize < 0 || cachedSize > stat.size) {
+    return null;
+  }
+
+  const summary = normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
+  const deltaEvents = cachedSize < stat.size
+    ? await readRunEventsFromOffset(filePath, cachedSize)
+    : [];
+
+  if (deltaEvents.length) {
+    await extendRunUsageSummaryFromEvents(summary, filePath, deltaEvents, usageMode);
+  }
+
+  const latestSessionStats = usageMode === "skip"
+    ? []
+    : await codexSessionStatsForThreadIds(summary.threadIds);
+  await writeRunUsageCache(shape, fileBase, stat, "fast", latestSessionStats, summary);
+  return summary;
+}
+
+async function readRunEventsFromOffset(filePath, offset) {
+  const events = [];
+  const stream = createReadStream(filePath, {
+    encoding: "utf8",
+    start: Math.max(0, offset),
+  });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === "object") {
+        events.push(parsed);
+      }
+    } catch (_) {
+      // If the cached byte offset landed in the middle of a line, the first
+      // read fragment is not parseable. Later complete JSONL records still are.
+    }
+  }
+  return events;
+}
+
+async function extendRunUsageSummaryFromEvents(summary, filePath, events, usageMode) {
+  const bounds = eventTimeBounds(events);
+  if (bounds.firstAt && (!summary.firstAt || bounds.firstAt < summary.firstAt)) {
+    summary.firstAt = bounds.firstAt;
+  }
+  if (bounds.lastAt && (!summary.lastAt || bounds.lastAt > summary.lastAt)) {
+    summary.lastAt = bounds.lastAt;
+  }
+
+  const threadIds = inferThreadIdsFromRun(filePath, events);
+  const mergedThreadIds = new Set(summary.threadIds);
+  for (const threadId of threadIds) {
+    mergedThreadIds.add(threadId);
+  }
+
+  const sessionTiming = usageMode === "skip"
+    ? new Map()
+    : await readCodexThreadTiming(threadIds, buildSessionTurnAttemptResolver(events));
+  const durationDeltaMs = turnExecutionDurationMs(events, sessionTiming) || bounds.durationMs;
+  if (durationDeltaMs > 0) {
+    summary.durationMs += durationDeltaMs;
+  }
+  summary.turnDurations = mergeTurnDurationEntries(
+    summary.turnDurations,
+    turnExecutionDurationEntries(events, sessionTiming),
+  );
+
+  const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
+  let unthreadedUsage = summary.unthreadedUsage;
+  if (usageMode !== "skip") {
+    const tokenUsage = usageFromTokenEventsByThread(events);
+    for (const entry of tokenUsage.threadUsages) {
+      threadUsageById.set(entry.threadId, addUsage(threadUsageById.get(entry.threadId), entry.usage));
+      mergedThreadIds.add(entry.threadId);
+    }
+    if (hasTokenUsage(tokenUsage.unthreadedUsage)) {
+      unthreadedUsage = addUsage(unthreadedUsage, tokenUsage.unthreadedUsage);
+    }
+
+    for (const [threadId, usage] of turnCompletedUsageByThread(events).entries()) {
+      if (!threadId) {
+        if (hasTokenUsage(usage)) {
+          unthreadedUsage = addUsage(unthreadedUsage, usage);
+        }
+        continue;
+      }
+      const existing = threadUsageById.get(threadId);
+      if (existing) {
+        if (usage.cost_usd > 0 && !((existing.cost_usd ?? 0) > 0)) {
+          threadUsageById.set(threadId, { ...(normalizeUsage(existing) ?? emptyUsage()), cost_usd: usage.cost_usd });
+        }
+      } else if (hasTokenUsage(usage)) {
+        threadUsageById.set(threadId, usage);
+      }
+      mergedThreadIds.add(threadId);
+    }
+
+    // Codex session counters are cumulative per thread. Replacing any touched
+    // thread with the latest fast-read value avoids double-counting when a
+    // stale cache was written in the middle of a restarted or continued turn.
+    for (const threadId of threadIds) {
+      const usage = await readCodexThreadUsageFast(threadId);
+      if (hasTokenUsage(usage)) {
+        threadUsageById.set(threadId, usage);
+        mergedThreadIds.add(threadId);
+      }
+    }
+  }
+
+  summary.threadIds = [...mergedThreadIds].filter(Boolean).sort();
+  summary.threadUsages = [...threadUsageById.entries()]
+    .filter(([, usage]) => hasTokenUsage(usage))
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([threadId, usage]) => ({ threadId, usage: normalizeUsage(usage) ?? emptyUsage() }));
+  summary.unthreadedUsage = hasTokenUsage(unthreadedUsage)
+    ? normalizeUsage(unthreadedUsage)
+    : null;
+}
+
+function mergeTurnDurationEntries(existingEntries, newEntries) {
+  const byTurn = new Map();
+  for (const entry of normalizeTurnDurationEntries(existingEntries)) {
+    byTurn.set(entry.turnNumber, { ...entry });
+  }
+  for (const entry of normalizeTurnDurationEntries(newEntries)) {
+    const current = byTurn.get(entry.turnNumber);
+    if (!current) {
+      byTurn.set(entry.turnNumber, { ...entry });
+      continue;
+    }
+    current.durationMs += entry.durationMs;
+    if (entry.firstAt && (!current.firstAt || entry.firstAt < current.firstAt)) {
+      current.firstAt = entry.firstAt;
+    }
+    if (entry.lastAt && (!current.lastAt || entry.lastAt > current.lastAt)) {
+      current.lastAt = entry.lastAt;
+    }
+  }
+  return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
 function shapeUsageFromRunSummaries(shape, entries) {
   const seenThreads = new Set();
   let total = emptyUsage();
@@ -670,6 +832,7 @@ function shapeUsageFromRunSummaries(shape, entries) {
       firstAt: summary.firstAt,
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
+      turnDurations: summary.turnDurations,
       mtime: summary.mtime,
       usage: hasTokenUsage(usage) ? usage : null,
     });
@@ -796,6 +959,7 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
     firstAt: bounds.firstAt,
     lastAt: bounds.lastAt,
     durationMs: turnExecutionDurationMs(events, sessionTiming) || bounds.durationMs,
+    turnDurations: turnExecutionDurationEntries(events, sessionTiming),
     mtime: stat.mtime.toISOString(),
   }, stat, fileBase);
 }
@@ -1101,8 +1265,32 @@ function normalizeRunUsageSummary(raw, stat, fileBase) {
     firstAt: typeof raw?.firstAt === "string" ? raw.firstAt : null,
     lastAt: typeof raw?.lastAt === "string" ? raw.lastAt : null,
     durationMs: Number.isFinite(raw?.durationMs) ? Math.max(0, raw.durationMs) : 0,
+    turnDurations: normalizeTurnDurationEntries(raw?.turnDurations),
     mtime: stat.mtime.toISOString(),
   };
+}
+
+function normalizeTurnDurationEntries(rawEntries) {
+  const entries = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(rawEntries) ? rawEntries : []) {
+    const turnNumber = Number(raw?.turnNumber);
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0 || seen.has(turnNumber)) {
+      continue;
+    }
+    const durationMs = Number(raw?.durationMs);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      continue;
+    }
+    seen.add(turnNumber);
+    entries.push({
+      turnNumber,
+      durationMs: Math.max(0, durationMs),
+      firstAt: typeof raw?.firstAt === "string" ? raw.firstAt : null,
+      lastAt: typeof raw?.lastAt === "string" ? raw.lastAt : null,
+    });
+  }
+  return entries.sort((left, right) => left.turnNumber - right.turnNumber);
 }
 
 function eventTimeBounds(events) {
@@ -1154,12 +1342,15 @@ function activeEventDurationMs(timedEvents) {
 }
 
 function turnExecutionDurationMs(events, sessionTiming = new Map()) {
+  return turnExecutionDurationEntries(events, sessionTiming)
+    .reduce((sum, entry) => sum + entry.durationMs, 0);
+}
+
+function turnExecutionDurationEntries(events, sessionTiming = new Map()) {
   const fallbackDurations = ralphEventTurnDurationFallbacks(events);
   const limitWaitsByAttempt = limitWaitsByRawTurnAttempt(events);
-  let durationMs = 0;
-  const coveredAttempts = new Set();
+  const attemptDurations = new Map();
   for (const [attemptKey, timing] of sessionTiming.entries()) {
-    coveredAttempts.add(attemptKey);
     let attemptDurationMs = 0;
     if (timing?.durationMs > 0) {
       attemptDurationMs = Math.max(attemptDurationMs, timing.durationMs);
@@ -1187,17 +1378,57 @@ function turnExecutionDurationMs(events, sessionTiming = new Map()) {
       );
     }
     if (attemptDurationMs > 0) {
-      durationMs += attemptDurationMs;
+      attemptDurations.set(attemptKey, attemptDurationMs);
     } else if (fallbackDurations.has(attemptKey)) {
-      durationMs += fallbackDurations.get(attemptKey);
+      attemptDurations.set(attemptKey, fallbackDurations.get(attemptKey));
     }
   }
   for (const [attemptKey, fallbackMs] of fallbackDurations.entries()) {
-    if (!coveredAttempts.has(attemptKey)) {
-      durationMs += fallbackMs;
+    if (!attemptDurations.has(attemptKey)) {
+      attemptDurations.set(attemptKey, fallbackMs);
     }
   }
-  return durationMs;
+  const boundsByTurn = turnTimeBounds(events);
+  const byTurn = new Map();
+  for (const [attemptKey, durationMs] of attemptDurations.entries()) {
+    const turnNumber = Number(String(attemptKey).split("\0", 1)[0]);
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0 || durationMs <= 0) {
+      continue;
+    }
+    byTurn.set(turnNumber, (byTurn.get(turnNumber) ?? 0) + durationMs);
+  }
+  return [...byTurn.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([turnNumber, durationMs]) => ({
+      turnNumber,
+      durationMs,
+      firstAt: boundsByTurn.get(turnNumber)?.firstAt ?? null,
+      lastAt: boundsByTurn.get(turnNumber)?.lastAt ?? null,
+    }));
+}
+
+function turnTimeBounds(events) {
+  const bounds = new Map();
+  for (const event of events) {
+    const turnNumber = event?.turnNumber;
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
+      continue;
+    }
+    const recordedAt = event.recordedAt ?? null;
+    const time = Date.parse(recordedAt ?? "");
+    if (!recordedAt || !Number.isFinite(time)) {
+      continue;
+    }
+    const entry = bounds.get(turnNumber) ?? { firstAt: recordedAt, lastAt: recordedAt };
+    if (recordedAt < entry.firstAt) {
+      entry.firstAt = recordedAt;
+    }
+    if (recordedAt > entry.lastAt) {
+      entry.lastAt = recordedAt;
+    }
+    bounds.set(turnNumber, entry);
+  }
+  return bounds;
 }
 
 function ralphEventTurnDurationFallbacks(events) {

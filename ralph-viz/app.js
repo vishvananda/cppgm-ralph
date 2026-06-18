@@ -189,6 +189,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
   }
 
   const testProgress = applyProgressBestCache(buildAgentTestProgressState(events), run);
+  const normalizedShapeUsage = normalizeShapeUsage(shapeUsage);
 
   return {
     threadId: events.at(0)?.threadId ?? "n/a",
@@ -197,9 +198,9 @@ function buildSummary(events, shapeUsage = null, run = null) {
     first, last,
     activeDurationMs: activeEventDurationMs(events),
     tokenUsage: latestCumulativeUsage(events),
-    shapeUsage: normalizeShapeUsage(shapeUsage),
+    shapeUsage: normalizedShapeUsage,
     priceModel,
-    latestTurn: latestTurnOverview(events, priceModel),
+    latestTurn: latestTurnOverview(events, priceModel, normalizedShapeUsage),
     latestPhaseStatus: latestPhaseStatus(events),
     testProgress,
     latestTestStatus: latestTestStatus(events),
@@ -207,15 +208,39 @@ function buildSummary(events, shapeUsage = null, run = null) {
   };
 }
 
-function latestTurnOverview(events, priceModel) {
+function latestTurnOverview(events, priceModel, shapeUsage = null) {
   const turn = latestNumericTurn(events);
   if (turn == null) {
     return null;
   }
-  const duration = durationText(buildTurnDurationMap(events).get(turn));
+  const duration = durationText(
+    shapeUsageTurnDuration(shapeUsage, turn) ?? buildTurnDurationMap(events).get(turn),
+  );
   const usage = buildUsageMap(events).get(turn);
   const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
   return { turn, duration, cost };
+}
+
+function shapeUsageTurnDuration(shapeUsage, turn) {
+  if (!Number.isInteger(turn) || turn <= 0) {
+    return null;
+  }
+  for (const run of Array.isArray(shapeUsage?.runs) ? shapeUsage.runs : []) {
+    for (const entry of Array.isArray(run?.turnDurations) ? run.turnDurations : []) {
+      if (Number(entry?.turnNumber) !== turn) {
+        continue;
+      }
+      const durationMs = Number(entry?.durationMs);
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        return {
+          first: entry.firstAt ? Date.parse(entry.firstAt) : null,
+          last: entry.lastAt ? Date.parse(entry.lastAt) : null,
+          durationMs,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 function latestNumericTurn(events) {
