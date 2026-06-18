@@ -97,13 +97,14 @@ for my $file (@files) {
     check_file_name($rel, $line_count, \@fatal, \@warning);
     check_includes($rel, $text, $comment_masked_text, $code_masked_text, \%included_by, \@fatal, \@warning);
     check_shortcut_smells($rel, $text, $comment_masked_text, $code_masked_text, \@fatal, \@warning);
+    check_hosted_library_specialization_smells($rel, $comment_masked_text, $code_masked_text, \@fatal, \@warning);
     check_compressed_code_lines($rel, $code_masked_text, \@fatal);
     check_functions($rel, $code_masked_text, \@fatal, \@warning);
     check_header_body_weight($rel, $code_masked_text, \@fatal, \@warning);
 }
 
 check_stem_groups(\%stem_groups, \@warning);
-check_duplicate_blocks(\%logical_by_file, \@warning);
+check_duplicate_blocks(\%logical_by_file, \@warning) if !@fatal;
 
 my $stage_text = $opt{stage} ? " for $opt{stage}" : '';
 if (!@fatal && !@warning) {
@@ -551,6 +552,60 @@ sub emitted_script_marker_from_line {
     return 'node interpreter' if $line =~ m{/(?:usr/)?bin/node\b} || $line =~ /["'`]\s*node\b/;
     return 'perl interpreter' if $line =~ m{/(?:usr/)?bin/perl\b} || $line =~ /["'`]\s*perl\b/;
     return 'exec trampoline' if $line =~ /(?:^|["'`])\s*exec\s+(?:["'`\\\/\$]|[A-Za-z_.-])/;
+    return undef;
+}
+
+sub check_hosted_library_specialization_smells {
+    my ($rel, $comment_masked_text, $code_masked_text, $fatal, $warning) = @_;
+    my @comment_lines = split /\n/, $comment_masked_text;
+
+    for my $i (0 .. $#comment_lines) {
+        my $line = $comment_lines[$i] // '';
+        next if $line !~ /(?:hosted|_M_|_S_|_Rb_tree|_Hashtable|_Bit_|__normal_iterator|__deque|__tree|__hash|__shared|__compressed_pair|__bitset)/i;
+        if (my $marker = hosted_library_private_marker($line)) {
+            add_finding($fatal, 'hosted-private-marker', $rel, $i + 1,
+                "source mentions hosted standard-library/private implementation marker '$marker'; " .
+                "special-casing hosted headers or STL/private implementation details is not ok. " .
+                "Fix by parsing and compiling hosted header bodies through the ordinary compiler path, " .
+                "preserving ordinary body demand, or declaring a true external symbol; do not add " .
+                "recognizers, wrappers, synthetic bodies, layout tables, or branches keyed on " .
+                "hosted/STL/private implementation names");
+            next;
+        }
+        if (my $marker = hosted_header_specialization_marker($line)) {
+            add_finding($fatal, 'hosted-library-specialization', $rel, $i + 1,
+                "source declares or uses hosted-header-specific special case '$marker'; " .
+                "special-casing hosted headers is not ok. Fix by parsing and compiling the hosted " .
+                "header body through the ordinary compiler path, preserving ordinary body demand, " .
+                "or declaring a true external symbol; do not move the special case into a predicate, " .
+                "wrapper, synthetic body, layout table, or helper function");
+        }
+    }
+}
+
+sub hosted_header_specialization_marker {
+    my ($text) = @_;
+    return undef if $text !~ /\bhosted\b/i;
+    my @names = qw(
+        vector deque unordered_map unordered_set shared_ptr unique_ptr weak_ptr
+        make_shared basic_string string_view initializer_list tuple optional variant
+        any bitset normal_iterator hashtable hash_node rb_tree rbtree
+    );
+    for my $name (@names) {
+        return $name
+            if $text =~ /\b[A-Za-z0-9_]*hosted[A-Za-z0-9_]*\Q$name\E[A-Za-z0-9_]*\b/i ||
+               $text =~ /\b[A-Za-z0-9_]*\Q$name\E[A-Za-z0-9_]*hosted[A-Za-z0-9_]*\b/i;
+        return "\"$name\""
+            if $text =~ /"(?:std::|std::__[A-Za-z0-9_]+::|__gnu_cxx::)?\Q$name\E"/ &&
+               $text =~ /\bhosted\b/i;
+    }
+    return undef;
+}
+
+sub hosted_library_private_marker {
+    my ($text) = @_;
+    return undef if $text !~ /(?:_M_|_S_|_Rb_tree|_Hashtable|_Bit_|__normal_iterator|__deque|__tree|__hash|__shared|__compressed_pair|__bitset)/;
+    return $1 if $text =~ /\b(_M_[A-Za-z0-9_]*|_S_[A-Za-z0-9_]*|_Rb_tree[A-Za-z0-9_]*|_Hashtable[A-Za-z0-9_]*|_Bit_[A-Za-z0-9_]*|__normal_iterator[A-Za-z0-9_]*|__deque[A-Za-z0-9_]*|__tree[A-Za-z0-9_]*|__hash[A-Za-z0-9_]*|__shared[A-Za-z0-9_]*|__compressed_pair[A-Za-z0-9_]*|__bitset[A-Za-z0-9_]*)\b/;
     return undef;
 }
 
