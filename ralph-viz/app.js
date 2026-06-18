@@ -216,7 +216,7 @@ function latestTurnOverview(events, priceModel, shapeUsage = null) {
   }
   const durationMap = buildTurnDurationMap(events);
   const duration = durationText(bestTurnDurationSpan(shapeUsage, turn, durationMap));
-  const usage = buildUsageMap(events).get(turn);
+  const usage = bestTurnUsage(shapeUsage, turn, buildUsageMap(events).get(turn));
   const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
   return { turn, duration, cost };
 }
@@ -253,6 +253,49 @@ function shapeUsageTurnDuration(shapeUsage, turn) {
     }
   }
   return null;
+}
+
+function bestTurnUsage(shapeUsage, turn, liveUsage = null) {
+  const cached = shapeUsageTurnUsage(shapeUsage, turn);
+  if (!cached) {
+    return liveUsage;
+  }
+  if (!liveUsage) {
+    return cached;
+  }
+  return usageMagnitude(liveUsage) > usageMagnitude(cached) ? liveUsage : cached;
+}
+
+function shapeUsageTurnUsage(shapeUsage, turn) {
+  if (!Number.isInteger(turn) || turn <= 0) {
+    return null;
+  }
+  let usage = null;
+  for (const run of Array.isArray(shapeUsage?.runs) ? shapeUsage.runs : []) {
+    for (const entry of Array.isArray(run?.turnUsages) ? run.turnUsages : []) {
+      if (Number(entry?.turnNumber) !== turn) {
+        continue;
+      }
+      const normalized = normalizeUsage(entry?.usage);
+      if (hasTokenUsage(normalized)) {
+        usage = addUsage(usage, normalized);
+      }
+    }
+  }
+  return hasTokenUsage(usage) ? usage : null;
+}
+
+function usageMagnitude(usage) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) {
+    return 0;
+  }
+  return normalized.total_tokens ||
+    normalized.input_tokens +
+      normalized.cached_input_tokens +
+      normalized.output_tokens +
+      normalized.reasoning_output_tokens ||
+    normalized.cost_usd;
 }
 
 function latestNumericTurn(events) {
@@ -3988,7 +4031,9 @@ function renderTimeline(records) {
     });
 
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
-    const usage = usageMap.get(turn);
+    const usage = Number.isInteger(turn)
+      ? bestTurnUsage(state.shapeUsage, turn, usageMap.get(turn))
+      : usageMap.get(turn);
     const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);

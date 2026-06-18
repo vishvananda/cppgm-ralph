@@ -27,7 +27,7 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
-const RUN_USAGE_CACHE_VERSION = 10;
+const RUN_USAGE_CACHE_VERSION = 11;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
@@ -570,6 +570,7 @@ async function readShapeUsage(shape, selected = {}) {
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
       turnDurations: summary.turnDurations,
+      turnUsages: summary.turnUsages,
       mtime: summary.mtime,
       usage: hasTokenUsage(usage) ? usage : null,
     });
@@ -619,6 +620,7 @@ function readSelectedShapeUsage(shape, fileBase, events, usageMode) {
       lastAt: bounds.lastAt,
       durationMs: bounds.durationMs,
       turnDurations: turnExecutionDurationEntries(events, new Map(), { includeOpenCommandTail: true }),
+      turnUsages: turnUsageEntriesFromEvents(events),
       mtime: null,
       usage: hasTokenUsage(usage) ? usage : null,
     }],
@@ -677,11 +679,21 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
       selectedBounds.durationMs,
     );
     summary.turnDurations = mergeTurnDurationEntriesMax(summary.turnDurations, liveTurnDurations);
+    if (usageMode !== "skip") {
+      summary.turnUsages = mergeTurnUsageEntriesMax(
+        summary.turnUsages,
+        turnUsageEntriesFromEvents(events),
+      );
+    }
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
   if (usageMode !== "skip") {
     const summary = await readRunUsageSummary(shape, filePath, fileBase, usageMode);
+    summary.turnUsages = mergeTurnUsageEntriesMax(
+      summary.turnUsages,
+      turnUsageEntriesFromEvents(events),
+    );
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
@@ -701,6 +713,9 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
 
   if (deltaEvents.length) {
     await extendRunUsageSummaryFromEvents(summary, filePath, deltaEvents, usageMode);
+    summary.turnUsages = usageMode === "skip"
+      ? []
+      : turnUsageEntriesFromEvents(await readRunFile(filePath));
   }
 
   const latestSessionStats = usageMode === "skip"
@@ -761,7 +776,6 @@ async function extendRunUsageSummaryFromEvents(summary, filePath, events, usageM
     summary.turnDurations,
     turnExecutionDurationEntries(events, sessionTiming),
   );
-
   const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
   let unthreadedUsage = summary.unthreadedUsage;
   if (usageMode !== "skip") {
@@ -870,6 +884,52 @@ function turnDurationPositiveDelta(existingEntries, newEntries) {
   return deltaMs;
 }
 
+function normalizeTurnUsageEntries(rawEntries) {
+  const byTurn = new Map();
+  for (const raw of Array.isArray(rawEntries) ? rawEntries : []) {
+    const turnNumber = Number(raw?.turnNumber);
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
+      continue;
+    }
+    const usage = normalizeUsage(raw?.usage);
+    if (!hasTokenUsage(usage)) {
+      continue;
+    }
+    byTurn.set(turnNumber, {
+      turnNumber,
+      usage: addUsage(byTurn.get(turnNumber)?.usage, usage),
+    });
+  }
+  return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
+function mergeTurnUsageEntriesMax(existingEntries, newEntries) {
+  const byTurn = new Map();
+  for (const entry of normalizeTurnUsageEntries(existingEntries)) {
+    byTurn.set(entry.turnNumber, { ...entry, usage: normalizeUsage(entry.usage) });
+  }
+  for (const entry of normalizeTurnUsageEntries(newEntries)) {
+    const current = byTurn.get(entry.turnNumber);
+    if (!current || usageMagnitude(entry.usage) > usageMagnitude(current.usage)) {
+      byTurn.set(entry.turnNumber, { ...entry, usage: normalizeUsage(entry.usage) });
+    }
+  }
+  return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
+function usageMagnitude(usage) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) {
+    return 0;
+  }
+  return normalized.total_tokens ||
+    normalized.input_tokens +
+      normalized.cached_input_tokens +
+      normalized.output_tokens +
+      normalized.reasoning_output_tokens ||
+    normalized.cost_usd;
+}
+
 function shapeUsageFromRunSummaries(shape, entries) {
   const seenThreads = new Set();
   let total = emptyUsage();
@@ -898,6 +958,7 @@ function shapeUsageFromRunSummaries(shape, entries) {
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
       turnDurations: summary.turnDurations,
+      turnUsages: summary.turnUsages,
       mtime: summary.mtime,
       usage: hasTokenUsage(usage) ? usage : null,
     });
@@ -1025,6 +1086,7 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
     lastAt: bounds.lastAt,
     durationMs: turnExecutionDurationMs(events, sessionTiming) || bounds.durationMs,
     turnDurations: turnExecutionDurationEntries(events, sessionTiming),
+    turnUsages: turnUsageEntriesFromEvents(events),
     mtime: stat.mtime.toISOString(),
   }, stat, fileBase);
 }
@@ -1098,6 +1160,88 @@ function usageFromTokenEventsByThread(events) {
     }
   }
   return { threadUsages, unthreadedUsage };
+}
+
+function turnUsageEntriesFromEvents(events) {
+  const byTurn = usageFromEventsByTurn(events);
+  return normalizeTurnUsageEntries([...byTurn.entries()].map(([turnNumber, usage]) => ({
+    turnNumber,
+    usage,
+  })));
+}
+
+function usageFromEventsByTurn(events) {
+  const map = new Map();
+  const tokenTurns = new Set();
+  const tokenRecords = events
+    .filter((event) => event.eventType === "codex.session.token_count" && event.event?.usage)
+    .sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+
+  if (tokenRecords.length) {
+    const previousByThread = new Map();
+    for (const record of tokenRecords) {
+      const current = normalizeUsage(record.event.usage);
+      if (!hasTokenUsage(current)) {
+        continue;
+      }
+      const threadId = eventThreadId(record) ?? "";
+      if (isUsageBaselineRecord(record)) {
+        previousByThread.set(threadId, current);
+        continue;
+      }
+      const previous = previousByThread.get(threadId) ?? null;
+      const delta = usageDelta(current, previous);
+      previousByThread.set(threadId, current);
+      if (!hasTokenUsage(delta)) {
+        continue;
+      }
+      const turn = eventTurnNumber(record);
+      if (turn == null) {
+        continue;
+      }
+      map.set(turn, addUsage(map.get(turn), delta));
+      tokenTurns.add(turn);
+    }
+  }
+
+  for (const event of events) {
+    if (event.eventType === "turn.completed" && event.event?.usage) {
+      const turn = eventTurnNumber(event);
+      if (turn == null) {
+        continue;
+      }
+      const usage = normalizeUsage(event.event.usage);
+      if (!hasTokenUsage(usage)) {
+        continue;
+      }
+      if (tokenTurns.has(turn)) {
+        const existing = map.get(turn);
+        if (existing && usage.cost_usd > 0) {
+          existing.cost_usd = (existing.cost_usd ?? 0) + usage.cost_usd;
+        }
+        continue;
+      }
+      map.set(turn, addUsage(map.get(turn), usage));
+    }
+
+    if (event.eventType === "finished" && event.event?.value?.usageMetadata) {
+      const turn = eventTurnNumber(event);
+      if (turn == null || tokenTurns.has(turn)) {
+        continue;
+      }
+      const usage = normalizeUsage(event.event.value.usageMetadata);
+      if (hasTokenUsage(usage)) {
+        map.set(turn, addUsage(map.get(turn), usage));
+      }
+    }
+  }
+
+  return map;
+}
+
+function eventTurnNumber(event) {
+  const turnNumber = Number(event?.turnNumber);
+  return Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : null;
 }
 
 function runUsagePrecision(usageMode) {
@@ -1318,6 +1462,7 @@ function normalizeRunUsageSummary(raw, stat, fileBase) {
     lastAt: typeof raw?.lastAt === "string" ? raw.lastAt : null,
     durationMs: Number.isFinite(raw?.durationMs) ? Math.max(0, raw.durationMs) : 0,
     turnDurations: normalizeTurnDurationEntries(raw?.turnDurations),
+    turnUsages: normalizeTurnUsageEntries(raw?.turnUsages),
     mtime: stat.mtime.toISOString(),
   };
 }
