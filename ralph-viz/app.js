@@ -846,15 +846,30 @@ function renderFileChangeCard(record) {
     list.append(row);
     if (c.diff) {
       const pre = document.createElement("pre");
-      pre.className = "file-diff";
+      pre.className = "file-diff language-diff-cpp diff-highlight";
       pre.dataset.contentScrollKey = `diff:${fileChangeEntryKey(record)}:${fileChangePathText(c)}`;
-      pre.textContent = c.diff;
+      const code = document.createElement("code");
+      code.className = "language-diff-cpp diff-highlight";
+      code.textContent = c.diff;
+      pre.append(code);
+      highlightDiffCodeBlock(code);
       list.append(pre);
     }
   }
 
   body.append(list);
   return card;
+}
+
+function highlightDiffCodeBlock(code) {
+  if (!code || !window.Prism?.highlightElement) {
+    return;
+  }
+  try {
+    window.Prism.highlightElement(code);
+  } catch (_) {
+    // Keep the raw diff visible if Prism fails to parse a large or unusual hunk.
+  }
 }
 
 function fileChangePathText(change) {
