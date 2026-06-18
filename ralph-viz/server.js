@@ -43,6 +43,7 @@ const RALPH_DEFAULT_AUTO_TEST_SUBSET_TARGET_FILES = 0;
 const SLICE_METADATA_CACHE = new Map();
 const CODEX_USAGE_FILE_CACHE = new Map();
 let CODEX_SESSION_INDEX_CACHE = null;
+let APP_BUILD_ID_CACHE = null;
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -4360,6 +4361,21 @@ async function appendScrollDebugEvent(event) {
   );
 }
 
+async function appBuildId() {
+  const files = ["index.html", "app.js", "styles.css"];
+  const stats = await Promise.all(files.map(async (file) => {
+    const stat = await fs.stat(path.join(SPA_DIR, file));
+    return `${file}:${stat.size}:${stat.mtimeMs}`;
+  }));
+  const key = stats.join("|");
+  if (APP_BUILD_ID_CACHE?.key === key) {
+    return APP_BUILD_ID_CACHE.value;
+  }
+  const value = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  APP_BUILD_ID_CACHE = { key, value };
+  return value;
+}
+
 function sendStaticFile(res, filePath, contentType, fallback = "Not found") {
   return fs
     .readFile(filePath, "utf8")
@@ -4396,7 +4412,8 @@ async function requestHandler(req, res) {
 
   if (pathname === "/api/state") {
     const currentThread = await currentRunId();
-    return sendJson(res, { currentThread });
+    const appVersion = await appBuildId();
+    return sendJson(res, { currentThread, appVersion });
   }
 
   if (pathname === "/api/debug-scroll") {

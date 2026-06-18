@@ -78,6 +78,7 @@ const state = {
   scrollDebugPageId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   scrollDebugSeq: 0,
   progressBestCache: loadProgressBestCache(),
+  appVersion: null,
   lastObservedScrollTop: null,
   lastUserScrollAt: 0,
   mobileScrollPauseUntil: 0,
@@ -4105,6 +4106,7 @@ async function loadRunCatalog() {
         fetchJson("/api/state"),
         fetchJson("/api/runs"),
       ]);
+      handleAppVersion(stateData.appVersion);
       state.staticMode = false;
       document.body.classList.toggle("is-static-viz", false);
       return {
@@ -4128,6 +4130,17 @@ async function loadRunCatalog() {
     currentThread: manifest.currentRun ?? null,
     runs: manifest.runs ?? [],
   };
+}
+
+function handleAppVersion(appVersion) {
+  if (!appVersion) {
+    return;
+  }
+  if (state.appVersion && state.appVersion !== appVersion) {
+    window.location.reload();
+    throw new Error("Ralph viz app updated; reloading page");
+  }
+  state.appVersion = appVersion;
 }
 
 async function loadStaticRunSummary(run) {
