@@ -29,7 +29,7 @@ const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_CACHE_VERSION = 8;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 1;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 1;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -226,7 +226,10 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     return withRunProgress;
   }
 
-  const resolveTurnNumber = buildSessionTurnResolver(events);
+  const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
+    selectedWindows,
+    buildSessionTurnResolver(events),
+  );
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
   readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
   const sessionEventGroups = await Promise.all(
@@ -262,10 +265,26 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   );
 
   // A resumed Codex run may already have item cards backfilled into the Ralph
-  // log. In that case reading the session file again is duplicate work and can
-  // dominate local page loads for very large active turns.
-  if (primaryItemCardStreamKeys(responseBaseEvents).size > 0) {
-    return appendLatestThreadUsageEvents(responseBaseEvents);
+  // log. Still scan the bounded session window because patch_apply_end carries
+  // unified diffs that streamed file_change summaries omit.
+  const suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
+  if (suppressedItemCardStreams.size > 0) {
+    const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
+    const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
+      selectedWindows,
+      buildSessionTurnResolver(events),
+    );
+    const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
+    readOptions.suppressedItemCardStreams = suppressedItemCardStreams;
+    const sessionEventGroups = await Promise.all(
+      threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
+    );
+    const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
+    const merged = mergeEventStreams(
+      mergeEventStreams(responseBaseEvents, sessionEventGroups.flat()),
+      progressEvents,
+    );
+    return appendLatestThreadUsageEvents(merged);
   }
 
   return null;
@@ -2840,8 +2859,17 @@ function mergeEventStreams(primary, secondary) {
   const seen = new Set(primary.map(eventKey));
   const merged = [...primary];
   for (const event of secondary) {
+    if (isFileChangeWithDiff(event)) {
+      const fileChangeIndex = findMergeableFileChangeIndex(merged, event);
+      if (fileChangeIndex >= 0) {
+        merged[fileChangeIndex] = mergeFileChangeEventDiffs(merged[fileChangeIndex], event);
+        seen.add(eventKey(event));
+        continue;
+      }
+    }
     if (
       isDisplayItemCardEvent(event) &&
+      !isFileChangeWithDiff(event) &&
       primaryItemCardStreams.has(eventTurnThreadKey(event))
     ) {
       continue;
@@ -2853,6 +2881,77 @@ function mergeEventStreams(primary, secondary) {
     }
   }
   return merged.sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+}
+
+function findMergeableFileChangeIndex(events, candidate) {
+  const candidateSignature = fileChangeEventSignature(candidate);
+  if (!candidateSignature) {
+    return -1;
+  }
+  const streamKey = eventTurnThreadKey(candidate);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (
+      eventTurnThreadKey(event) === streamKey &&
+      event?.eventType === "item.completed" &&
+      event?.event?.item?.type === "file_change" &&
+      fileChangeEventSignature(event) === candidateSignature
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function mergeFileChangeEventDiffs(existing, rich) {
+  const richChanges = new Map(
+    (rich?.event?.item?.changes ?? []).map((change) => [fileChangeSignature(change), change]),
+  );
+  const mergedChanges = (existing?.event?.item?.changes ?? []).map((change) => {
+    const richChange = richChanges.get(fileChangeSignature(change));
+    if (!richChange?.diff || change.diff) {
+      return change;
+    }
+    return {
+      ...change,
+      diff: richChange.diff,
+      raw: richChange.raw ?? change.raw,
+    };
+  });
+  return {
+    ...existing,
+    event: {
+      ...existing.event,
+      item: {
+        ...existing.event.item,
+        changes: mergedChanges,
+        raw: existing.event.item.raw ?? rich.event?.item?.raw,
+      },
+    },
+  };
+}
+
+function fileChangeEventSignature(record) {
+  const changes = record?.event?.item?.changes;
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return "";
+  }
+  return changes.map(fileChangeSignature).sort().join("|");
+}
+
+function fileChangeSignature(change) {
+  return [
+    change?.kind ?? "update",
+    change?.path ?? "",
+    change?.movePath ?? change?.move_path ?? "",
+  ].join("\0");
+}
+
+function isFileChangeWithDiff(record) {
+  return record?.eventType === "item.completed" &&
+    record?.event?.item?.type === "file_change" &&
+    Array.isArray(record.event.item.changes) &&
+    record.event.item.changes.some((change) => typeof change?.diff === "string" && change.diff.length > 0);
 }
 
 function primaryItemCardStreamKeys(events) {
@@ -2936,6 +3035,24 @@ function buildSessionTurnResolver(events) {
       turnNumber = entry.turnNumber;
     }
     return turnNumber;
+  };
+}
+
+function buildWindowBackedSessionTurnResolver(selectedWindows, fallback) {
+  const windows = (selectedWindows ?? [])
+    .filter((window) => Number.isInteger(window.turnNumber) && Number.isFinite(window.startTime))
+    .sort((a, b) => a.startTime - b.startTime);
+  return (recordedAt) => {
+    const time = Date.parse(recordedAt ?? "");
+    if (Number.isFinite(time)) {
+      for (const window of windows) {
+        const endTime = Number.isFinite(window.endTime) ? window.endTime : Infinity;
+        if (time >= window.startTime && time < endTime) {
+          return window.turnNumber;
+        }
+      }
+    }
+    return fallback(recordedAt);
   };
 }
 
@@ -3688,6 +3805,9 @@ function shouldSkipSuppressedSessionResponseItem(record, readOptions, context) {
 }
 
 function shouldSkipSuppressedSessionItemCard(record, readOptions) {
+  if (isFileChangeWithDiff(record)) {
+    return false;
+  }
   return (
     readOptions?.suppressedItemCardStreams instanceof Set &&
     readOptions.suppressedItemCardStreams.has(eventTurnThreadKey(record)) &&
