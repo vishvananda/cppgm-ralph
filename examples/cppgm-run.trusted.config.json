@@ -120,6 +120,12 @@
   "approvalPolicy": "never",
   "networkAccessEnabled": true,
   "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true
+  },
   "additionalDirectories": [],
   "outputTailChars": 20000,
   "codexPath": "codex",

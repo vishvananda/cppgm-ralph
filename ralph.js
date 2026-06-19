@@ -96,6 +96,12 @@ const DEFAULT_CONFIG = {
   autoCommitOnPassingChecks: false,
   testTimeoutRetries: 0,
   useExistingWorkdir: false,
+  sessionIsolation: {
+    enabled: false,
+    backend: "bwrap",
+    readOnlyRoot: true,
+    privateTmp: true,
+  },
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
 const DEFAULT_BASE_BRANCH = "main";
@@ -1780,8 +1786,21 @@ function installProcessSignalHandlers() {
 }
 
 function spawnTracked(command, args, options = {}) {
-  const child = spawn(command, args, {
-    ...options,
+  const { isolateSession, isolationWritableDirs, ...spawnOptions } = options;
+  let spawnCommand = command;
+  let spawnArgs = args;
+  if (isolateSession && sessionIsolationEnabled()) {
+    const wrapped = buildSessionIsolationSpawn(
+      command,
+      args,
+      spawnOptions,
+      isolationWritableDirs,
+    );
+    spawnCommand = wrapped.command;
+    spawnArgs = wrapped.args;
+  }
+  const child = spawn(spawnCommand, spawnArgs, {
+    ...spawnOptions,
     detached: process.platform !== "win32",
   });
   ACTIVE_CHILD_PROCESSES.add(child);
@@ -1791,6 +1810,74 @@ function spawnTracked(command, args, options = {}) {
   child.once("exit", remove);
   child.once("error", remove);
   return child;
+}
+
+function sessionIsolationEnabled() {
+  return process.platform !== "win32" &&
+    CONFIG?.sessionIsolation?.enabled === true;
+}
+
+function buildSessionIsolationSpawn(command, args, options, writableDirs = []) {
+  const isolation = CONFIG?.sessionIsolation ?? DEFAULT_CONFIG.sessionIsolation;
+  if (isolation.backend !== "bwrap") {
+    throw new Error(`Unsupported session isolation backend: ${isolation.backend}`);
+  }
+  const cwd = options.cwd || process.cwd();
+  const bwrapArgs = [
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
+    "--die-with-parent",
+    "--new-session",
+  ];
+  bwrapArgs.push(isolation.readOnlyRoot ? "--ro-bind" : "--bind", "/", "/");
+  bwrapArgs.push("--dev-bind", "/dev", "/dev");
+  bwrapArgs.push("--proc", "/proc");
+  if (isolation.privateTmp) {
+    bwrapArgs.push("--tmpfs", "/tmp");
+    bwrapArgs.push("--tmpfs", "/var/tmp");
+  }
+  for (const directory of sessionIsolationWritableDirs(writableDirs)) {
+    bwrapArgs.push("--bind-try", directory, directory);
+  }
+  bwrapArgs.push("--chdir", cwd);
+  bwrapArgs.push("--", command, ...args);
+  return { command: isolation.bwrapPath || "bwrap", args: bwrapArgs };
+}
+
+function sessionIsolationWritableDirs(extraDirs = []) {
+  const home = os.homedir();
+  return uniqueExistingishPaths([
+    CONFIG?.workdir,
+    CONFIG?.stateDir,
+    ...(CONFIG?.additionalDirectories ?? []),
+    ...extraDirs,
+    CODEX_DIR,
+    path.join(home, ".codex"),
+    path.join(home, ".claude"),
+    path.join(home, ".claude.json"),
+    path.join(home, ".cache"),
+    CONFIG?.antigravitySaveDir,
+    CONFIG?.antigravityAppDataDir,
+  ]);
+}
+
+function uniqueExistingishPaths(paths) {
+  const out = [];
+  const seen = new Set();
+  for (const value of paths) {
+    if (!value) {
+      continue;
+    }
+    const resolved = path.resolve(String(value));
+    if (seen.has(resolved)) {
+      continue;
+    }
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
 }
 
 function terminateChildProcess(child, signal = "SIGTERM") {
@@ -3476,6 +3563,11 @@ class CodexExec {
     const env = buildCodexExecEnv(this.envOverride, args.apiKey);
     const child = spawnTracked(this.codexPath, commandArgs, {
       env,
+      isolateSession: true,
+      isolationWritableDirs: [
+        args.workingDirectory,
+        ...(args.additionalDirectories ?? []),
+      ],
       signal: args.signal,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -4168,6 +4260,11 @@ class ClaudeExec {
     return new Promise((resolve, reject) => {
       const child = spawnTracked(this.claudePath, commandArgs, {
         cwd: args.workingDirectory || process.cwd(),
+        isolateSession: true,
+        isolationWritableDirs: [
+          args.workingDirectory,
+          ...(args.additionalDirectories ?? []),
+        ],
         signal: args.signal,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -4212,6 +4309,11 @@ class ClaudeExec {
 
     const child = spawnTracked(this.claudePath, commandArgs, {
       cwd: args.workingDirectory || process.cwd(),
+      isolateSession: true,
+      isolationWritableDirs: [
+        args.workingDirectory,
+        ...(args.additionalDirectories ?? []),
+      ],
       signal: args.signal,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -4361,6 +4463,13 @@ class AntigravityExec {
     const child = spawnTracked(this.pythonPath, [this.scriptPath], {
       cwd: args.workingDirectory || process.cwd(),
       env,
+      isolateSession: true,
+      isolationWritableDirs: [
+        args.workingDirectory,
+        ...(args.additionalDirectories ?? []),
+        this.options.saveDir,
+        this.options.appDataDir,
+      ],
       signal: args.signal,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -4844,6 +4953,33 @@ async function loadConfig() {
       fileConfig.antigravityScriptPath ??
       DEFAULT_CONFIG.antigravityScriptPath,
   );
+  const sessionIsolation = normalizeSessionIsolation(fileConfig.sessionIsolation);
+  if (process.env.RALPH_SESSION_ISOLATION != null) {
+    sessionIsolation.enabled = parseBoolean(
+      process.env.RALPH_SESSION_ISOLATION,
+      sessionIsolation.enabled,
+    );
+  }
+  if (process.env.RALPH_SESSION_ISOLATION_BACKEND != null) {
+    sessionIsolation.backend = normalizeSessionIsolationBackend(
+      process.env.RALPH_SESSION_ISOLATION_BACKEND,
+    );
+  }
+  if (process.env.RALPH_SESSION_ISOLATION_READ_ONLY_ROOT != null) {
+    sessionIsolation.readOnlyRoot = parseBoolean(
+      process.env.RALPH_SESSION_ISOLATION_READ_ONLY_ROOT,
+      sessionIsolation.readOnlyRoot,
+    );
+  }
+  if (process.env.RALPH_SESSION_ISOLATION_PRIVATE_TMP != null) {
+    sessionIsolation.privateTmp = parseBoolean(
+      process.env.RALPH_SESSION_ISOLATION_PRIVATE_TMP,
+      sessionIsolation.privateTmp,
+    );
+  }
+  if (process.env.RALPH_SESSION_ISOLATION_BWRAP_PATH != null) {
+    sessionIsolation.bwrapPath = process.env.RALPH_SESSION_ISOLATION_BWRAP_PATH;
+  }
 
   return {
     provider,
@@ -4982,6 +5118,7 @@ async function loadConfig() {
       process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
       DEFAULT_CONFIG.useExistingWorkdir,
     ),
+    sessionIsolation,
   };
 }
 
@@ -6322,6 +6459,37 @@ function normalizeProvider(value) {
     return provider;
   }
   throw new Error("Config provider must be `codex`, `antigravity`, or `claude`");
+}
+
+function normalizeSessionIsolation(value) {
+  const defaults = DEFAULT_CONFIG.sessionIsolation;
+  if (value == null || value === "") {
+    return { ...defaults };
+  }
+  if (typeof value === "boolean" || typeof value === "string") {
+    return {
+      ...defaults,
+      enabled: parseBoolean(value, defaults.enabled),
+    };
+  }
+  if (typeof value !== "object") {
+    throw new Error("Config sessionIsolation must be a boolean or object");
+  }
+  return {
+    enabled: parseBoolean(value.enabled, defaults.enabled),
+    backend: normalizeSessionIsolationBackend(value.backend ?? defaults.backend),
+    readOnlyRoot: parseBoolean(value.readOnlyRoot, defaults.readOnlyRoot),
+    privateTmp: parseBoolean(value.privateTmp, defaults.privateTmp),
+    bwrapPath: value.bwrapPath ? String(value.bwrapPath) : defaults.bwrapPath,
+  };
+}
+
+function normalizeSessionIsolationBackend(value) {
+  const backend = String(value ?? "").trim().toLowerCase();
+  if (backend === "bwrap") {
+    return backend;
+  }
+  throw new Error("Config sessionIsolation.backend must be `bwrap`");
 }
 
 function normalizeEventLogScope(value) {

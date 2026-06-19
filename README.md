@@ -282,6 +282,16 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 - `useExistingWorkdir`
   Default: `false`. Set to `true` when `workdir` already exists and Ralph should
   use it instead of cloning a fresh checkout.
+- `sessionIsolation`
+  Default: `false`. Set to `true` or an object such as
+  `{"enabled": true, "backend": "bwrap", "readOnlyRoot": true,
+  "privateTmp": true}` to wrap only the provider child process and its
+  descendants in Bubblewrap. Ralph's own checks and git operations stay outside
+  the namespace. With the default object, the host root is mounted read-only,
+  `/tmp` and `/var/tmp` are private, `/proc` is scoped to the child PID
+  namespace, and the run checkout, Ralph state, configured additional
+  directories, provider state/cache directories, and user cache are writable.
+  This requires `bwrap` on `PATH`.
 
 Ralph builds a per-run name as `<name>-<model>-<reasoningEffort>`. That value is
 used for the git branch, checkout directory under `baseDir`, and state directory
@@ -353,6 +363,16 @@ under `stateBaseDir`.
   Optional positive token budget for each loop goal
 - `RALPH_USE_EXISTING_WORKDIR`
   Set to `1`/`true` to use an existing configured workdir on a fresh state
+- `RALPH_SESSION_ISOLATION`
+  Set to `1`/`true` to enable provider child-process isolation
+- `RALPH_SESSION_ISOLATION_BACKEND`
+  Override `sessionIsolation.backend`; currently only `bwrap`
+- `RALPH_SESSION_ISOLATION_READ_ONLY_ROOT`
+  Override `sessionIsolation.readOnlyRoot`
+- `RALPH_SESSION_ISOLATION_PRIVATE_TMP`
+  Override `sessionIsolation.privateTmp`
+- `RALPH_SESSION_ISOLATION_BWRAP_PATH`
+  Override the Bubblewrap executable path
 
 ## Default Prompt
 
