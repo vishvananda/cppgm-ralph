@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -26,6 +27,8 @@ const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
+// How many turns in a row may be lost to OOM kills before the loop gives up.
+const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -102,6 +105,25 @@ const DEFAULT_CONFIG = {
     readOnlyRoot: true,
     privateTmp: true,
   },
+  // Cap the memory of each agent turn (and every subcommand it spawns) inside a
+  // transient systemd scope/cgroup so a runaway allocation triggers a
+  // cgroup-local OOM kill instead of the kernel's global OOM killer taking down
+  // the ralph loop itself. With oomGroup:false the scope uses OOMPolicy=continue,
+  // so the kernel kills the single largest task in the cgroup — normally the
+  // runaway subcommand — leaving the agent (and the loop) alive. Requires
+  // systemd + cgroup v2 + a delegated memory controller; falls back to an
+  // unbounded spawn (with a log line) when those are unavailable.
+  resourceLimits: {
+    enabled: true,
+    backend: "systemd-run",
+    // Aggregate cap for the WHOLE agent turn (the provider CLI plus every
+    // subcommand it spawns — e.g. all jobs of a parallel `make -jN`), not
+    // per-process. Sized to leave headroom for the OS + ralph on a 125G box
+    // while still tripping on a genuine runaway.
+    memoryMax: "64G",
+    memorySwapMax: "0",
+    oomGroup: false,
+  },
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
 const DEFAULT_BASE_BRANCH = "main";
@@ -173,6 +195,15 @@ async function main() {
       `autoCommitOnPassingChecks=${CONFIG.autoCommitOnPassingChecks ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
   );
+  if (CONFIG.resourceLimits?.enabled) {
+    const active = resourceLimitsEnabled();
+    log(
+      `Resource limits: ${active ? "active" : "requested but unavailable (running unbounded)"} ` +
+        `(memoryMax=${CONFIG.resourceLimits.memoryMax}, oomGroup=${CONFIG.resourceLimits.oomGroup ? "on" : "off"})`,
+    );
+  } else {
+    log("Resource limits: disabled");
+  }
   const threadOptions = {
     workingDirectory: CONFIG.workdir,
     sandboxMode: CONFIG.sandboxMode,
@@ -212,6 +243,8 @@ async function main() {
     ? state.turnsCompleted ?? 0
     : await reconcileTurnsCompletedWithEventLog(state);
   let phaseCheckReuse = null;
+  let pendingRecoveryNote = null;
+  let consecutiveOomRecoveries = 0;
   while (turnNumber < CONFIG.maxTurns) {
     if (await consumeStopAfterTurnRequest()) {
       log("Found stop-after-turn file; exiting cleanly before the next turn.");
@@ -413,31 +446,68 @@ async function main() {
     }
 
     const loopGoal = loopGoalEventRecord?.event?.goal ?? null;
-    const turnPrompt = attachPortableGoalPrompt(prompt, loopGoal);
+    let turnPrompt = attachPortableGoalPrompt(prompt, loopGoal);
+    if (pendingRecoveryNote) {
+      turnPrompt = `${pendingRecoveryNote}\n\n${turnPrompt}`;
+      pendingRecoveryNote = null;
+    }
     log(`Ralph prompt: ${previewText(turnPrompt)}`);
-    const { events } = await thread.runStreamed(turnPrompt, {
-      goal: loopGoal,
-      continueSession: Boolean(continueThreadId),
-    });
-    const turn = await collectStreamedTurn(events, {
-      prompt: turnPrompt,
-      preTurnEventRecords: [
-        buildRalphPhaseStatusEventRecord({
-          phaseStatus,
-          threadId: thread.id ?? activeThreadId,
-          turnNumber: turnNumber + 1,
-          action: "turn-start",
-        }),
-        buildRalphTestStatusEventRecord({
-          testStatus,
-          threadId: thread.id ?? activeThreadId,
-          turnNumber,
-        }),
-        loopGoalEventRecord,
-      ],
-      threadId: thread.id ?? activeThreadId,
-      turnNumber: turnNumber + 1,
-    });
+    let turn;
+    try {
+      const { events } = await thread.runStreamed(turnPrompt, {
+        goal: loopGoal,
+        continueSession: Boolean(continueThreadId),
+      });
+      turn = await collectStreamedTurn(events, {
+        prompt: turnPrompt,
+        preTurnEventRecords: [
+          buildRalphPhaseStatusEventRecord({
+            phaseStatus,
+            threadId: thread.id ?? activeThreadId,
+            turnNumber: turnNumber + 1,
+            action: "turn-start",
+          }),
+          buildRalphTestStatusEventRecord({
+            testStatus,
+            threadId: thread.id ?? activeThreadId,
+            turnNumber,
+          }),
+          loopGoalEventRecord,
+        ],
+        threadId: thread.id ?? activeThreadId,
+        turnNumber: turnNumber + 1,
+      });
+    } catch (error) {
+      // A SIGKILL (surfacing as signal "SIGKILL" or exit code 137 when a
+      // wrapper re-reports it) means the cgroup OOM killer picked the agent
+      // process itself rather than the runaway subcommand. The loop survives (it
+      // is in a different cgroup), so resume the thread with a note instead of
+      // dying. Do not consume a turn for the killed attempt.
+      if (error?.likelyOom && !shutdownInProgress) {
+        consecutiveOomRecoveries += 1;
+        if (consecutiveOomRecoveries > OOM_RECOVERY_MAX) {
+          throw new Error(
+            `Agent was killed (likely OOM) ${consecutiveOomRecoveries} turns in a row; aborting. ` +
+              `Last error: ${formatErrorMessage(error)}`,
+          );
+        }
+        // Don't force-resume the killed thread: if the agent's own accumulated
+        // context was what made it the largest process, reloading it would just
+        // OOM again. Let the configured freshThreadPerTurn behavior decide —
+        // fresh-per-turn configs shed the heavy context, others resume the
+        // persisted thread object as usual. Either way the note is injected.
+        const willResume = !CONFIG.freshThreadPerTurn && Boolean(activeThreadId);
+        log(
+          `Agent process was killed (likely OOM) during turn ${turnNumber + 1}: ` +
+            `${formatErrorMessage(error)}. ${willResume ? "Resuming" : "Starting a fresh thread"} ` +
+            `with a memory-pressure note (recovery ${consecutiveOomRecoveries}/${OOM_RECOVERY_MAX}).`,
+        );
+        pendingRecoveryNote = buildOomRecoveryNote();
+        continue;
+      }
+      throw error;
+    }
+    consecutiveOomRecoveries = 0;
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
     // --continue only applies to the first provider turn.
     continueThreadId = null;
@@ -484,6 +554,23 @@ async function main() {
   throw new Error(
     `Hit the max turn limit (${CONFIG.maxTurns}) and required phase checks still fail.`,
   );
+}
+
+function buildOomRecoveryNote() {
+  const cap = resourceLimitsConfig()?.memoryMax ?? "the configured limit";
+  return [
+    "IMPORTANT: Your previous turn was terminated by the out-of-memory (OOM) killer.",
+    `This loop caps each turn — the agent process plus every subcommand it spawns — at ${cap}`,
+    "of RAM via a cgroup, and the kernel killed the largest process when that combined limit",
+    "was exceeded. There are two common causes: (1) a command you ran had a runaway allocation",
+    "(unbounded buffer/recursion, loading a huge file fully into memory, an infinite loop",
+    "accumulating data, or a too-large parallel build); or (2) this conversation's own",
+    "accumulated context plus tool output had grown very large and a normal command tipped it",
+    "over. Do NOT simply re-run the same thing. Instead: prefer memory-frugal commands (stream",
+    "instead of buffer, lower parallelism/-j, cap input size, read files in ranges rather than",
+    "whole, avoid dumping huge outputs into the conversation), make focused incremental",
+    "progress, and commit early so work is not lost if a turn is killed again.",
+  ].join(" ");
 }
 
 function buildInitialPrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
@@ -1786,7 +1873,7 @@ function installProcessSignalHandlers() {
 }
 
 function spawnTracked(command, args, options = {}) {
-  const { isolateSession, isolationWritableDirs, ...spawnOptions } = options;
+  const { isolateSession, isolationWritableDirs, limitResources, ...spawnOptions } = options;
   let spawnCommand = command;
   let spawnArgs = args;
   if (isolateSession && sessionIsolationEnabled()) {
@@ -1796,6 +1883,13 @@ function spawnTracked(command, args, options = {}) {
       spawnOptions,
       isolationWritableDirs,
     );
+    spawnCommand = wrapped.command;
+    spawnArgs = wrapped.args;
+  }
+  // Apply the memory cgroup as the OUTERMOST wrapper so it contains the agent
+  // and every descendant (bwrap, the provider CLI, and its tool subcommands).
+  if (limitResources && resourceLimitsEnabled()) {
+    const wrapped = buildResourceLimitedSpawn(spawnCommand, spawnArgs);
     spawnCommand = wrapped.command;
     spawnArgs = wrapped.args;
   }
@@ -1880,6 +1974,86 @@ function uniqueExistingishPaths(paths) {
   return out;
 }
 
+let RESOURCE_LIMITS_AVAILABILITY = null;
+
+function resourceLimitsConfig() {
+  return CONFIG?.resourceLimits ?? DEFAULT_CONFIG.resourceLimits;
+}
+
+function resourceLimitsEnabled() {
+  if (process.platform !== "win32" && resourceLimitsConfig()?.enabled === true) {
+    return resourceLimitsAvailable();
+  }
+  return false;
+}
+
+// systemd-run --user needs the per-user systemd manager reachable over the
+// session/runtime D-Bus. In detached contexts (some cron/CI shells) that bus is
+// absent, so probe once and fall back to an unbounded spawn instead of failing.
+function resourceLimitsAvailable() {
+  if (RESOURCE_LIMITS_AVAILABILITY !== null) {
+    return RESOURCE_LIMITS_AVAILABILITY;
+  }
+  const backend = resourceLimitsConfig()?.backend ?? "systemd-run";
+  if (backend !== "systemd-run") {
+    RESOURCE_LIMITS_AVAILABILITY = false;
+    log(`Resource limits disabled: unsupported backend "${backend}".`);
+    return false;
+  }
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  const hasBus =
+    Boolean(process.env.DBUS_SESSION_BUS_ADDRESS) ||
+    (Boolean(runtimeDir) && existsSync(path.join(runtimeDir, "bus")));
+  const hasBinary = existsBinaryOnPath("systemd-run");
+  RESOURCE_LIMITS_AVAILABILITY = hasBus && hasBinary;
+  if (!RESOURCE_LIMITS_AVAILABILITY) {
+    log(
+      "Resource limits requested but unavailable " +
+        `(systemd-run present: ${hasBinary}, user bus present: ${hasBus}); ` +
+        "agent turns will run without a memory cgroup.",
+    );
+  }
+  return RESOURCE_LIMITS_AVAILABILITY;
+}
+
+function existsBinaryOnPath(name) {
+  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  return dirs.some((dir) => existsSync(path.join(dir, name)));
+}
+
+// A SIGKILL is the signature of an OOM kill (the cgroup-local killer chose the
+// agent process rather than one of its subcommands). It can surface two ways:
+// directly as signal "SIGKILL" (agent spawned bare), or as exit code 137
+// (128 + SIGKILL) when a wrapper such as systemd-run/bwrap caught the kill and
+// re-reported it as its own exit status. Tag the error either way so the main
+// loop can recover by resuming the thread with a note instead of crashing.
+function agentExitError(message, signal, code = null) {
+  const error = new Error(message);
+  error.killedBySignal = signal ?? null;
+  error.exitCode = code ?? null;
+  error.likelyOom = signal === "SIGKILL" || code === 137;
+  return error;
+}
+
+function buildResourceLimitedSpawn(command, args) {
+  const config = resourceLimitsConfig();
+  const props = [
+    `MemoryMax=${config.memoryMax}`,
+    `MemorySwapMax=${config.memorySwapMax}`,
+    // OOMPolicy governs what systemd does to the *unit* once the kernel
+    // OOM-kills a process inside it. "continue" leaves the rest of the scope
+    // running, so only the single largest task (normally the runaway
+    // subcommand) dies. "stop"/"kill" tear down the whole agent on any OOM.
+    `OOMPolicy=${config.oomGroup ? "stop" : "continue"}`,
+  ];
+  const scopeArgs = ["--user", "--scope", "--quiet", "--collect"];
+  for (const prop of props) {
+    scopeArgs.push("--property", prop);
+  }
+  scopeArgs.push("--", command, ...args);
+  return { command: "systemd-run", args: scopeArgs };
+}
+
 function terminateChildProcess(child, signal = "SIGTERM") {
   if (!child || child.exitCode != null || child.signalCode != null) {
     return;
@@ -1901,12 +2075,13 @@ function terminateChildProcess(child, signal = "SIGTERM") {
   }
 }
 
-async function runCommand(command, cwd) {
+async function runCommand(command, cwd, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawnTracked("bash", ["-lc", command], {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      limitResources: options.limitResources === true,
     });
 
     let stdout = "";
@@ -2225,7 +2400,7 @@ async function removeDevBuildLockBeforeTestCheck(check) {
 async function runCheckCommand(context) {
   return context.internalCheck
     ? runInternalCheck(context)
-    : runCommand(context.command, CONFIG.workdir);
+    : runCommand(context.command, CONFIG.workdir, { limitResources: true });
 }
 
 function analyzeCheckTestStatus(check, context, run, previousTestStatus) {
@@ -2865,7 +3040,7 @@ async function runPriorStageSubsetsCheck(context) {
     .join(" ");
   const command = `make test-report ACTIVE_TEST_REPORT_PAS=${shellEscape(stage)} GLOB=${shellEscape(scopedSubset)}`;
   outputs.push("", `===== Ralph prior subsets ${scopedSubset} =====`, `$ ${command}`);
-  const run = await runCommand(command, CONFIG.workdir);
+  const run = await runCommand(command, CONFIG.workdir, { limitResources: true });
   outputs.push(sanitizePriorSubsetOutput(run.output));
   if (run.exitCode !== 0) {
     return {
@@ -3564,6 +3739,7 @@ class CodexExec {
     const child = spawnTracked(this.codexPath, commandArgs, {
       env,
       isolateSession: true,
+      limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
         ...(args.additionalDirectories ?? []),
@@ -3710,7 +3886,7 @@ class CodexExec {
         }
         if ((code !== 0 || signal) && !expectedTaskCompleteTermination) {
           const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-          throw new Error(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+          throw agentExitError(`Codex exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`, signal, code);
         }
         lineQueue.close();
       } catch (error) {
@@ -4261,6 +4437,7 @@ class ClaudeExec {
       const child = spawnTracked(this.claudePath, commandArgs, {
         cwd: args.workingDirectory || process.cwd(),
         isolateSession: true,
+        limitResources: true,
         isolationWritableDirs: [
           args.workingDirectory,
           ...(args.additionalDirectories ?? []),
@@ -4310,6 +4487,7 @@ class ClaudeExec {
     const child = spawnTracked(this.claudePath, commandArgs, {
       cwd: args.workingDirectory || process.cwd(),
       isolateSession: true,
+      limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
         ...(args.additionalDirectories ?? []),
@@ -4359,7 +4537,7 @@ class ClaudeExec {
       const { code, signal } = await exitPromise;
       if (code !== 0 || signal) {
         const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-        throw new Error(`Claude exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+        throw agentExitError(`Claude exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`, signal, code);
       }
     } finally {
       rl.close();
@@ -4464,6 +4642,7 @@ class AntigravityExec {
       cwd: args.workingDirectory || process.cwd(),
       env,
       isolateSession: true,
+      limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
         ...(args.additionalDirectories ?? []),
@@ -4515,7 +4694,7 @@ class AntigravityExec {
       const { code, signal } = await exitPromise;
       if (code !== 0 || signal) {
         const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-        throw new Error(`Antigravity bridge exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+        throw agentExitError(`Antigravity bridge exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`, signal, code);
       }
     } finally {
       rl.close();
@@ -4953,6 +5132,16 @@ async function loadConfig() {
       fileConfig.antigravityScriptPath ??
       DEFAULT_CONFIG.antigravityScriptPath,
   );
+  const resourceLimits = normalizeResourceLimits(fileConfig.resourceLimits);
+  if (process.env.RALPH_RESOURCE_LIMITS != null) {
+    resourceLimits.enabled = parseBoolean(
+      process.env.RALPH_RESOURCE_LIMITS,
+      resourceLimits.enabled,
+    );
+  }
+  if (process.env.RALPH_RESOURCE_LIMITS_MEMORY_MAX != null) {
+    resourceLimits.memoryMax = String(process.env.RALPH_RESOURCE_LIMITS_MEMORY_MAX);
+  }
   const sessionIsolation = normalizeSessionIsolation(fileConfig.sessionIsolation);
   if (process.env.RALPH_SESSION_ISOLATION != null) {
     sessionIsolation.enabled = parseBoolean(
@@ -5119,6 +5308,7 @@ async function loadConfig() {
       DEFAULT_CONFIG.useExistingWorkdir,
     ),
     sessionIsolation,
+    resourceLimits,
   };
 }
 
@@ -6481,6 +6671,32 @@ function normalizeSessionIsolation(value) {
     readOnlyRoot: parseBoolean(value.readOnlyRoot, defaults.readOnlyRoot),
     privateTmp: parseBoolean(value.privateTmp, defaults.privateTmp),
     bwrapPath: value.bwrapPath ? String(value.bwrapPath) : defaults.bwrapPath,
+  };
+}
+
+function normalizeResourceLimits(value) {
+  const defaults = DEFAULT_CONFIG.resourceLimits;
+  if (value == null || value === "") {
+    return { ...defaults };
+  }
+  if (typeof value === "boolean" || typeof value === "string") {
+    return {
+      ...defaults,
+      enabled: parseBoolean(value, defaults.enabled),
+    };
+  }
+  if (typeof value !== "object") {
+    throw new Error("Config resourceLimits must be a boolean or object");
+  }
+  return {
+    enabled: parseBoolean(value.enabled, defaults.enabled),
+    backend: value.backend ? String(value.backend) : defaults.backend,
+    memoryMax: value.memoryMax ? String(value.memoryMax) : defaults.memoryMax,
+    memorySwapMax:
+      value.memorySwapMax != null
+        ? String(value.memorySwapMax)
+        : defaults.memorySwapMax,
+    oomGroup: parseBoolean(value.oomGroup, defaults.oomGroup),
   };
 }
 
