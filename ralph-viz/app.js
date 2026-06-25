@@ -1142,9 +1142,10 @@ function renderSystemCard(record) {
   } else if (record.eventType === "turn.failed") {
     text = `turn failed: ${cleanText(record.event?.error?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
-  } else if (record.eventType === "claude.limit_wait") {
+  } else if (isLimitWaitEvent(record)) {
     const minutes = Math.ceil((record.event?.wait_ms ?? 0) / 60000);
-    text = `quota wait — ${minutes}m (${cleanText(record.event?.message) || "usage limit"})`;
+    const label = record.eventType === "ralph.limit_wait" ? "provider wait" : "quota wait";
+    text = `${label} — ${minutes}m (${cleanText(record.event?.message) || "usage limit"})`;
   } else if (record.eventType === "error") {
     text = `error: ${cleanText(record.event?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
@@ -1577,7 +1578,7 @@ function buildTurnDurationMap(records, options = {}) {
 
     const attemptIndex = findTurnAttemptIndex(attempts, turn, time);
     const turnAttemptKey = `${turn}\0${attemptIndex}`;
-    if (record.eventType === "claude.limit_wait") {
+    if (isLimitWaitEvent(record)) {
       const waitMs = Number(record.event?.wait_ms ?? 0);
       if (Number.isFinite(waitMs) && waitMs > 0) {
         const waits = limitWaitsByTurnAttempt.get(turnAttemptKey) ?? [];
@@ -1822,6 +1823,10 @@ function isDurationSpanActivity(record) {
   return true;
 }
 
+function isLimitWaitEvent(record) {
+  return record?.eventType === "claude.limit_wait" || record?.eventType === "ralph.limit_wait";
+}
+
 function durationText(span) {
   if (!span) return "";
   const milliseconds = Number.isFinite(span.durationMs)
@@ -1989,13 +1994,14 @@ function usageCounterReset(current, previous) {
   if (!a || !b) {
     return false;
   }
-  return (
-    a.total_tokens < b.total_tokens ||
-    a.input_tokens < b.input_tokens ||
-    a.output_tokens < b.output_tokens ||
-    a.cached_input_tokens < b.cached_input_tokens ||
-    a.reasoning_output_tokens < b.reasoning_output_tokens
-  );
+  // Only treat a genuine session restart (the cumulative counter collapsing
+  // back toward a fresh start) as a reset. Some providers correct a live
+  // estimate *downward* at turn end — e.g. Claude's result event reconciles the
+  // summed per-step cache reads, so input_tokens dips while the running total
+  // stays high. Counting that small dip as a reset makes usageDelta() re-add the
+  // entire cumulative counter as one turn's delta, inflating run totals
+  // quadratically (hundreds of millions / billions of "uncached" tokens).
+  return a.total_tokens * 2 < b.total_tokens;
 }
 
 function normalizeShapeUsage(shapeUsage) {

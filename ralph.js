@@ -27,6 +27,10 @@ const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
+const CODEX_TRANSIENT_RETRY_MAX = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX ?? 20);
+const CODEX_TRANSIENT_RETRY_INITIAL_MS = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_INITIAL_MS ?? 60_000);
+const CODEX_TRANSIENT_RETRY_MAX_WAIT_MS = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX_WAIT_MS ?? 15 * 60 * 1000);
+const CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR ?? 2);
 // How many turns in a row may be lost to OOM kills before the loop gives up.
 const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
@@ -245,6 +249,7 @@ async function main() {
   let phaseCheckReuse = null;
   let pendingRecoveryNote = null;
   let consecutiveOomRecoveries = 0;
+  turnLoop:
   while (turnNumber < CONFIG.maxTurns) {
     if (await consumeStopAfterTurnRequest()) {
       log("Found stop-after-turn file; exiting cleanly before the next turn.");
@@ -453,59 +458,106 @@ async function main() {
     }
     log(`Ralph prompt: ${previewText(turnPrompt)}`);
     let turn;
-    try {
-      const { events } = await thread.runStreamed(turnPrompt, {
-        goal: loopGoal,
-        continueSession: Boolean(continueThreadId),
-      });
-      turn = await collectStreamedTurn(events, {
-        prompt: turnPrompt,
-        preTurnEventRecords: [
-          buildRalphPhaseStatusEventRecord({
-            phaseStatus,
-            threadId: thread.id ?? activeThreadId,
-            turnNumber: turnNumber + 1,
-            action: "turn-start",
-          }),
-          buildRalphTestStatusEventRecord({
-            testStatus,
-            threadId: thread.id ?? activeThreadId,
-            turnNumber,
-          }),
-          loopGoalEventRecord,
-        ],
-        threadId: thread.id ?? activeThreadId,
-        turnNumber: turnNumber + 1,
-      });
-    } catch (error) {
-      // A SIGKILL (surfacing as signal "SIGKILL" or exit code 137 when a
-      // wrapper re-reports it) means the cgroup OOM killer picked the agent
-      // process itself rather than the runaway subcommand. The loop survives (it
-      // is in a different cgroup), so resume the thread with a note instead of
-      // dying. Do not consume a turn for the killed attempt.
-      if (error?.likelyOom && !shutdownInProgress) {
-        consecutiveOomRecoveries += 1;
-        if (consecutiveOomRecoveries > OOM_RECOVERY_MAX) {
-          throw new Error(
-            `Agent was killed (likely OOM) ${consecutiveOomRecoveries} turns in a row; aborting. ` +
-              `Last error: ${formatErrorMessage(error)}`,
+    let transientRetryAttempts = 0;
+    while (true) {
+      try {
+        const { events } = await thread.runStreamed(turnPrompt, {
+          goal: loopGoal,
+          continueSession: Boolean(continueThreadId),
+        });
+        turn = await collectStreamedTurn(events, {
+          prompt: turnPrompt,
+          preTurnEventRecords: [
+            buildRalphPhaseStatusEventRecord({
+              phaseStatus,
+              threadId: thread.id ?? activeThreadId,
+              turnNumber: turnNumber + 1,
+              action: "turn-start",
+            }),
+            buildRalphTestStatusEventRecord({
+              testStatus,
+              threadId: thread.id ?? activeThreadId,
+              turnNumber,
+            }),
+            loopGoalEventRecord,
+          ],
+          threadId: thread.id ?? activeThreadId,
+          turnNumber: turnNumber + 1,
+        });
+        break;
+      } catch (error) {
+        if (shouldRetryTransientProviderError(error) && !shutdownInProgress) {
+          transientRetryAttempts += 1;
+          const retryMax = codexTransientRetryMax();
+          if (transientRetryAttempts > retryMax) {
+            throw new Error(
+              `Codex transient provider error persisted after ${retryMax} retry attempts: ` +
+                formatErrorMessage(error),
+            );
+          }
+
+          const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
+          const waitMs = codexTransientRetryWaitMs(transientRetryAttempts);
+          log(
+            `Codex transient provider error during turn ${turnNumber + 1}: ` +
+              `${formatErrorMessage(error)}; waiting ${formatDurationForLog(waitMs)} before retry ` +
+              `${transientRetryAttempts}/${retryMax}.`,
           );
+          await appendRalphEventRecord(buildRalphLimitWaitEventRecord({
+            provider: CONFIG.provider,
+            threadId: retryThreadId,
+            turnNumber: turnNumber + 1,
+            waitMs,
+            message: formatErrorMessage(error),
+            attempt: transientRetryAttempts,
+            reason: "provider_transient_error",
+          }));
+          await sleepMs(waitMs);
+          const shouldStartFreshRetryThread =
+            CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId;
+          activeThreadId = shouldStartFreshRetryThread ? null : retryThreadId;
+          thread = null;
+          backend = createAgentBackend();
+          thread = activeThreadId
+            ? backend.resumeThread(activeThreadId, threadOptions)
+            : backend.startThread(threadOptions);
+          if (activeThreadId) {
+            log(`Retrying ${providerLabel} thread ${activeThreadId}`);
+          } else {
+            log(`Retrying with a new ${providerLabel} thread`);
+          }
+          continue;
         }
-        // Don't force-resume the killed thread: if the agent's own accumulated
-        // context was what made it the largest process, reloading it would just
-        // OOM again. Let the configured freshThreadPerTurn behavior decide —
-        // fresh-per-turn configs shed the heavy context, others resume the
-        // persisted thread object as usual. Either way the note is injected.
-        const willResume = !CONFIG.freshThreadPerTurn && Boolean(activeThreadId);
-        log(
-          `Agent process was killed (likely OOM) during turn ${turnNumber + 1}: ` +
-            `${formatErrorMessage(error)}. ${willResume ? "Resuming" : "Starting a fresh thread"} ` +
-            `with a memory-pressure note (recovery ${consecutiveOomRecoveries}/${OOM_RECOVERY_MAX}).`,
-        );
-        pendingRecoveryNote = buildOomRecoveryNote();
-        continue;
+
+        // A SIGKILL (surfacing as signal "SIGKILL" or exit code 137 when a
+        // wrapper re-reports it) means the cgroup OOM killer picked the agent
+        // process itself rather than the runaway subcommand. The loop survives (it
+        // is in a different cgroup), so resume the thread with a note instead of
+        // dying. Do not consume a turn for the killed attempt.
+        if (error?.likelyOom && !shutdownInProgress) {
+          consecutiveOomRecoveries += 1;
+          if (consecutiveOomRecoveries > OOM_RECOVERY_MAX) {
+            throw new Error(
+              `Agent was killed (likely OOM) ${consecutiveOomRecoveries} turns in a row; aborting. ` +
+                `Last error: ${formatErrorMessage(error)}`,
+            );
+          }
+          // Don't force-resume the killed thread: if the agent's own accumulated
+          // context was what made it the largest process, reloading it would just
+          // OOM again. Let the configured freshThreadPerTurn behavior decide —
+          // fresh-per-turn configs shed the heavy context, others resume the
+          // persisted thread object as usual. Either way the note is injected.
+          const willResume = !CONFIG.freshThreadPerTurn && Boolean(activeThreadId);
+          log(
+            `Agent process was killed (likely OOM) during turn ${turnNumber + 1}: ` +
+              `${formatErrorMessage(error)}. ${willResume ? "Resuming" : "Starting a fresh thread"} ` +
+              `with a memory-pressure note (recovery ${consecutiveOomRecoveries}/${OOM_RECOVERY_MAX}).`,
+          );
+          pendingRecoveryNote = buildOomRecoveryNote();
+          continue turnLoop;
+        }
+        throw error;
       }
-      throw error;
     }
     consecutiveOomRecoveries = 0;
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
@@ -571,6 +623,63 @@ function buildOomRecoveryNote() {
     "whole, avoid dumping huge outputs into the conversation), make focused incremental",
     "progress, and commit early so work is not lost if a turn is killed again.",
   ].join(" ");
+}
+
+function shouldRetryTransientProviderError(error) {
+  if (CONFIG.provider !== "codex") {
+    return false;
+  }
+  return isCodexTransientProviderMessage(formatErrorMessage(error));
+}
+
+function isCodexTransientProviderMessage(message) {
+  if (typeof message !== "string" || !message.trim()) {
+    return false;
+  }
+  return (
+    /\bselected model\b.*\bat capacity\b/i.test(message) ||
+    /\bmodel\b.*\bat capacity\b/i.test(message) ||
+    /\btemporarily unavailable\b/i.test(message) ||
+    /\boverloaded\b/i.test(message)
+  );
+}
+
+function codexTransientRetryWaitMs(attempt) {
+  const safeAttempt = Math.max(1, Number.isFinite(attempt) ? attempt : 1);
+  const factor = Number.isFinite(CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR) &&
+    CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR > 1
+    ? CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR
+    : 2;
+  const base = Number.isFinite(CODEX_TRANSIENT_RETRY_INITIAL_MS) &&
+    CODEX_TRANSIENT_RETRY_INITIAL_MS > 0
+    ? CODEX_TRANSIENT_RETRY_INITIAL_MS
+    : 60_000;
+  const max = Number.isFinite(CODEX_TRANSIENT_RETRY_MAX_WAIT_MS) &&
+    CODEX_TRANSIENT_RETRY_MAX_WAIT_MS > 0
+    ? CODEX_TRANSIENT_RETRY_MAX_WAIT_MS
+    : 15 * 60 * 1000;
+  return Math.min(max, Math.round(base * (factor ** (safeAttempt - 1))));
+}
+
+function codexTransientRetryMax() {
+  return Number.isInteger(CODEX_TRANSIENT_RETRY_MAX) && CODEX_TRANSIENT_RETRY_MAX > 0
+    ? CODEX_TRANSIENT_RETRY_MAX
+    : 20;
+}
+
+function formatDurationForLog(durationMs) {
+  const seconds = Math.max(1, Math.ceil((durationMs ?? 0) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return remainingSeconds ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
 function buildInitialPrompt(testStatus, gitStatus, turnNumber = null, phase = null, phaseStatus = null) {
@@ -5012,6 +5121,7 @@ async function collectStreamedTurn(events, options = {}) {
   let eventLogPath = buildEventLogPath(threadId);
   const pendingEventRecords = Array.isArray(options.preTurnEventRecords)
     ? options.preTurnEventRecords.filter(Boolean)
+      .map(clonePendingEventRecord)
     : [];
 
   const promptEventRecord = buildRalphPromptEventRecord({
@@ -5059,15 +5169,26 @@ async function collectStreamedTurn(events, options = {}) {
   }
 
   if (turnFailure) {
-    throw new Error(turnFailure.message);
+    throw buildStreamedTurnError(turnFailure.message, { threadId, turnNumber });
   }
   if (streamError) {
-    throw new Error(streamError);
+    throw buildStreamedTurnError(streamError, { threadId, turnNumber });
   }
 
   await flushEventLogBuffer(eventLogPath, pendingEventRecords);
 
   return { items, finalResponse, usage, threadId };
+}
+
+function buildStreamedTurnError(message, { threadId = null, turnNumber = null } = {}) {
+  const error = new Error(message);
+  error.threadId = threadId;
+  error.turnNumber = turnNumber;
+  return error;
+}
+
+function clonePendingEventRecord(record) {
+  return { ...record };
 }
 
 function combineOutput(stdout, stderr) {
@@ -5621,6 +5742,9 @@ function summarizeEvent(event) {
   if (event.type === "claude.limit_wait") {
     return `limit_wait ${Math.ceil((event.wait_ms ?? 0) / 60000)}m ${previewText(event.message ?? "")}`;
   }
+  if (event.type === "ralph.limit_wait") {
+    return `limit_wait ${formatDurationForLog(event.wait_ms ?? 0)} ${previewText(event.message ?? "")}`;
+  }
   if (!event.item) {
     return event.type;
   }
@@ -5641,6 +5765,28 @@ function buildRalphPromptEventRecord({ prompt, threadId, turnNumber }) {
       type: "ralph.prompt",
       sender: "ralph",
       prompt,
+    },
+  };
+}
+
+function buildRalphLimitWaitEventRecord({ provider, threadId, turnNumber, waitMs, message, attempt, reason }) {
+  if (!Number.isFinite(waitMs) || waitMs <= 0) {
+    return null;
+  }
+
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.limit_wait",
+    event: {
+      type: "ralph.limit_wait",
+      sender: "ralph",
+      provider,
+      reason,
+      attempt,
+      wait_ms: waitMs,
+      message,
     },
   };
 }

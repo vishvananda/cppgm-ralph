@@ -1667,7 +1667,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
     }
     const attempt = rawTurnAttemptForTime(attempts, turn, time);
     const attemptKey = attempt?.key ?? String(turn);
-    if (event.eventType === "claude.limit_wait") {
+    if (isLimitWaitEvent(event)) {
       const waitMs = Number(event.event?.wait_ms ?? 0);
       if (Number.isFinite(waitMs) && waitMs > 0) {
         const waits = limitWaitsByAttempt.get(attemptKey) ?? [];
@@ -1722,7 +1722,7 @@ function limitWaitsByRawTurnAttempt(events) {
   const attempts = buildRawTurnAttemptWindows(events);
   const waitsByAttempt = new Map();
   for (const event of events) {
-    if (event.eventType !== "claude.limit_wait") {
+    if (!isLimitWaitEvent(event)) {
       continue;
     }
     const turn = event.turnNumber;
@@ -1762,6 +1762,10 @@ function subtractLimitWaitOverlap(durationMs, spanStartMs, spanEndMs, waits) {
     waitedMs += Math.max(0, end - start);
   }
   return Math.max(0, durationMs - waitedMs);
+}
+
+function isLimitWaitEvent(event) {
+  return event?.eventType === "claude.limit_wait" || event?.eventType === "ralph.limit_wait";
 }
 
 function isCommandStartEvent(event) {

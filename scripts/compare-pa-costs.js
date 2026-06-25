@@ -729,7 +729,7 @@ function readRunEventUsageIntoTurns(events, byTurn) {
     if (!Number.isFinite(time)) {
       continue;
     }
-    if (type === "claude.limit_wait") {
+    if (isLimitWaitEvent(record)) {
       // Quota-reset sleeps are recorded so they can be excluded from turn time.
       const slot = slotFor(record);
       const waitMs = Number(record.event?.wait_ms ?? 0);
@@ -1056,6 +1056,10 @@ function limitWaitOverlapMs(slot) {
     waited += Math.max(0, end - start);
   }
   return waited;
+}
+
+function isLimitWaitEvent(record) {
+  return record?.eventType === "claude.limit_wait" || record?.eventType === "ralph.limit_wait";
 }
 
 async function summarizeRun(run, options) {
