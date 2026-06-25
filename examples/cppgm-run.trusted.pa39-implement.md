@@ -17,6 +17,19 @@ backend surface. It proves that the existing compiler can rebuild itself
 reproducibly. Treat PA39 failures as earlier compiler bugs or reproducibility
 bugs until proven otherwise.
 
+Layering rule: if `../dev/cppgm++` and a `*-self` compiler behave differently
+on the same compile command, first assume the `*-self` compiler may have been
+miscompiled. Save the exact command, compare host-seeded vs self-built behavior,
+and trace the divergence back to the self-built object/source/compiler feature
+that produced the bad compiler. A stack trace inside `*-self` shows where the
+bad program failed; it does not by itself prove that stack frame owns the fix.
+
+Behavior includes severe performance divergence. Self-built compilers will be
+slower, but if a `*-self` or `*-inception` compile is more than about 5x slower
+than host-seeded `../dev/cppgm++` on the same source, or times out while the
+host-seeded compiler completes, treat that as layer divergence to trace through
+the self compiler build.
+
 Implementation bar:
 - Keep `make test-report-through-pa38` passing.
 - Use `make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
