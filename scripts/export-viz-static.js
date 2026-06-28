@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import readline from "node:readline";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -33,11 +34,6 @@ const ASSIGNMENT_LAYOUTS = {
     description: "Current assignment layout used by trusted, fable, and opus. It includes abimangle at pa30 and tops out at pa39 Inception.",
   },
 };
-const ASSIGNMENT_LAYOUT_NOTES = [
-  "phases and spark use the older v1 PA layout.",
-  "trusted, fable, and opus use the current v2 PA layout.",
-  "Rows with the same PA number may describe different work across layouts; the comparison table shows each layout's README heading when they differ.",
-];
 
 function usage() {
   return `Usage: node scripts/export-viz-static.js [options]
@@ -51,6 +47,7 @@ Options:
   --include-spark       Include ${SPARK_RUN}
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
+  --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
   --work-dir <dir>      Run prompt/config dir (default: ~/work)
   --no-clean            Do not remove output dir before exporting
   --no-compare          Skip comparison generation
@@ -62,6 +59,7 @@ function parseArgs(argv) {
   const options = {
     outDir: path.join(REPO_ROOT, "ralph-viz-static"),
     ralphDir: path.join(os.homedir(), "work", ".ralph"),
+    codexDir: path.join(os.homedir(), ".codex", "sessions"),
     workDir: path.join(os.homedir(), "work"),
     through: "pa39",
     runs: [],
@@ -92,6 +90,8 @@ function parseArgs(argv) {
       options.through = normalizePa(next());
     } else if (arg === "--ralph-dir") {
       options.ralphDir = expandHome(next());
+    } else if (arg === "--codex-dir") {
+      options.codexDir = expandHome(next());
     } else if (arg === "--work-dir") {
       options.workDir = expandHome(next());
     } else if (arg === "--no-clean") {
@@ -220,11 +220,15 @@ async function newestJsonl(directory) {
 }
 
 async function readJsonl(filePath) {
-  const raw = await fs.readFile(filePath, "utf8");
   const records = [];
-  const lines = raw.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
+  let index = 0;
+  const lines = readline.createInterface({
+    input: fsSync.createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    index += 1;
+    const line = rawLine.trim();
     if (!line) continue;
     try {
       records.push(JSON.parse(line));
@@ -419,13 +423,18 @@ async function buildComparison(options, runs) {
   if (!options.compare || !runs.length) {
     return null;
   }
+  const comparisonRuns = runs.filter((run) => inferAssignmentLayout(run.shape).id === "v2");
+  if (!comparisonRuns.length) {
+    return null;
+  }
   const scriptPath = path.join(REPO_ROOT, "scripts", "compare-pa-costs.js");
   const args = [
     scriptPath,
     "--format", "json",
     "--through", options.through,
     "--ralph-dir", options.ralphDir,
-    ...runs.map((run) => run.spec),
+    "--codex-dir", options.codexDir,
+    ...comparisonRuns.map((run) => run.spec),
   ];
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, args, {
@@ -458,8 +467,47 @@ function annotateComparison(comparison, runMetas) {
     run.dataPath = meta.dataPath;
   }
   comparison.assignmentLayouts = ASSIGNMENT_LAYOUTS;
-  comparison.assignmentLayoutNotes = ASSIGNMENT_LAYOUT_NOTES;
+  comparison.series = comparisonSeries(comparison);
   return comparison;
+}
+
+function comparisonSeries(comparison) {
+  const rows = Array.isArray(comparison?.rows) ? comparison.rows : [];
+  const runs = Array.isArray(comparison?.runs) ? comparison.runs : [];
+  return runs.map((run, runIndex) => {
+    let cost = 0;
+    let durationMs = 0;
+    return {
+      label: run.label,
+      model: run.model ?? null,
+      points: rows.flatMap((row, index) => {
+        const summary = row.runs?.[runIndex] ?? null;
+        if (!comparisonSummaryStarted(summary)) {
+          return [];
+        }
+        cost += Number(summary.cost ?? 0) || 0;
+        durationMs += Number(summary.durationMs ?? 0) || 0;
+        return [{
+          pa: row.pa,
+          index,
+          status: summary.status ?? "complete",
+          cost,
+          durationMs,
+        }];
+      }),
+    };
+  });
+}
+
+function comparisonSummaryStarted(summary) {
+  if (!summary || summary.status === "not started") {
+    return false;
+  }
+  return (Array.isArray(summary.turns) && summary.turns.length > 0) ||
+    (Number(summary.durationMs ?? 0) || 0) > 0 ||
+    (Number(summary.cost ?? 0) || 0) > 0 ||
+    summary.status === "partial" ||
+    summary.status === "complete";
 }
 
 function totalForRun(comparison, run) {
@@ -475,7 +523,9 @@ async function exportRun(run, options, comparison) {
   const outRunDir = path.join(options.outDir, "data", "runs", run.safeId);
   const turnsDir = path.join(outRunDir, "turns");
   await fs.mkdir(turnsDir, { recursive: true });
-  const events = await readJsonl(run.filePath);
+  const runEvents = await readJsonl(run.filePath);
+  const codexUsageEvents = await collectCodexUsageEvents(runEvents, options);
+  const events = mergeEventsByTime(runEvents, codexUsageEvents);
   const grouped = groupEventsByTurn(events);
   const turns = [];
   for (const [turnKey, turnEvents] of grouped) {
@@ -524,6 +574,7 @@ async function exportRun(run, options, comparison) {
     mtime: run.mtime,
     eventMtime: run.eventMtime,
     eventCount: events.length,
+    syntheticUsageEventCount: codexUsageEvents.length,
     turnCount: turns.length,
     first: bounds.first,
     last: bounds.last,
@@ -538,9 +589,167 @@ async function exportRun(run, options, comparison) {
     turns,
     docs,
     eventCount: events.length,
+    syntheticUsageEventCount: codexUsageEvents.length,
     ...bounds,
   });
   return runMeta;
+}
+
+async function collectCodexUsageEvents(events, options) {
+  const threadIds = [...new Set(events.map(eventThreadId).filter(Boolean))]
+    .filter(Boolean);
+  if (!threadIds.length) {
+    return [];
+  }
+  const existingUsageKeys = new Set(
+    events
+      .filter((event) => event.eventType === "codex.session.token_count" && event.event?.usage)
+      .map((event) => usageEventKey(eventThreadId(event), event.event.usage))
+      .filter(Boolean),
+  );
+  const resolveTurn = buildTurnResolver(events);
+  const filesByThread = findCodexSessionFiles(options.codexDir, threadIds);
+  const usageEvents = [];
+  for (const threadId of threadIds) {
+    for (const filePath of (filesByThread.get(threadId) ?? []).sort()) {
+      usageEvents.push(...await readCodexUsageEvents(filePath, threadId, resolveTurn, existingUsageKeys));
+    }
+  }
+  return usageEvents;
+}
+
+function usageEventKey(threadId, usage) {
+  if (!threadId || !usage || typeof usage !== "object") {
+    return "";
+  }
+  return [
+    threadId,
+    usage.input_tokens ?? usage.promptTokenCount ?? 0,
+    usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? 0,
+    usage.output_tokens ?? ((usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0)),
+    usage.reasoning_output_tokens ?? usage.thinking_output_tokens ?? usage.thoughtsTokenCount ?? 0,
+    usage.total_tokens ?? usage.totalTokenCount ?? 0,
+  ].join("\0");
+}
+
+function eventThreadId(record) {
+  return (
+    record?.threadId ??
+    record?.event?.thread_id ??
+    record?.event?.threadId ??
+    record?.event?.goal?.threadId ??
+    null
+  );
+}
+
+function buildTurnResolver(events) {
+  const starts = events
+    .filter((event) =>
+      (event.eventType === "ralph.phase-status" && event.event?.action === "turn-start") ||
+      event.eventType === "ralph.prompt")
+    .map((event) => ({
+      turnNumber: event.turnNumber,
+      time: Date.parse(event.recordedAt ?? ""),
+    }))
+    .filter((entry) => Number.isInteger(entry.turnNumber) && entry.turnNumber > 0 && Number.isFinite(entry.time))
+    .sort((a, b) => a.time - b.time);
+
+  return (timestamp) => {
+    const time = Date.parse(timestamp ?? "");
+    if (!Number.isFinite(time)) {
+      return null;
+    }
+    let selected = null;
+    for (const start of starts) {
+      if (start.time > time) {
+        break;
+      }
+      selected = start;
+    }
+    return selected?.turnNumber ?? null;
+  };
+}
+
+function findCodexSessionFiles(codexDir, threadIds) {
+  const wanted = new Set(threadIds);
+  const matches = new Map([...wanted].map((threadId) => [threadId, []]));
+  walkCodexSessions(codexDir, (filePath) => {
+    const basename = path.basename(filePath);
+    for (const threadId of wanted) {
+      if (basename.endsWith(`${threadId}.jsonl`)) {
+        matches.get(threadId).push(filePath);
+      }
+    }
+  });
+  return matches;
+}
+
+function walkCodexSessions(directory, visit, depth = 0) {
+  if (depth > 6 || !fsSync.existsSync(directory)) {
+    return;
+  }
+  for (const entry of fsSync.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      walkCodexSessions(entryPath, visit, depth + 1);
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      visit(entryPath);
+    }
+  }
+}
+
+async function readCodexUsageEvents(filePath, threadId, resolveTurn, existingUsageKeys) {
+  const events = [];
+  const lines = readline.createInterface({
+    input: fsSync.createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const rawLine of lines) {
+    if (!rawLine.includes('"type":"token_count"')) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(rawLine);
+    } catch (_) {
+      continue;
+    }
+    if (record?.type !== "event_msg" || record.payload?.type !== "token_count") {
+      continue;
+    }
+    const usage = record.payload?.info?.total_token_usage;
+    if (!usage || typeof usage !== "object") {
+      continue;
+    }
+    const key = usageEventKey(threadId, usage);
+    if (existingUsageKeys?.has(key)) {
+      continue;
+    }
+    const turnNumber = resolveTurn(record.timestamp);
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
+      continue;
+    }
+    events.push({
+      recordedAt: record.timestamp,
+      threadId,
+      turnNumber,
+      eventType: "codex.session.token_count",
+      event: {
+        type: "codex.session.token_count",
+        usage,
+        source: "codex-session-export",
+      },
+    });
+  }
+  return events;
+}
+
+function mergeEventsByTime(primary, secondary) {
+  if (!secondary.length) {
+    return primary;
+  }
+  return [...primary, ...secondary].sort((a, b) =>
+    String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
 }
 
 async function cleanOutput(options) {
@@ -594,6 +803,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     source: {
       ralphDir: options.ralphDir,
+      codexDir: options.codexDir,
       workDir: options.workDir,
       through: options.through,
     },

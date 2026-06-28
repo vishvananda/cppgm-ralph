@@ -54,6 +54,11 @@ follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
 still active, Ralph skips re-sending the goal and instead sends a short
 continuation nudge with refreshed turn instructions in the appended system
 prompt. The CLI path can be overridden with `claudePath` / `RALPH_CLAUDE_PATH`.
+When restarting only to pick up changed prompt files, add
+`--reuse-last-checks` (or set `RALPH_REUSE_LAST_CHECKS=1`) to reuse the latest
+compatible recorded phase check result instead of rerunning the startup checks.
+This is intended for same-turn restarts; after that first resumed turn Ralph
+runs checks normally again.
 
 To stop a run cleanly at the next turn boundary, create a `stop-after-turn`
 file in the run's state directory (e.g.

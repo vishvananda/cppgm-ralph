@@ -27,7 +27,8 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
-const RUN_USAGE_CACHE_VERSION = 12;
+const RUN_USAGE_CACHE_VERSION = 22;
+const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
@@ -158,20 +159,7 @@ function safeRunRef(id) {
 }
 
 async function readRunFile(filePath) {
-  const raw = await fs.readFile(filePath, "utf8");
-  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const events = [];
-  for (const line of lines) {
-    try {
-      const parsed = JSON.parse(line);
-      if (parsed && typeof parsed === "object") {
-        events.push(parsed);
-      }
-    } catch (error) {
-      // keep parser resilient to one-off bad lines in a stream log
-    }
-  }
-  return events;
+  return readRunEventsFromOffset(filePath, 0);
 }
 
 async function readFileSlice(filePath, start, end) {
@@ -269,26 +257,26 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // log. Still scan the bounded session window because patch_apply_end carries
   // unified diffs that streamed file_change summaries omit.
   const suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
-  if (suppressedItemCardStreams.size > 0) {
-    const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
-    const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
-      selectedWindows,
-      buildSessionTurnResolver(events),
-    );
-    const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
-    readOptions.suppressedItemCardStreams = suppressedItemCardStreams;
-    const sessionEventGroups = await Promise.all(
-      threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
-    );
-    const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
-    const merged = mergeEventStreams(
-      mergeEventStreams(responseBaseEvents, sessionEventGroups.flat()),
-      progressEvents,
-    );
-    return appendLatestThreadUsageEvents(merged);
+  if (suppressedItemCardStreams.size === 0) {
+    return appendLatestThreadUsageEvents(responseBaseEvents);
   }
 
-  return null;
+  const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
+  const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
+    selectedWindows,
+    buildSessionTurnResolver(events),
+  );
+  const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
+  readOptions.suppressedItemCardStreams = suppressedItemCardStreams;
+  const sessionEventGroups = await Promise.all(
+    threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
+  );
+  const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
+  const merged = mergeEventStreams(
+    mergeEventStreams(responseBaseEvents, sessionEventGroups.flat()),
+    progressEvents,
+  );
+  return appendLatestThreadUsageEvents(merged);
 }
 
 async function appendLatestThreadUsageEvents(events) {
@@ -436,6 +424,9 @@ function tailTurnWindowsFromEvents(events, count) {
 
 function selectRunEventsForResponse(events, detailOptions, selectedWindows) {
   let selected = events;
+  if (detailOptions.mode === "none") {
+    selected = selected.filter((event) => !isDisplayItemCardEvent(event));
+  }
   if (detailOptions.mode !== "all" && detailOptions.mode !== "none") {
     selected = filterEventsToWindows(events, selectedWindows);
   }
@@ -688,6 +679,7 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
         ),
       );
     }
+    await augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary);
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
@@ -697,10 +689,12 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
       summary.turnUsages,
       turnUsageEntriesFromEvents(events),
     );
+    await augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary);
     return shapeUsageFromRunSummaries(shape, [{ fileBase, summary }]);
   }
 
-  return readSelectedShapeUsage(shape, fileBase, events, usageMode);
+  const rebuilt = await readRunUsageSummary(shape, filePath, fileBase, usageMode);
+  return shapeUsageFromRunSummaries(shape, [{ fileBase, summary: rebuilt }]);
 }
 
 async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, cacheEntry, usageMode) {
@@ -715,17 +709,15 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
     : [];
 
   if (deltaEvents.length) {
-    await extendRunUsageSummaryFromEvents(summary, filePath, deltaEvents, usageMode);
-    if (usageMode === "skip") {
-      summary.turnUsages = [];
-    } else {
-      const fullEvents = await readRunFile(filePath);
-      const fullThreadIds = inferThreadIdsFromRun(filePath, fullEvents);
-      summary.turnUsages = mergeTurnUsageEntriesMax(
-        turnUsageEntriesFromEvents(fullEvents),
-        await readCodexThreadUsageByTurn(fullThreadIds, buildSessionTurnAttemptResolver(fullEvents)),
-      );
+    if (deltaEventsOverlapCachedTurns(summary, deltaEvents)) {
+      const rebuilt = buildRunLogUsageSummary(fileBase, stat, await readRunFile(filePath), usageMode);
+      const latestSessionStats = usageMode === "skip"
+        ? []
+        : await codexSessionStatsForThreadIds(rebuilt.threadIds);
+      await writeRunUsageCache(shape, fileBase, stat, "fast", latestSessionStats, rebuilt);
+      return rebuilt;
     }
+    extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
   }
 
   const latestSessionStats = usageMode === "skip"
@@ -733,6 +725,20 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
     : await codexSessionStatsForThreadIds(summary.threadIds);
   await writeRunUsageCache(shape, fileBase, stat, "fast", latestSessionStats, summary);
   return summary;
+}
+
+function deltaEventsOverlapCachedTurns(summary, deltaEvents) {
+  const cachedTurns = new Set(
+    normalizeTurnDurationEntries(summary?.turnDurations)
+      .map((entry) => entry.turnNumber),
+  );
+  if (!cachedTurns.size) {
+    return false;
+  }
+  return deltaEvents.some((event) =>
+    Number.isInteger(event?.turnNumber) &&
+    event.turnNumber > 0 &&
+    cachedTurns.has(event.turnNumber));
 }
 
 async function readRunEventsFromOffset(filePath, offset) {
@@ -949,7 +955,7 @@ function shapeUsageFromRunSummaries(shape, entries) {
   const runs = [];
 
   for (const { fileBase, summary } of entries) {
-    const usage = applyRunUsageSummaryToShape(summary, seenThreads);
+    const usage = bestRunUsageForShape(summary, seenThreads);
     if (hasTokenUsage(usage)) {
       total = addUsage(total, usage);
     }
@@ -986,6 +992,83 @@ function shapeUsageFromRunSummaries(shape, entries) {
   };
 }
 
+async function augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary) {
+  const cached = await readComparePaCostsCache(shape, fileBase, stat);
+  if (!cached) {
+    return;
+  }
+  summary.turnUsages = mergeTurnUsageEntriesMax(summary.turnUsages, cached.turnUsages);
+  summary.turnDurations = mergeTurnDurationEntriesMax(summary.turnDurations, cached.turnDurations);
+  const durationFromTurns = sumTurnDurationEntries(summary.turnDurations);
+  if (durationFromTurns > summary.durationMs) {
+    summary.durationMs = durationFromTurns;
+  }
+}
+
+async function readComparePaCostsCache(shape, fileBase, stat) {
+  const cachePath = comparePaCostsCachePath(shape, fileBase);
+  if (!cachePath) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(cachePath, "utf8"));
+  } catch (_) {
+    return null;
+  }
+  if (parsed?.version !== COMPARE_PA_COSTS_CACHE_VERSION) {
+    return null;
+  }
+  const cachedSize = Number(parsed.runFile?.size);
+  if (!Number.isFinite(cachedSize) || cachedSize <= 0 || cachedSize > stat.size) {
+    return null;
+  }
+
+  const usageByTurn = new Map();
+  const durationByTurn = new Map();
+  for (const slot of Array.isArray(parsed.slots) ? parsed.slots : []) {
+    const turnNumber = Number(slot?.turn);
+    if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
+      continue;
+    }
+    const usage = normalizeUsage(slot?.usage);
+    if (hasTokenUsage(usage)) {
+      usageByTurn.set(turnNumber, addUsage(usageByTurn.get(turnNumber), usage));
+    }
+    const durationMs = Number(slot?.durationMs);
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+      const current = durationByTurn.get(turnNumber) ?? {
+        turnNumber,
+        durationMs: 0,
+        firstAt: null,
+        lastAt: null,
+      };
+      current.durationMs += durationMs;
+      durationByTurn.set(turnNumber, current);
+    }
+  }
+
+  return {
+    turnUsages: [...usageByTurn.entries()]
+      .sort((left, right) => left[0] - right[0])
+      .map(([turnNumber, usage]) => ({ turnNumber, usage })),
+    turnDurations: [...durationByTurn.values()]
+      .sort((left, right) => left.turnNumber - right.turnNumber),
+  };
+}
+
+function comparePaCostsCachePath(shape, fileBase) {
+  if (!/^[a-zA-Z0-9._-]+$/.test(shape ?? "") || !/^[a-zA-Z0-9._-]+$/.test(fileBase ?? "")) {
+    return null;
+  }
+  return path.join(RALPH_DIR, shape, RUN_USAGE_CACHE_DIR, `compare-pa-costs-${fileBase}.json`);
+}
+
+function sumTurnDurationEntries(entries) {
+  return normalizeTurnDurationEntries(entries)
+    .reduce((sum, entry) => sum + entry.durationMs, 0);
+}
+
 async function readLooseRunUsageCacheEntry(shape, fileBase) {
   const cachePath = runUsageCachePath(shape, fileBase);
   if (!cachePath) {
@@ -1003,6 +1086,11 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
   const stat = await fs.stat(filePath);
   const precision = runUsagePrecision(usageMode);
   const events = await readRunFile(filePath);
+  if (precision === "fast") {
+    const summary = buildRunLogUsageSummary(fileBase, stat, events, usageMode);
+    await writeRunUsageCache(shape, fileBase, stat, precision, [], summary);
+    return summary;
+  }
   const threadIds = precision ? inferThreadIdsFromRun(filePath, events) : [];
   const sessionStats = precision ? await codexSessionStatsForThreadIds(threadIds) : [];
   if (precision) {
@@ -1105,6 +1193,76 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
   }, stat, fileBase);
 }
 
+function buildRunLogUsageSummary(fileBase, stat, events, usageMode) {
+  const bounds = eventTimeBounds(events, { includeOpenCommandTail: true });
+  const threadIds = inferThreadIdsFromRun("", events);
+  const turnDurations = turnExecutionDurationEntries(events, new Map(), { includeOpenCommandTail: true });
+  const durationMs = turnDurations.reduce((sum, entry) => sum + entry.durationMs, 0) || bounds.durationMs;
+  const tokenUsage = usageMode === "skip"
+    ? { threadUsages: [], unthreadedUsage: null }
+    : usageFromTokenEventsByThread(events);
+  const hasThreadUsage = tokenUsage.threadUsages.some((entry) => hasTokenUsage(entry.usage));
+  const fallbackUsage =
+    usageMode === "skip" || hasThreadUsage || hasTokenUsage(tokenUsage.unthreadedUsage)
+      ? null
+      : usageFromVizEvents(events);
+
+  return normalizeRunUsageSummary({
+    fileBase,
+    threadIds,
+    threadUsages: tokenUsage.threadUsages,
+    unthreadedUsage: hasTokenUsage(tokenUsage.unthreadedUsage)
+      ? tokenUsage.unthreadedUsage
+      : fallbackUsage,
+    firstAt: bounds.firstAt,
+    lastAt: bounds.lastAt,
+    durationMs,
+    turnDurations,
+    turnUsages: usageMode === "skip" ? [] : turnUsageEntriesFromEvents(events),
+    mtime: stat.mtime.toISOString(),
+  }, stat, fileBase);
+}
+
+function extendRunLogUsageSummaryFromEvents(summary, events, usageMode) {
+  const bounds = eventTimeBounds(events, { includeOpenCommandTail: true });
+  if (bounds.firstAt && (!summary.firstAt || bounds.firstAt < summary.firstAt)) {
+    summary.firstAt = bounds.firstAt;
+  }
+  if (bounds.lastAt && (!summary.lastAt || bounds.lastAt > summary.lastAt)) {
+    summary.lastAt = bounds.lastAt;
+  }
+
+  const turnDurations = turnExecutionDurationEntries(events, new Map(), { includeOpenCommandTail: true });
+  const durationMs = turnDurations.reduce((sum, entry) => sum + entry.durationMs, 0) || bounds.durationMs;
+  summary.durationMs += durationMs;
+  summary.turnDurations = mergeTurnDurationEntries(summary.turnDurations, turnDurations);
+
+  const mergedThreadIds = new Set(summary.threadIds);
+  for (const threadId of inferThreadIdsFromRun("", events)) {
+    mergedThreadIds.add(threadId);
+  }
+  summary.threadIds = [...mergedThreadIds].filter(Boolean).sort();
+
+  if (usageMode === "skip") {
+    summary.turnUsages = [];
+    return;
+  }
+
+  const tokenUsage = usageFromTokenEventsByThread(events);
+  const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
+  for (const entry of tokenUsage.threadUsages) {
+    threadUsageById.set(entry.threadId, addUsage(threadUsageById.get(entry.threadId), entry.usage));
+  }
+  summary.threadUsages = [...threadUsageById.entries()]
+    .filter(([, usage]) => hasTokenUsage(usage))
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([threadId, usage]) => ({ threadId, usage: normalizeUsage(usage) ?? emptyUsage() }));
+  if (hasTokenUsage(tokenUsage.unthreadedUsage)) {
+    summary.unthreadedUsage = addUsage(summary.unthreadedUsage, tokenUsage.unthreadedUsage);
+  }
+  summary.turnUsages = mergeTurnUsageEntriesMax(summary.turnUsages, turnUsageEntriesFromEvents(events));
+}
+
 function applyRunUsageSummaryToShape(summary, seenThreads) {
   let usage = null;
   for (const entry of summary.threadUsages ?? []) {
@@ -1122,6 +1280,23 @@ function applyRunUsageSummaryToShape(summary, seenThreads) {
   }
   if (hasTokenUsage(summary.unthreadedUsage)) {
     usage = addUsage(usage, summary.unthreadedUsage);
+  }
+  return hasTokenUsage(usage) ? usage : null;
+}
+
+function bestRunUsageForShape(summary, seenThreads) {
+  const threadUsage = applyRunUsageSummaryToShape(summary, seenThreads);
+  const turnUsage = usageFromTurnUsageEntries(summary?.turnUsages);
+  if (hasTokenUsage(turnUsage)) {
+    return turnUsage;
+  }
+  return threadUsage;
+}
+
+function usageFromTurnUsageEntries(entries) {
+  let usage = null;
+  for (const entry of normalizeTurnUsageEntries(entries)) {
+    usage = addUsage(usage, entry.usage);
   }
   return hasTokenUsage(usage) ? usage : null;
 }
@@ -1229,10 +1404,7 @@ function usageFromEventsByTurn(events) {
         continue;
       }
       if (tokenTurns.has(turn)) {
-        const existing = map.get(turn);
-        if (existing && usage.cost_usd > 0) {
-          existing.cost_usd = (existing.cost_usd ?? 0) + usage.cost_usd;
-        }
+        map.set(turn, usageWithCompletedCost(map.get(turn), usage));
         continue;
       }
       map.set(turn, addUsage(map.get(turn), usage));
@@ -1656,6 +1828,8 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   const spansByAttemptThread = new Map();
   const limitWaitsByAttempt = new Map();
   const openCommandsByAttemptThread = new Map();
+  let latestEventTime = -Infinity;
+  const latestAttemptThreadKeys = new Set();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -1675,7 +1849,14 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
         limitWaitsByAttempt.set(attemptKey, waits);
       }
     }
-    const key = `${attemptKey}\0${event.threadId ?? ""}`;
+    const key = `${attemptKey}\0${eventThreadId(event) ?? ""}`;
+    if (time > latestEventTime) {
+      latestEventTime = time;
+      latestAttemptThreadKeys.clear();
+      latestAttemptThreadKeys.add(key);
+    } else if (time === latestEventTime) {
+      latestAttemptThreadKeys.add(key);
+    }
     const span = spansByAttemptThread.get(key) ?? {
       attemptKey,
       first: time,
@@ -1694,7 +1875,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   }
   if (includeOpenCommandTail) {
     for (const [key, openCommands] of openCommandsByAttemptThread.entries()) {
-      if (openCommands <= 0) {
+      if (openCommands <= 0 || !latestAttemptThreadKeys.has(key)) {
         continue;
       }
       const span = spansByAttemptThread.get(key);
@@ -1705,15 +1886,12 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   }
 
   const durations = new Map();
-  for (const span of spansByAttemptThread.values()) {
-    const durationMs = activeEventDurationMs(span.events, { includeOpenCommandTail, nowMs });
-    const activeMs = subtractLimitWaitOverlap(
-      durationMs,
-      span.first,
-      span.last,
-      limitWaitsByAttempt.get(span.attemptKey),
-    );
-    durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + activeMs);
+  for (const [key, span] of spansByAttemptThread.entries()) {
+    const durationMs = activeEventDurationMs(span.events, {
+      includeOpenCommandTail: includeOpenCommandTail && latestAttemptThreadKeys.has(key),
+      nowMs,
+    });
+    durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + durationMs);
   }
   return durations;
 }
@@ -1783,13 +1961,13 @@ async function readCodexThreadTiming(threadIds, resolveTurn) {
   for (const threadId of threadIds) {
     const files = await findCodexSessionFiles(threadId);
     for (const filePath of files.sort()) {
-      await readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn);
+      await readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn, threadId);
     }
   }
   return timingByTurn;
 }
 
-async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn) {
+async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTurn, threadId = null) {
   const lines = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -1811,7 +1989,7 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
     }
 
     const time = Date.parse(record.timestamp ?? "");
-    const resolvedTurn = resolveTurn(record.timestamp);
+    const resolvedTurn = resolveTurn(record.timestamp, threadId);
     const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turnNumber : resolvedTurn;
     const attemptKey = typeof resolvedTurn === "object"
       ? resolvedTurn?.attemptKey
@@ -1907,7 +2085,7 @@ async function readCodexThreadUsageByTurn(threadIds, resolveTurn) {
     const files = await findCodexSessionFiles(threadId);
     let previous = null;
     for (const filePath of files.sort()) {
-      previous = await readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previous);
+      previous = await readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previous, threadId);
     }
   }
   return normalizeTurnUsageEntries([...totalsByTurn.entries()].map(([turnNumber, usage]) => ({
@@ -1916,7 +2094,7 @@ async function readCodexThreadUsageByTurn(threadIds, resolveTurn) {
   })));
 }
 
-async function readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previousUsage) {
+async function readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTurn, previousUsage, threadId = null) {
   let previous = previousUsage;
   const lines = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -1939,7 +2117,7 @@ async function readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTur
     if (!hasTokenUsage(current)) {
       continue;
     }
-    const resolvedTurn = resolveTurn(record.timestamp);
+    const resolvedTurn = resolveTurn(record.timestamp, threadId);
     const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turnNumber : resolvedTurn;
     const delta = usageDelta(current, previous);
     previous = current;
@@ -2270,12 +2448,32 @@ function usageCounterReset(current, previous) {
   if (!a || !b) {
     return false;
   }
-  return (
-    a.total_tokens < b.total_tokens ||
-    a.input_tokens < b.input_tokens ||
-    a.output_tokens < b.output_tokens ||
-    a.cached_input_tokens < b.cached_input_tokens ||
-    a.reasoning_output_tokens < b.reasoning_output_tokens
+  return a.total_tokens * 2 < b.total_tokens;
+}
+
+function usageWithCompletedCost(liveUsage, completedUsage) {
+  const live = normalizeUsage(liveUsage);
+  const completed = normalizeUsage(completedUsage);
+  if (!hasTokenUsage(live)) {
+    return completed;
+  }
+  if (completed?.cost_usd > 0 && sameTokenUsage(live, completed)) {
+    return { ...live, cost_usd: completed.cost_usd };
+  }
+  return live;
+}
+
+function sameTokenUsage(left, right) {
+  const a = normalizeUsage(left);
+  const b = normalizeUsage(right);
+  return Boolean(
+    a &&
+      b &&
+      a.input_tokens === b.input_tokens &&
+      a.cached_input_tokens === b.cached_input_tokens &&
+      a.output_tokens === b.output_tokens &&
+      a.reasoning_output_tokens === b.reasoning_output_tokens &&
+      a.total_tokens === b.total_tokens,
   );
 }
 
@@ -3398,10 +3596,53 @@ function buildWindowBackedSessionTurnResolver(selectedWindows, fallback) {
 
 function buildSessionTurnAttemptResolver(events) {
   const attempts = buildRawTurnAttemptWindows(events);
-  return (recordedAt) => {
+  const byThread = new Map();
+
+  for (const event of events) {
+    const threadId = eventThreadId(event);
+    if (!threadId) {
+      continue;
+    }
+    const turn = event.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const time = Date.parse(event.recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    if (!attempt) {
+      continue;
+    }
+    const entries = byThread.get(threadId) ?? [];
+    if (!entries.some((entry) => entry.key === attempt.key)) {
+      entries.push({
+        turnNumber: attempt.turnNumber,
+        attemptKey: attempt.key,
+        startTime: attempt.startTime,
+      });
+      entries.sort((a, b) => a.startTime - b.startTime);
+      byThread.set(threadId, entries);
+    }
+  }
+
+  return (recordedAt, threadId = null) => {
     const time = Date.parse(recordedAt ?? "");
     if (!Number.isFinite(time)) {
       return null;
+    }
+
+    const entries = threadId ? byThread.get(threadId) : null;
+    if (entries?.length) {
+      let selected = null;
+      for (const entry of entries) {
+        if (entry.startTime > time) {
+          break;
+        }
+        selected = entry;
+      }
+      return selected ?? entries[0];
     }
 
     let selected = null;

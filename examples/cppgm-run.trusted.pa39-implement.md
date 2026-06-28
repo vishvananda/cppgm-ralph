@@ -30,10 +30,28 @@ than host-seeded `../dev/cppgm++` on the same source, or times out while the
 host-seeded compiler completes, treat that as layer divergence to trace through
 the self compiler build.
 
+Do not make a source-level performance edit from a `*-self` profile alone.
+Before editing a hot source path for a self-only slowdown, record in
+`pa39/plan.md` one host-vs-self artifact comparison: output diff, generated
+object/disassembly diff for the same function, or emitted LowIR/backend trace
+diff for the same source. Expect self-built code to have less optimized local
+instructions than host compiler output. The PA39 signal is behavioral or
+algorithmic divergence: different output, LowIR control flow, EH/unwind path,
+branch, loop, call, or data-structure operation that makes the self-built
+compiler do substantially different work. Trace that divergence back to the
+earlier compiler feature that introduced it.
+Do not fix PA39 by rewriting valid compiler source just to avoid a C++ pattern
+that `*-self` handles badly. If host-seeded `../dev/cppgm++` handles the source
+correctly but `*-self` chooses a bad branch, call, overload, loop, or
+data-structure operation, add a reducer for that pattern and fix the earlier
+compiler bug instead. Only keep the source rewrite if the source is wrong or too
+slow under host-seeded `../dev/cppgm++` too.
+
 Implementation bar:
 - Keep `make test-report-through-pa38` passing.
 - Use `make -C pa39 test-through-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
-  to debug the self-built checkpoint ladder.
+  to debug the self-built checkpoint ladder; use `probe-self-object` and
+  `probe-self-link` only as scratch single-file probes.
 - Use `make -C pa39 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
   as the first reproducibility compare before the full compiler compare.
 - Final success requires

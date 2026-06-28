@@ -200,6 +200,132 @@ button:hover { background: #252525; }
   font-size: 0.78rem;
 }
 
+.comparison-content {
+  display: grid;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.comparison-charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.comparison-chart {
+  border: 1px solid #242424;
+  background: #111;
+  padding: 0.65rem;
+  min-width: 0;
+}
+
+.comparison-chart-title,
+.comparison-chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem 0.8rem;
+  flex-wrap: wrap;
+}
+
+.comparison-chart-title {
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+  color: #eee;
+  font-size: 0.78rem;
+}
+
+.comparison-chart-title span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.comparison-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.comparison-echart {
+  width: 100%;
+  height: 18rem;
+  min-height: 260px;
+}
+
+.comparison-grid {
+  stroke: #262626;
+  stroke-width: 1;
+}
+
+.comparison-axis,
+.comparison-tick {
+  stroke: #555;
+  stroke-width: 1;
+}
+
+.comparison-axis-label {
+  fill: #9a9a9a;
+  font-size: 11px;
+}
+
+.comparison-area-fill {
+  fill-opacity: 0.14;
+}
+
+.comparison-area-line {
+  fill: none;
+  stroke-width: 2.2;
+}
+
+.comparison-chart-legend {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.comparison-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.comparison-chart-legend i {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: 0 0 auto;
+}
+
+.comparison-tooltip {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 10rem;
+}
+
+.comparison-tooltip-title {
+  color: #eee;
+  font-weight: 650;
+  margin-bottom: 0.1rem;
+}
+
+.comparison-tooltip-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.comparison-tooltip-row strong {
+  color: #f2f2f2;
+  font-weight: 650;
+}
+
+.comparison-tooltip-dot {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 999px;
+}
+
 .comparison-table th,
 .comparison-table td {
   border-bottom: 1px solid #222;
@@ -225,31 +351,6 @@ button:hover { background: #252525; }
 .comparison-meta {
   color: var(--muted);
   font-size: 0.72rem;
-}
-
-.comparison-layout-row th {
-  background: #141414;
-  color: #d0a64a;
-}
-
-.comparison-layout-boundary {
-  border-left: 2px solid #45413a !important;
-}
-
-.comparison-pa-map {
-  display: grid;
-  gap: 0.05rem;
-  margin-top: 0.12rem;
-  color: var(--muted);
-  font-size: 0.66rem;
-  line-height: 1.25;
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.comparison-pa-map span {
-  display: block;
-  white-space: normal;
 }
 
 .run-docs-card {
@@ -480,6 +581,10 @@ button:hover { background: #252525; }
     display: block;
     overflow-x: auto;
     white-space: nowrap;
+  }
+
+  .comparison-charts {
+    grid-template-columns: 1fr;
   }
 
   .run-docs-body {

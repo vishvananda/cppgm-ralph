@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline";
 import {
   backfillCodexSessionEvents,
   codexEventKey,
@@ -122,24 +124,20 @@ function parseTime(value) {
 }
 
 async function inferSinceMs(eventLogPath, threadId) {
-  const raw = await fs.readFile(eventLogPath, "utf8");
   let best = null;
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
+  try {
+    for await (const record of readEventLogRecords(eventLogPath)) {
+      if (
+        record.threadId === threadId &&
+        record.eventType === "thread.started" &&
+        typeof record.recordedAt === "string"
+      ) {
+        best = record.recordedAt;
+      }
     }
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch (_) {
-      continue;
-    }
-    if (
-      record.threadId === threadId &&
-      record.eventType === "thread.started" &&
-      typeof record.recordedAt === "string"
-    ) {
-      best = record.recordedAt;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
     }
   }
   return best ? Date.parse(best) - 1000 : NaN;
@@ -147,26 +145,34 @@ async function inferSinceMs(eventLogPath, threadId) {
 
 async function readExistingEventKeys(eventLogPath) {
   const keys = new Set();
-  let raw = "";
   try {
-    raw = await fs.readFile(eventLogPath, "utf8");
+    for await (const record of readEventLogRecords(eventLogPath)) {
+      if (record?.event) {
+        keys.add(codexEventKey(record.event, record.recordedAt));
+      }
+    }
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw error;
     }
   }
-  for (const line of raw.split(/\r?\n/)) {
+
+  return keys;
+}
+
+async function* readEventLogRecords(eventLogPath) {
+  const lines = readline.createInterface({
+    input: createReadStream(eventLogPath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
     if (!line.trim()) {
       continue;
     }
     try {
-      const record = JSON.parse(line);
-      if (record?.event) {
-        keys.add(codexEventKey(record.event, record.recordedAt));
-      }
+      yield JSON.parse(line);
     } catch (_) {
       // Ignore malformed log lines.
     }
   }
-  return keys;
 }

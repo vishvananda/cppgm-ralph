@@ -31,6 +31,8 @@ const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
 const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v1";
 const PROGRESS_BEST_CACHE_LIMIT = 600;
 const STATIC_DATA_ROOT = staticDataRootFromUrl();
+const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map([
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
@@ -40,6 +42,12 @@ const API_PRICE_RATES = new Map([
   ["claude-opus-4-8", { input: 5.00, cachedInput: 0.50, output: 25.00 }],
   ["claude-haiku-4-5", { input: 1.00, cachedInput: 0.10, output: 5.00 }],
 ]);
+
+const API_PRICE_MODEL_ALIASES = [
+  [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
+  [/(\b|-)fable(\b|-)/, "claude-fable-5"],
+  [/(\b|-)haiku(\b|-)/, "claude-haiku-4-5"],
+];
 
 function staticDataRootFromUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -201,7 +209,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
     tokenUsage: latestCumulativeUsage(events),
     shapeUsage: normalizedShapeUsage,
     priceModel,
-    latestTurn: latestTurnOverview(events, priceModel, normalizedShapeUsage),
+    latestTurn: latestTurnOverview(events, priceModel, normalizedShapeUsage, run),
     latestPhaseStatus: latestPhaseStatus(events),
     testProgress,
     latestTestStatus: latestTestStatus(events),
@@ -209,28 +217,92 @@ function buildSummary(events, shapeUsage = null, run = null) {
   };
 }
 
-function latestTurnOverview(events, priceModel, shapeUsage = null) {
+function latestTurnOverview(events, priceModel, shapeUsage = null, run = null) {
   const turn = latestNumericTurn(events);
   if (turn == null) {
     return null;
   }
   const durationMap = buildTurnDurationMap(events);
-  const duration = durationText(bestTurnDurationSpan(shapeUsage, turn, durationMap));
+  const duration = durationText(bestTurnDurationSpan(shapeUsage, turn, durationMap, {
+    activeCurrentTurn: isActiveCurrentRunTurn(run, turn),
+    activeStartMs: activeCurrentRunTurnStartMs(run, turn, events),
+  }));
   const usage = bestTurnUsage(shapeUsage, turn, buildUsageMap(events).get(turn));
   const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
   return { turn, duration, cost };
 }
 
-function bestTurnDurationSpan(shapeUsage, turn, durationMap) {
+function bestTurnDurationSpan(shapeUsage, turn, durationMap, options = {}) {
   const cached = shapeUsageTurnDuration(shapeUsage, turn);
   const live = durationMap?.get(turn) ?? null;
+  let best = null;
   if (!cached) {
-    return live;
+    best = live;
+  } else if (!live) {
+    best = cached;
+  } else {
+    best = (live.durationMs ?? 0) > (cached.durationMs ?? 0) ? live : cached;
   }
-  if (!live) {
-    return cached;
+  return options.activeCurrentTurn ? activeCurrentTurnDurationSpan(best, cached, live, options) : best;
+}
+
+function activeCurrentTurnDurationSpan(best, cached, live, options = {}) {
+  const candidates = [best, cached, live].filter(Boolean);
+  if (!candidates.length) {
+    return best;
   }
-  return (live.durationMs ?? 0) > (cached.durationMs ?? 0) ? live : cached;
+  const activeStartMs = Number(options.activeStartMs);
+  if (!Number.isFinite(activeStartMs)) {
+    return best;
+  }
+  const first = activeStartMs;
+  const lastValues = candidates
+    .map((entry) => Number(entry.last))
+    .filter(Number.isFinite);
+  const last = Math.max(Date.now(), ...lastValues, first);
+  return {
+    ...(best ?? {}),
+    first,
+    last,
+    durationMs: Math.max(Number(best?.durationMs) || 0, last - first),
+  };
+}
+
+function isActiveCurrentRunTurn(run, turn) {
+  if (!run?.state?.active || !Number.isInteger(turn) || turn <= 0) {
+    return false;
+  }
+  const completed = Number(run.state.turnsCompleted);
+  return Number.isInteger(completed) && turn > completed;
+}
+
+function activeCurrentRunTurnStartMs(run, turn, records = []) {
+  if (!isActiveCurrentRunTurn(run, turn)) {
+    return null;
+  }
+  const latestEventStartMs = latestTurnStartMs(records, turn);
+  if (Number.isFinite(latestEventStartMs)) {
+    return latestEventStartMs;
+  }
+  return null;
+}
+
+function latestTurnStartMs(records, turn) {
+  let latest = null;
+  for (const record of Array.isArray(records) ? records : []) {
+    if (
+      record?.eventType !== "ralph.phase-status" ||
+      record.event?.action !== "turn-start" ||
+      displayTurnForRecord(record) !== turn
+    ) {
+      continue;
+    }
+    const time = Date.parse(record.recordedAt ?? "");
+    if (Number.isFinite(time) && (latest == null || time > latest)) {
+      latest = time;
+    }
+  }
+  return latest;
 }
 
 function shapeUsageTurnDuration(shapeUsage, turn) {
@@ -425,6 +497,7 @@ function renderSummary(events) {
         durationMs: usage.durationMs,
         includeModel: true,
         suffix: usage.suffix,
+        costUsd: usage.costUsd,
       })
     : '<span class="muted">n/a</span>';
   const detailText = codexDetailSummaryHtml(state.codexDetail);
@@ -558,6 +631,7 @@ function preferredUsageSummary(summary) {
       usage: summary.shapeUsage.usage,
       durationMs: summary.shapeUsage.durationMs,
       suffix: `${fmtInt(summary.shapeUsage.runCount)} runs`,
+      costUsd: shapeUsageTurnCost(summary.shapeUsage, summary.priceModel),
     };
   }
   if (summary?.tokenUsage) {
@@ -579,7 +653,34 @@ function dockUsageText(usageSummary, priceModel) {
     durationMs: usageSummary.durationMs,
     compact: true,
     suffix: usageSummary.suffix,
+    costUsd: usageSummary.costUsd,
   })}`;
+}
+
+function shapeUsageTurnCost(shapeUsage, model) {
+  let total = 0;
+  let sawCost = false;
+  for (const run of Array.isArray(shapeUsage?.runs) ? shapeUsage.runs : []) {
+    for (const entry of Array.isArray(run?.turnUsages) ? run.turnUsages : []) {
+      const cost = turnUsageCost(entry?.usage, model);
+      if (Number.isFinite(cost)) {
+        total += cost;
+        sawCost = true;
+      }
+    }
+  }
+  return sawCost ? total : null;
+}
+
+function turnUsageCost(usage, model) {
+  const normalized = normalizeUsage(usage);
+  if (!hasTokenUsage(normalized)) {
+    return null;
+  }
+  if (normalized.cost_usd > 0) {
+    return normalized.cost_usd;
+  }
+  return apiCostEstimate(normalized, model);
 }
 
 // --- Display entry building (merge command start/end) ---
@@ -1560,6 +1661,8 @@ function buildTurnDurationMap(records, options = {}) {
   const ralphLifecycleByTurnAttempt = new Map();
   const limitWaitsByTurnAttempt = new Map();
   const openCommandsByTurnAttemptThread = new Map();
+  let latestEventTime = -Infinity;
+  const latestAttemptThreadKeys = new Set();
   for (const record of records) {
     const turn = displayTurnForRecord(record);
     const time = Date.parse(record.recordedAt ?? "");
@@ -1587,10 +1690,24 @@ function buildTurnDurationMap(records, options = {}) {
       }
     }
     if (durationSpanActivity) {
-      const attemptThreadKey = `${turnAttemptKey}\0${record.threadId ?? ""}`;
-      const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey) ?? { turn, attemptIndex, first: time, last: time };
+      const attemptThreadKey = `${turnAttemptKey}\0${eventThreadId(record) ?? ""}`;
+      if (time > latestEventTime) {
+        latestEventTime = time;
+        latestAttemptThreadKeys.clear();
+        latestAttemptThreadKeys.add(attemptThreadKey);
+      } else if (time === latestEventTime) {
+        latestAttemptThreadKeys.add(attemptThreadKey);
+      }
+      const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey) ?? {
+        turn,
+        attemptIndex,
+        first: time,
+        last: time,
+        events: [],
+      };
       threadSpan.first = Math.min(threadSpan.first, time);
       threadSpan.last = Math.max(threadSpan.last, time);
+      threadSpan.events.push({ ...record, time });
       spansByTurnAttemptThread.set(attemptThreadKey, threadSpan);
       if (isCommandStartEvent(record)) {
         openCommandsByTurnAttemptThread.set(
@@ -1650,7 +1767,7 @@ function buildTurnDurationMap(records, options = {}) {
   }
   if (includeOpenCommandTail) {
     for (const [attemptThreadKey, openCommands] of openCommandsByTurnAttemptThread.entries()) {
-      if (openCommands <= 0) {
+      if (openCommands <= 0 || !latestAttemptThreadKeys.has(attemptThreadKey)) {
         continue;
       }
       const threadSpan = spansByTurnAttemptThread.get(attemptThreadKey);
@@ -1665,16 +1782,13 @@ function buildTurnDurationMap(records, options = {}) {
     }
   }
   const attemptDurations = new Map();
-  for (const threadSpan of spansByTurnAttemptThread.values()) {
+  for (const [attemptThreadKey, threadSpan] of spansByTurnAttemptThread.entries()) {
     const key = `${threadSpan.turn}\0${threadSpan.attemptIndex}`;
-    const durationMs = Math.max(0, threadSpan.last - threadSpan.first);
-    const activeMs = subtractLimitWaitOverlap(
-      durationMs,
-      threadSpan.first,
-      threadSpan.last,
-      limitWaitsByTurnAttempt.get(key),
-    );
-    attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + activeMs);
+    const durationMs = activeEventDurationMs(threadSpan.events, {
+      includeOpenCommandTail: includeOpenCommandTail && latestAttemptThreadKeys.has(attemptThreadKey),
+      nowMs,
+    });
+    attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + durationMs);
   }
   for (const [key, lifecycle] of ralphLifecycleByTurnAttempt.entries()) {
     if (
@@ -1906,7 +2020,9 @@ function inferPriceModel(run = null) {
     : `${state.selectedRun ?? ""} ${runSelect.selectedOptions?.[0]?.textContent ?? ""}`.toLowerCase();
   return [...API_PRICE_RATES.keys()]
     .sort((a, b) => b.length - a.length)
-    .find((model) => text.includes(model)) ?? null;
+    .find((model) => text.includes(model)) ??
+    API_PRICE_MODEL_ALIASES.find(([pattern]) => pattern.test(text))?.[1] ??
+    null;
 }
 
 function normalizeUsage(usage) {
@@ -2004,6 +2120,32 @@ function usageCounterReset(current, previous) {
   return a.total_tokens * 2 < b.total_tokens;
 }
 
+function usageWithCompletedCost(liveUsage, completedUsage) {
+  const live = normalizeUsage(liveUsage);
+  const completed = normalizeUsage(completedUsage);
+  if (!hasTokenUsage(live)) {
+    return completed;
+  }
+  if (completed?.cost_usd > 0 && sameTokenUsage(live, completed)) {
+    return { ...live, cost_usd: completed.cost_usd };
+  }
+  return live;
+}
+
+function sameTokenUsage(left, right) {
+  const a = normalizeUsage(left);
+  const b = normalizeUsage(right);
+  return Boolean(
+    a &&
+      b &&
+      a.input_tokens === b.input_tokens &&
+      a.cached_input_tokens === b.cached_input_tokens &&
+      a.output_tokens === b.output_tokens &&
+      a.reasoning_output_tokens === b.reasoning_output_tokens &&
+      a.total_tokens === b.total_tokens,
+  );
+}
+
 function normalizeShapeUsage(shapeUsage) {
   const usage = normalizeUsage(shapeUsage?.usage);
   if (!usage) {
@@ -2025,7 +2167,15 @@ function tokenCountRecords(records) {
 }
 
 function tokenCountThreadKey(record) {
-  return record?.threadId ?? record?.event?.thread_id ?? record?.event?.threadId ?? "";
+  return eventThreadId(record) ?? "";
+}
+
+function eventThreadId(record) {
+  return record?.threadId ??
+    record?.event?.thread_id ??
+    record?.event?.threadId ??
+    record?.event?.goal?.threadId ??
+    null;
 }
 
 function isUsageBaselineRecord(record) {
@@ -2053,11 +2203,11 @@ function apiCostEstimate(usage, model) {
         normalized.output_tokens * rates.output) /
       1_000_000
     : null;
-  // Prefer the provider-reported cost (covers thinking tokens and cache-write
-  // premiums the rate estimate can't see). In mixed aggregates where only some
-  // turns carry actual cost, take the larger of the two.
+  // Prefer provider-reported cost when present. Claude turn results can report
+  // substantially lower actual cost than a rough rate-card estimate from the
+  // live token counters.
   const actual = normalized.cost_usd > 0 ? normalized.cost_usd : null;
-  if (actual != null && (estimate == null || actual >= estimate)) {
+  if (actual != null) {
     return actual;
   }
   return estimate;
@@ -2081,7 +2231,10 @@ function usageSummaryText(usage, model, options = {}) {
   const duration = Number.isFinite(options.durationMs) && options.durationMs > 0
     ? durationText({ durationMs: options.durationMs })
     : "";
-  const cost = costEstimateText(normalized, model, { includeModel: options.includeModel });
+  const explicitCost = Number(options.costUsd);
+  const cost = Number.isFinite(explicitCost)
+    ? `${options.includeModel && model ? `${model} ` : ""}${fmtUsd(explicitCost)}`
+    : costEstimateText(normalized, model, { includeModel: options.includeModel });
   const parts = [];
   if (duration) {
     parts.push(duration);
@@ -2166,12 +2319,7 @@ function buildUsageMap(records) {
       const turn = displayTurnForRecord(r);
       const usage = normalizeUsage(r.event.usage);
       if (tokenTurns.has(turn)) {
-        // Tokens already counted from token_count records; harvest the exact
-        // cost, which the incremental records don't carry.
-        const existing = map.get(turn);
-        if (existing && usage.cost_usd > 0) {
-          existing.cost_usd = (existing.cost_usd ?? 0) + usage.cost_usd;
-        }
+        map.set(turn, usageWithCompletedCost(map.get(turn), usage));
         continue;
       }
       map.set(turn, usage);
@@ -4043,7 +4191,10 @@ function renderTimeline(records) {
     const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
-    const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap));
+    const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap, {
+      activeCurrentTurn: isActiveCurrentRunTurn(selectedRunMeta(), turn),
+      activeStartMs: activeCurrentRunTurnStartMs(selectedRunMeta(), turn, items),
+    }));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const displayEntries = buildDisplayEntries(items);
     const entryWindow = displayEntryWindow(displayEntries);
@@ -4195,15 +4346,25 @@ async function fetchText(url) {
 }
 
 function staticDataPath(relativePath) {
-  return `${STATIC_DATA_ROOT}/${String(relativePath ?? "").replace(/^\/+/, "")}`;
+  const base = `${STATIC_DATA_ROOT}/${String(relativePath ?? "").replace(/^\/+/, "")}`;
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}_=${Date.now()}`;
 }
 
 function staticModeForced() {
   return new URLSearchParams(window.location.search).get("static") === "1";
 }
 
+function staticExportHost() {
+  const host = window.location.hostname;
+  return window.location.protocol === "file:" ||
+    host === "storage.googleapis.com" ||
+    host === "storage.cloud.google.com" ||
+    host.endsWith(".storage.googleapis.com");
+}
+
 async function loadRunCatalog() {
-  if (!state.staticMode && !staticModeForced()) {
+  if (!state.staticMode && !staticModeForced() && !staticExportHost()) {
     try {
       const [stateData, data] = await Promise.all([
         fetchJson("/api/state"),
@@ -4224,6 +4385,9 @@ async function loadRunCatalog() {
   const manifest = await fetchJson(staticDataPath("runs.json"));
   state.staticMode = true;
   state.staticManifest = manifest;
+  state.staticRunSummaries.clear();
+  state.staticRunDocs.clear();
+  state.staticComparison = null;
   document.body.classList.toggle("is-static-viz", true);
   if (autoRefreshToggle) {
     autoRefreshToggle.checked = false;
@@ -4558,15 +4722,12 @@ async function renderComparisonView() {
   const runOrder = comparisonRunOrder(comparison.runs);
   const orderedRuns = runOrder.map((index) => comparison.runs[index]);
   const totals = runOrder.map((index) => comparisonTotalForRows(rows, index));
-  const layoutNotes = comparison.assignmentLayoutNotes?.length
-    ? comparison.assignmentLayoutNotes.join(" ")
-    : "";
+  await ensureEChartsLoaded();
   summaryEl.innerHTML = `
     <div><strong>through</strong><input id="compareThrough" class="compact-number" type="number" min="1" max="${maxPa}" value="${through}" /></div>
     <div><strong>runs</strong>${fmtInt(comparison.runs.length)}</div>
     <div><strong>generated</strong>${fmt(comparison.generatedAt)}</div>
     <div class="summary-wide"><strong>pricing</strong>${escapeHtml(comparison.runs.map((run) => `${run.label}=${run.model ?? "provider"}`).join(", "))}</div>
-    ${layoutNotes ? `<div class="summary-wide"><strong>layouts</strong>${escapeHtml(layoutNotes)}</div>` : ""}
   `;
   const input = document.getElementById("compareThrough");
   input?.addEventListener("change", () => {
@@ -4577,32 +4738,33 @@ async function renderComparisonView() {
   const table = document.createElement("table");
   table.className = "comparison-table";
   const header = document.createElement("thead");
-  const groups = comparisonLayoutGroups(orderedRuns);
   header.innerHTML = `
-    <tr class="comparison-layout-row">
-      <th rowspan="2">PA</th>
-      ${groups.map((group) => `<th colspan="${group.count}" class="${group.boundary ? "comparison-layout-boundary" : ""}">${escapeHtml(group.label)}</th>`).join("")}
-    </tr>
     <tr>
-      ${orderedRuns.map((run, position) => `<th class="${comparisonBoundaryClass(position, orderedRuns)}">${escapeHtml(run.label)}</th>`).join("")}
+      <th>PA</th>
+      ${orderedRuns.map((run) => `<th>${escapeHtml(run.label)}</th>`).join("")}
     </tr>
   `;
   table.append(header);
   const body = document.createElement("tbody");
   const totalRow = document.createElement("tr");
   totalRow.className = "comparison-total";
-  totalRow.innerHTML = `<th>Total</th>${totals.map((total, position) => `<td class="${comparisonBoundaryClass(position, orderedRuns)}">${comparisonCellHtml(total)}</td>`).join("")}`;
+  totalRow.innerHTML = `<th>Total</th>${totals.map((total) => `<td>${comparisonCellHtml(total)}</td>`).join("")}`;
   body.append(totalRow);
   for (const row of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <th>${comparisonPaCellHtml(row.pa, comparison.runs, runOrder)}</th>
-      ${runOrder.map((index, position) => `<td class="${comparisonBoundaryClass(position, orderedRuns)}">${comparisonCellHtml(row.runs[index])}</td>`).join("")}
+      <th>${escapeHtml(row.pa)}</th>
+      ${runOrder.map((index) => `<td>${comparisonCellHtml(row.runs[index])}</td>`).join("")}
     `;
     body.append(tr);
   }
   table.append(body);
-  timelineEl.replaceChildren(table);
+  const content = document.createElement("div");
+  content.className = "comparison-content";
+  const charts = renderComparisonCharts(rows, runOrder, orderedRuns);
+  content.append(charts, table);
+  timelineEl.replaceChildren(content);
+  hydrateComparisonCharts(charts, rows, runOrder, orderedRuns);
   eventCountEl.textContent = `${fmtInt(rows.length)} PAs / ${fmtInt(comparison.runs.length)} runs`;
   if (progressDock) {
     progressDock.innerHTML = `
@@ -4627,60 +4789,356 @@ async function loadStaticComparison() {
 }
 
 function comparisonRunOrder(runs) {
-  const layoutRank = new Map([["v1", 0], ["v2", 1]]);
-  return runs
-    .map((run, index) => ({
-      index,
-      rank: layoutRank.get(run.layout?.id) ?? 99,
-    }))
-    .sort((left, right) => left.rank - right.rank || left.index - right.index)
-    .map((entry) => entry.index);
+  return runs.map((_, index) => index);
 }
 
-function comparisonLayoutGroups(orderedRuns) {
-  const groups = [];
-  for (const run of orderedRuns) {
-    const id = run.layout?.id ?? "unknown";
-    const label = run.layout?.label ?? id;
-    const current = groups.at(-1);
-    if (current?.id === id) {
-      current.count += 1;
-    } else {
-      groups.push({ id, label, count: 1, boundary: groups.length > 0 });
-    }
+function renderComparisonCharts(rows, runOrder, orderedRuns) {
+  const wrap = document.createElement("div");
+  wrap.className = "comparison-charts";
+  if (window.echarts) {
+    wrap.innerHTML = [
+      comparisonChartShellHtml("Accumulated Cost", "cost"),
+      comparisonChartShellHtml("Accumulated Runtime", "runtime"),
+    ].join("");
+    return wrap;
   }
-  return groups;
+  wrap.innerHTML = [
+    comparisonAreaChartHtml("Accumulated Cost", rows, runOrder, orderedRuns, {
+      field: "cost",
+      format: formatUsd,
+      axis: formatCompactUsd,
+    }),
+    comparisonAreaChartHtml("Accumulated Runtime", rows, runOrder, orderedRuns, {
+      field: "durationMs",
+      format: (value) => formatHhhMmSs(value),
+      axis: formatCompactDuration,
+    }),
+  ].join("");
+  return wrap;
 }
 
-function comparisonBoundaryClass(position, orderedRuns) {
-  if (position <= 0) {
-    return "";
+async function ensureEChartsLoaded() {
+  if (window.echarts) {
+    return true;
   }
-  const previous = orderedRuns[position - 1]?.layout?.id ?? "unknown";
-  const current = orderedRuns[position]?.layout?.id ?? "unknown";
-  return previous !== current ? "comparison-layout-boundary" : "";
+  if (!echartsLoadPromise) {
+    echartsLoadPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(value);
+      };
+      window.setTimeout(() => finish(Boolean(window.echarts)), 5000);
+      const existing = document.querySelector(`script[src="${ECHARTS_CDN_URL}"]`);
+      if (existing) {
+        existing.addEventListener("load", () => finish(Boolean(window.echarts)), { once: true });
+        existing.addEventListener("error", () => finish(false), { once: true });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = ECHARTS_CDN_URL;
+      script.async = true;
+      script.onload = () => finish(Boolean(window.echarts));
+      script.onerror = () => finish(false);
+      document.head.append(script);
+    });
+  }
+  return echartsLoadPromise;
 }
 
-function comparisonPaCellHtml(pa, runs, runOrder) {
-  const byLayout = new Map();
-  for (const index of runOrder) {
-    const run = runs[index];
-    const layoutId = run?.layout?.shortLabel ?? run?.layout?.id ?? "layout";
-    const title = run?.assignmentTitles?.[pa] ?? null;
-    if (title && !byLayout.has(layoutId)) {
-      byLayout.set(layoutId, title);
-    }
-  }
-  const uniqueTitles = new Set(byLayout.values());
-  if (uniqueTitles.size <= 1) {
-    return escapeHtml(pa);
-  }
+function comparisonChartShellHtml(title, metric) {
   return `
-    <div>${escapeHtml(pa)}</div>
-    <div class="comparison-pa-map">
-      ${[...byLayout.entries()].map(([layout, title]) => `<span>${escapeHtml(layout)}: ${escapeHtml(title)}</span>`).join("")}
+    <section class="comparison-chart">
+      <div class="comparison-chart-title">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${metric === "cost" ? "USD" : "HHH:MM:SS"}</span>
+      </div>
+      <div class="comparison-echart" data-comparison-chart="${escapeHtml(metric)}"></div>
+    </section>
+  `;
+}
+
+function hydrateComparisonCharts(container, rows, runOrder, orderedRuns) {
+  if (!window.echarts || !container?.querySelector) {
+    return;
+  }
+  const costEl = container.querySelector('[data-comparison-chart="cost"]');
+  const runtimeEl = container.querySelector('[data-comparison-chart="runtime"]');
+  if (costEl) {
+    renderEChartArea(costEl, "Accumulated Cost", rows, runOrder, orderedRuns, {
+      field: "cost",
+      valueFormatter: formatUsd,
+      axisFormatter: formatCompactUsd,
+      tooltipFormatter: formatUsd,
+    });
+  }
+  if (runtimeEl) {
+    renderEChartArea(runtimeEl, "Accumulated Runtime", rows, runOrder, orderedRuns, {
+      field: "durationMs",
+      valueFormatter: formatHhhMmSs,
+      axisFormatter: formatCompactDuration,
+      tooltipFormatter: formatHhhMmSs,
+    });
+  }
+}
+
+function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
+  const chart = window.echarts.init(el, null, { renderer: "canvas" });
+  const labels = rows.map((row) => row.pa);
+  const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
+  const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
+  const colorBySeries = new Map(series.map((run, index) => [run.label, palette[index % palette.length]]));
+  chart.setOption({
+    color: palette,
+    backgroundColor: "transparent",
+    animationDuration: 550,
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(18, 18, 18, 0.96)",
+      borderColor: "#333",
+      textStyle: { color: "#eee", fontSize: 12 },
+      formatter: (params) => comparisonChartTooltipHtml(params, colorBySeries, metric.tooltipFormatter),
+    },
+    legend: {
+      bottom: 0,
+      left: 0,
+      itemWidth: 11,
+      itemHeight: 8,
+      textStyle: { color: "#aaa", fontSize: 11 },
+    },
+    grid: {
+      left: 54,
+      right: 20,
+      top: 10,
+      bottom: 58,
+      containLabel: true,
+    },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: labels,
+      axisLine: { lineStyle: { color: "#555" } },
+      axisTick: { lineStyle: { color: "#444" } },
+      axisLabel: {
+        color: "#999",
+        interval: 0,
+        rotate: 45,
+        margin: 14,
+      },
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { color: "#252525" } },
+      axisLabel: {
+        color: "#999",
+        formatter: (value) => metric.axisFormatter(Number(value) || 0),
+      },
+    },
+    series: series.map((run, runIndex) => {
+      const color = palette[runIndex % palette.length];
+      const finalPoint = run.points.at(-1) ?? null;
+      return {
+        name: run.label,
+        type: "line",
+        smooth: false,
+        connectNulls: false,
+        symbol: "none",
+        showSymbol: true,
+        lineStyle: { width: 2.4 },
+        areaStyle: { opacity: 0.16 },
+        emphasis: { focus: "series" },
+        data: rows.map((_, index) => {
+          const point = run.points.find((candidate) => candidate.index === index);
+          if (!point) {
+            return null;
+          }
+          const isFinal = finalPoint && point.index === finalPoint.index;
+          if (!isFinal) {
+            return Number(point.value) || 0;
+          }
+          const complete = point.status === "complete";
+          return {
+            value: Number(point.value) || 0,
+            symbol: "circle",
+            symbolSize: 9,
+            itemStyle: {
+              color: complete ? color : "#111",
+              borderColor: color,
+              borderWidth: complete ? 1.5 : 2.4,
+            },
+          };
+        }),
+      };
+    }),
+  });
+  const resize = () => chart.resize();
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(resize);
+    observer.observe(el);
+  } else {
+    window.addEventListener("resize", resize, { passive: true });
+  }
+}
+
+function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter) {
+  const list = Array.isArray(params) ? params : [params];
+  const axisLabel = list.find(Boolean)?.axisValueLabel ?? "";
+  const rows = list
+    .filter((param) => param?.value != null)
+    .map((param) => {
+      const color = colorBySeries.get(param.seriesName) ?? param.color ?? "#999";
+      return `
+        <div class="comparison-tooltip-row">
+          <span class="comparison-tooltip-dot" style="background:${escapeHtml(color)}"></span>
+          <span>${escapeHtml(param.seriesName ?? "")}</span>
+          <strong>${escapeHtml(valueFormatter(Number(param.value) || 0))}</strong>
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="comparison-tooltip">
+      <div class="comparison-tooltip-title">${escapeHtml(axisLabel)}</div>
+      ${rows}
     </div>
   `;
+}
+
+function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
+  const width = 920;
+  const height = 260;
+  const pad = { left: 54, right: 20, top: 28, bottom: 42 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
+  const maxValue = Math.max(1, ...series.flatMap((run) => run.points.map((point) => point.value)));
+  const xFor = (index) => pad.left + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * plotWidth);
+  const yFor = (value) => pad.top + plotHeight - (value / maxValue) * plotHeight;
+  const ticks = comparisonChartTicks(maxValue, 4);
+  const xLabels = comparisonXLabels(rows);
+  const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
+  const paths = series.map((run, runIndex) => {
+    if (!run.points.length) {
+      return "";
+    }
+    const color = palette[runIndex % palette.length];
+    const line = run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.value).toFixed(1)}`).join(" ");
+    const firstPoint = run.points[0];
+    const finalPoint = run.points.at(-1);
+    const complete = finalPoint.status === "complete";
+    const area = `${line} L ${xFor(finalPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(firstPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} Z`;
+    return `
+      <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color}" />
+      <path class="comparison-area-line" d="${line}" stroke="${color}" />
+      <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : "#111"}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
+    `;
+  }).join("");
+  const latest = series.map((run, runIndex) => {
+    const color = palette[runIndex % palette.length];
+    const value = run.points.at(-1)?.value ?? 0;
+    return `<span><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}</span>`;
+  }).join("");
+  return `
+    <section class="comparison-chart">
+      <div class="comparison-chart-title">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(metric.format(maxValue))} max</span>
+      </div>
+      <svg class="comparison-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} by PA">
+        ${ticks.map((tick) => {
+          const y = yFor(tick);
+          return `
+            <line class="comparison-grid" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}" />
+            <text class="comparison-axis-label" x="${pad.left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${escapeHtml(metric.axis(tick))}</text>
+          `;
+        }).join("")}
+        ${xLabels.map(({ index, label }) => {
+          const x = xFor(index);
+          return `
+            <line class="comparison-tick" x1="${x.toFixed(1)}" y1="${height - pad.bottom}" x2="${x.toFixed(1)}" y2="${height - pad.bottom + 5}" />
+            <text class="comparison-axis-label" x="${x.toFixed(1)}" y="${height - 18}" text-anchor="middle">${escapeHtml(label)}</text>
+          `;
+        }).join("")}
+        <line class="comparison-axis" x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}" />
+        <line class="comparison-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" />
+        ${paths}
+      </svg>
+      <div class="comparison-chart-legend">${latest}</div>
+    </section>
+  `;
+}
+
+function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field) {
+  return runOrder.map((runIndex, position) => {
+    let value = 0;
+    return {
+      label: orderedRuns[position]?.label ?? `run ${position + 1}`,
+      points: rows.flatMap((row, index) => {
+        const summary = row.runs?.[runIndex] ?? null;
+        if (!comparisonSummaryStarted(summary)) {
+          return [];
+        }
+        value += Number(summary?.[field] ?? 0) || 0;
+        return [{
+          pa: row.pa,
+          index,
+          value,
+          status: summary?.status ?? "complete",
+        }];
+      }),
+    };
+  });
+}
+
+function comparisonSummaryStarted(summary) {
+  if (!summary || summary.status === "not started") {
+    return false;
+  }
+  return (Array.isArray(summary.turns) && summary.turns.length > 0) ||
+    (Number(summary.durationMs ?? 0) || 0) > 0 ||
+    (Number(summary.cost ?? 0) || 0) > 0 ||
+    summary.status === "partial" ||
+    summary.status === "complete";
+}
+
+function comparisonChartTicks(maxValue, count) {
+  const ticks = [];
+  for (let index = 0; index <= count; index += 1) {
+    ticks.push((maxValue * index) / count);
+  }
+  return ticks;
+}
+
+function comparisonXLabels(rows) {
+  if (rows.length <= 1) {
+    return rows.length ? [{ index: 0, label: rows[0].pa }] : [];
+  }
+  const labels = new Map();
+  const step = Math.max(1, Math.ceil((rows.length - 1) / 6));
+  for (let index = 0; index < rows.length; index += step) {
+    labels.set(index, rows[index].pa);
+  }
+  labels.set(rows.length - 1, rows.at(-1).pa);
+  return [...labels.entries()].map(([index, label]) => ({ index, label }));
+}
+
+function formatCompactUsd(value) {
+  const amount = Number(value) || 0;
+  if (amount >= 1000) {
+    return `$${(amount / 1000).toFixed(1)}k`;
+  }
+  return `$${amount.toFixed(0)}`;
+}
+
+function formatCompactDuration(durationMs) {
+  const hours = Math.max(0, Number(durationMs) || 0) / 3600000;
+  if (hours >= 100) {
+    return `${Math.round(hours)}h`;
+  }
+  return `${hours.toFixed(1)}h`;
 }
 
 function comparisonTotalForRows(rows, runIndex) {

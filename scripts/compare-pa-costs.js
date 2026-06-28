@@ -14,6 +14,12 @@ const DEFAULT_RATES = {
   "claude-haiku-4-5": { input: 1.0, cachedInput: 0.1, output: 5.0 },
 };
 
+const MODEL_ALIASES = [
+  [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
+  [/(\b|-)fable(\b|-)/, "claude-fable-5"],
+  [/(\b|-)haiku(\b|-)/, "claude-haiku-4-5"],
+];
+
 const DEFAULTS = {
   left: "phases-gpt-5.5-xhigh",
   right: "trusted-gpt-5.5-xhigh",
@@ -23,6 +29,7 @@ const DEFAULTS = {
   format: "markdown",
 };
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
+const SESSION_FALLBACK_CACHE_VERSION = 2;
 
 function usage() {
   return `Usage: node scripts/compare-pa-costs.js [options] [runSpec ...]
@@ -109,7 +116,9 @@ function inferModelFromSpec(spec) {
   return (
     Object.keys(DEFAULT_RATES)
       .sort((a, b) => b.length - a.length)
-      .find((model) => text.includes(model)) ?? null
+      .find((model) => text.includes(model)) ??
+    MODEL_ALIASES.find(([pattern]) => pattern.test(text))?.[1] ??
+    null
   );
 }
 
@@ -123,18 +132,24 @@ function stageNumber(stage) {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-function readJsonl(filePath) {
-  return fs
-    .readFileSync(filePath, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch (error) {
-        throw new Error(`${filePath}:${index + 1}: ${error.message}`);
-      }
-    });
+async function readJsonl(filePath) {
+  const records = [];
+  let index = 0;
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const rawLine of lines) {
+    index += 1;
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(line));
+    } catch (error) {
+      throw new Error(`${filePath}:${index}: ${error.message}`);
+    }
+  }
+  return records;
 }
 
 function resolveRunFile(spec, ralphDir) {
@@ -293,13 +308,7 @@ function usageCounterReset(current, previous) {
   if (!a || !b) {
     return false;
   }
-  return (
-    a.total_tokens < b.total_tokens ||
-    a.input_tokens < b.input_tokens ||
-    a.cached_input_tokens < b.cached_input_tokens ||
-    a.output_tokens < b.output_tokens ||
-    a.reasoning_output_tokens < b.reasoning_output_tokens
-  );
+  return a.total_tokens * 2 < b.total_tokens;
 }
 
 function usageDelta(current, previous) {
@@ -324,9 +333,10 @@ function estimateCost(usage, model) {
       cached * rates.cachedInput +
       normalized.output_tokens * rates.output) /
     1_000_000;
-  // Prefer provider-reported cost when present (covers thinking tokens and
-  // cache-write premiums the rate estimate can't see).
-  return normalized.cost_usd > estimate ? normalized.cost_usd : estimate;
+  // Prefer provider-reported cost when present. Claude turn results can report
+  // substantially lower actual cost than a rough rate-card estimate from the
+  // live token counters.
+  return normalized.cost_usd > 0 ? normalized.cost_usd : estimate;
 }
 
 function eventThreadId(record) {
@@ -511,6 +521,69 @@ function buildTurnResolver(events) {
   };
 }
 
+function buildSessionTurnResolver(events) {
+  const globalResolver = buildTurnResolver(events);
+  const attempts = buildRawTurnAttemptWindows(events);
+  const byThread = new Map();
+
+  for (const record of events) {
+    if (!eventTypeCarriesActiveThread(record.eventType)) {
+      continue;
+    }
+    const threadId = eventThreadId(record);
+    if (!threadId) {
+      continue;
+    }
+    const turn = record.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) {
+      continue;
+    }
+    const time = Date.parse(record.recordedAt ?? "");
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const attempt = rawTurnAttemptForTime(attempts, turn, time);
+    if (!attempt) {
+      continue;
+    }
+    const entries = byThread.get(threadId) ?? [];
+    let entry = entries.find((candidate) => candidate.key === attempt.key);
+    if (!entry) {
+      entry = {
+        turn: attempt.turnNumber,
+        key: attempt.key,
+        startTime: attempt.startTime,
+        firstSeenMs: time,
+        lastSeenMs: time,
+      };
+      entries.push(entry);
+      entries.sort((a, b) => a.startTime - b.startTime);
+      byThread.set(threadId, entries);
+    }
+    entry.firstSeenMs = Math.min(entry.firstSeenMs, time);
+    entry.lastSeenMs = Math.max(entry.lastSeenMs, time);
+  }
+
+  return (timestamp, threadId = null) => {
+    const time = typeof timestamp === "number" ? timestamp : Date.parse(timestamp ?? "");
+    if (!Number.isFinite(time)) {
+      return null;
+    }
+    const entries = threadId ? byThread.get(threadId) : null;
+    if (entries?.length) {
+      let selected = null;
+      for (const entry of entries) {
+        if (entry.startTime > time) {
+          break;
+        }
+        selected = entry;
+      }
+      return selected ?? entries[0];
+    }
+    return globalResolver(timestamp);
+  };
+}
+
 function buildRawTurnAttemptWindows(events) {
   const starts = events
     .filter((event) => event.eventType === "ralph.phase-status" &&
@@ -610,7 +683,7 @@ async function readSessionUsageIntoTurns(filePath, byTurn, resolveTurn, options 
     }
 
     const time = Date.parse(record.timestamp ?? "");
-    const resolvedTurn = resolveTurn(record.timestamp);
+    const resolvedTurn = resolveTurn(record.timestamp, options.threadId);
     const turn = typeof resolvedTurn === "object" ? resolvedTurn?.turn : resolvedTurn;
     const key = typeof resolvedTurn === "object"
       ? resolvedTurn?.key
@@ -684,20 +757,24 @@ function fillDurationFallbacks(events, byTurn) {
     let bestDurationMs = Number.isFinite(slot.durationMs) && slot.durationMs > 0
       ? slot.durationMs
       : 0;
+    let subtractWait = false;
     if (bestDurationMs <= 0 && slot.sessionActiveMs > 0) {
       bestDurationMs = slot.sessionActiveMs;
     }
     if (bestDurationMs <= 0 && slot.sessionFirstMs != null && slot.sessionLastMs != null) {
       bestDurationMs = Math.max(0, slot.sessionLastMs - slot.sessionFirstMs);
+      subtractWait = true;
     }
     if (bestDurationMs <= 0 && slot.eventFirstMs != null && slot.eventLastMs != null) {
       bestDurationMs = Math.max(0, slot.eventLastMs - slot.eventFirstMs);
+      subtractWait = true;
     }
     if (bestDurationMs <= 0 && slot.goalTimeUsedMs > 0) {
       bestDurationMs = slot.goalTimeUsedMs;
+      subtractWait = true;
     }
     if (bestDurationMs > 0) {
-      slot.durationMs = Math.max(0, bestDurationMs - limitWaitOverlapMs(slot));
+      slot.durationMs = Math.max(0, bestDurationMs - (subtractWait ? limitWaitOverlapMs(slot) : 0));
       continue;
     }
     const nextTime = starts[index + 1]?.startTime;
@@ -790,12 +867,39 @@ function readRunEventUsageIntoTurns(events, byTurn) {
       continue;
     }
     const usage = normalizeUsage(record.event.usage);
-    if (!tokenTouched.has(slot.key) && !hasUsage(slot.usage)) {
+    if (tokenTouched.has(slot.key) || hasUsage(slot.usage)) {
+      slot.usage = usageWithCompletedCost(slot.usage, usage);
+      tokenTouched.add(slot.key);
+    } else if (!tokenTouched.has(slot.key) && !hasUsage(slot.usage)) {
       slot.usage = addUsage(slot.usage, usage);
-    } else if (usage.cost_usd > 0 && !(slot.usage.cost_usd > 0)) {
-      slot.usage = { ...slot.usage, cost_usd: usage.cost_usd };
     }
   }
+}
+
+function usageWithCompletedCost(liveUsage, completedUsage) {
+  const live = normalizeUsage(liveUsage);
+  const completed = normalizeUsage(completedUsage);
+  if (!hasUsage(live)) {
+    return completed;
+  }
+  if (completed?.cost_usd > 0 && sameTokenUsage(live, completed)) {
+    return { ...live, cost_usd: completed.cost_usd };
+  }
+  return live;
+}
+
+function sameTokenUsage(left, right) {
+  const a = normalizeUsage(left);
+  const b = normalizeUsage(right);
+  return Boolean(
+    a &&
+      b &&
+      a.input_tokens === b.input_tokens &&
+      a.cached_input_tokens === b.cached_input_tokens &&
+      a.output_tokens === b.output_tokens &&
+      a.reasoning_output_tokens === b.reasoning_output_tokens &&
+      a.total_tokens === b.total_tokens,
+  );
 }
 
 function includedMissingUsageKeys(byTurn, throughNumber) {
@@ -914,7 +1018,7 @@ function cachedSlotMatches(slot, cached) {
 function applySessionFallbackCache(cache, byTurn, missingUsageKeys, sessionStats, throughNumber) {
   if (
     !cache ||
-    cache.version !== 1 ||
+    cache.version !== SESSION_FALLBACK_CACHE_VERSION ||
     !Number.isInteger(cache.throughNumber) ||
     cache.throughNumber < throughNumber ||
     !sessionStatsCover(cache.sessionFiles, sessionStats) ||
@@ -991,7 +1095,7 @@ function writeSessionFallbackCache(cachePath, runFilePath, byTurn, usageKeys, se
     fs.writeFileSync(
       cachePath,
       `${JSON.stringify({
-        version: 1,
+        version: SESSION_FALLBACK_CACHE_VERSION,
         generatedAt: new Date().toISOString(),
         throughNumber,
         runFile: {
@@ -1066,9 +1170,9 @@ async function summarizeRun(run, options) {
   const spec = run.spec;
   const filePath = resolveRunFile(spec, options.ralphDir);
   const state = readRunState(filePath);
-  const events = readJsonl(filePath);
+  const events = await readJsonl(filePath);
   const byTurn = buildTurnMeta(events);
-  const resolveTurn = buildTurnResolver(events);
+  const resolveTurn = buildSessionTurnResolver(events);
   const threadIds = [...new Set(events.map(eventThreadId).filter(Boolean))];
 
   readRunEventUsageIntoTurns(events, byTurn);
@@ -1083,7 +1187,10 @@ async function summarizeRun(run, options) {
     if (!usedCache) {
       for (const threadId of fallbackThreadIds) {
         for (const sessionFile of (sessionFiles.get(threadId) ?? []).sort()) {
-          await readSessionUsageIntoTurns(sessionFile, byTurn, resolveTurn, { usageKeys: missingUsageKeys });
+          await readSessionUsageIntoTurns(sessionFile, byTurn, resolveTurn, {
+            usageKeys: missingUsageKeys,
+            threadId,
+          });
         }
       }
       writeSessionFallbackCache(cachePath, filePath, byTurn, missingUsageKeys, stats, options.throughNumber);

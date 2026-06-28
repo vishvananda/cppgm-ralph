@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -19,6 +19,8 @@ const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
 const CODEX_GOAL_CONTINUATION_GRACE_MS = 60_000;
 const CODEX_SESSION_WATCH_TAIL_BYTES = 4 * 1024 * 1024;
+const STAGE_COUNT_HINTS_TAIL_BYTES = 64 * 1024 * 1024;
+const EVENT_LOG_TURN_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_RESUME_STDOUT_SILENCE_MS = 5000;
 const CODEX_RESUME_SESSION_FALLBACK_POLL_MS = 1000;
 const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
@@ -235,6 +237,13 @@ async function main() {
       log("--continue: no previous thread id found; starting fresh");
     }
   }
+  const reuseLastChecksRequested =
+    process.argv.includes("--reuse-last-checks") ||
+    process.argv.includes("--skip-checks") ||
+    parseBoolean(process.env.RALPH_REUSE_LAST_CHECKS, false);
+  if (process.argv.includes("--skip-checks") && !process.argv.includes("--reuse-last-checks")) {
+    log("--skip-checks: using --reuse-last-checks behavior");
+  }
   let activeThreadId = configuredThreadId ?? continueThreadId ?? state.threadId ?? null;
   let backend = null;
   let thread = null;
@@ -247,6 +256,7 @@ async function main() {
     ? state.turnsCompleted ?? 0
     : await reconcileTurnsCompletedWithEventLog(state);
   let phaseCheckReuse = null;
+  let reuseLastChecksForNextTurn = reuseLastChecksRequested;
   let pendingRecoveryNote = null;
   let consecutiveOomRecoveries = 0;
   turnLoop:
@@ -256,9 +266,22 @@ async function main() {
       return;
     }
     const phase = resolveActivePhase(state);
-    const phaseStatus = await runPhaseChecks(state, phase, phaseCheckReuse);
+    const phaseStatus = reuseLastChecksForNextTurn
+      ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId })
+      : await runPhaseChecks(state, phase, phaseCheckReuse);
+    reuseLastChecksForNextTurn = false;
     phaseCheckReuse = null;
     const testStatus = phaseStatus.testStatus;
+    if (phaseStatus.checksReusedFrom) {
+      await appendRalphEventRecord(
+        buildRalphPhaseStatusEventRecord({
+          phaseStatus,
+          threadId: activeThreadId ?? state.threadId ?? null,
+          turnNumber: turnNumber + 1,
+          action: "checks-reused",
+        }),
+      );
+    }
     let gitStatus = await getGitStatus(CONFIG.workdir);
     if (phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
       gitStatus = await autoCommitPassingChanges({ phase, phaseStatus, gitStatus });
@@ -422,21 +445,22 @@ async function main() {
         threadId: activeThreadId,
         turnNumber: turnNumber + 1,
       });
-      if (preparedGoal.startedThread) {
-        await saveState({
-          threadId: activeThreadId,
-          eventLogPath: buildEventLogPath(activeThreadId),
-          turnsCompleted: turnNumber,
-          lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
-          lastTestStatus: testStatus,
-          activeStage: getStateActiveStageAfterTest(testStatus),
-          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
-          activePhase: phase.name,
-          phaseAttempted: state.phaseAttempted === true,
-          updatedAt: new Date().toISOString(),
-        });
-      }
     }
+
+    const preTurnState = {
+      threadId: activeThreadId,
+      eventLogPath: buildEventLogPath(activeThreadId),
+      turnsCompleted: turnNumber,
+      lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
+      lastTestStatus: testStatus,
+      activeStage: getStateActiveStageAfterTest(testStatus),
+      activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+      activePhase: phase.name,
+      phaseAttempted: state.phaseAttempted === true,
+      updatedAt: new Date().toISOString(),
+    };
+    await saveState(preTurnState);
+    Object.assign(state, preTurnState);
 
     if (!thread) {
       backend = createAgentBackend();
@@ -2357,6 +2381,238 @@ async function runPhaseChecks(state, phase, reuse = null) {
     allRequiredPassed: failedRequired.length === 0,
     failedRequiredChecks: failedRequired,
   };
+}
+
+async function reuseLatestPhaseChecksFromEventLog({ state, phase, threadId }) {
+  const expectation = buildPhaseCheckExpectation(state, phase);
+  const eventLogPaths = await getEventLogPathsForCheckReuse(state, threadId);
+  if (eventLogPaths.length === 0) {
+    throw new Error("--reuse-last-checks requested, but no event log files were found");
+  }
+
+  for (const eventLogPath of eventLogPaths) {
+    const record = await findLatestMatchingJsonlRecord(eventLogPath, (candidate) =>
+      isCompatiblePhaseStatusRecord(candidate, expectation));
+    if (!record) {
+      continue;
+    }
+
+    const phaseStatus = buildReusedPhaseStatusFromRecord(record, expectation);
+    const source = [
+      record.recordedAt ?? "unknown time",
+      Number.isInteger(record.turnNumber) ? `turn ${record.turnNumber}` : null,
+      record.event?.action ? `action ${record.event.action}` : null,
+    ].filter(Boolean).join(", ");
+    log(
+      `Reusing phase checks for ${phase.name} ${formatTargetLabel(expectation.stage, expectation.subset)} ` +
+        `from ${path.basename(eventLogPath)} (${source}).`,
+    );
+    return phaseStatus;
+  }
+
+  const expectedChecks = expectation.entries.map((entry) => entry.context.command).join("; ");
+  throw new Error(
+    "--reuse-last-checks requested, but no compatible phase-status event was found for " +
+      `${phase.name} ${formatTargetLabel(expectation.stage, expectation.subset)}. ` +
+      `Expected checks: ${expectedChecks}`,
+  );
+}
+
+function buildPhaseCheckExpectation(state, phase) {
+  const stage = resolveActiveTestStage(state);
+  const subset = resolveActiveTestSubset(state, stage);
+  const checks = getActivePhaseChecks(phase, stage);
+  if (checks.length === 0) {
+    throw new Error(`No checks apply to phase ${phase.name} for ${stage ?? "unknown stage"}`);
+  }
+  return {
+    phaseName: phase.name,
+    stage,
+    subset,
+    sliceInfo: buildSliceInfo(stage, subset),
+    entries: checks.map((check) => {
+      const context = buildCheckCommandContext(check, stage, subset);
+      return {
+        check,
+        context,
+        key: phaseCheckReuseKeyFromContext(check, context),
+      };
+    }),
+  };
+}
+
+async function getEventLogPathsForCheckReuse(state, threadId) {
+  const paths = [];
+  const seen = new Set();
+  const addPath = (filePath) => {
+    if (!filePath || seen.has(filePath)) {
+      return;
+    }
+    seen.add(filePath);
+    paths.push(filePath);
+  };
+
+  addPath(buildEventLogPath(threadId));
+  addPath(state?.eventLogPath);
+
+  let entries = [];
+  try {
+    const names = (await fs.readdir(EVENTS_DIR_PATH)).filter((name) => name.endsWith(".jsonl"));
+    entries = await Promise.all(
+      names.map(async (name) => {
+        const filePath = path.join(EVENTS_DIR_PATH, name);
+        return { filePath, mtimeMs: (await fs.stat(filePath)).mtimeMs };
+      }),
+    );
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const entry of entries) {
+    addPath(entry.filePath);
+  }
+  return paths;
+}
+
+function isCompatiblePhaseStatusRecord(record, expectation) {
+  const event = record?.event;
+  if (record?.eventType !== "ralph.phase-status" && event?.type !== "ralph.phase-status") {
+    return false;
+  }
+  const phaseStatus = event?.phaseStatus;
+  if (!phaseStatusMatchesExpectation(phaseStatus, expectation)) {
+    return false;
+  }
+  return true;
+}
+
+function phaseStatusMatchesExpectation(phaseStatus, expectation) {
+  if (!phaseStatus || typeof phaseStatus !== "object") {
+    return false;
+  }
+  if (phaseStatus.phase !== expectation.phaseName) {
+    return false;
+  }
+  if ((normalizeStageName(phaseStatus.stage) ?? null) !== (expectation.stage ?? null)) {
+    return false;
+  }
+  if ((normalizeTestSubset(phaseStatus.subset) ?? null) !== (expectation.subset ?? null)) {
+    return false;
+  }
+
+  const resultsByKey = buildPhaseCheckResultMap(phaseStatus);
+  return expectation.entries.every((entry) => resultsByKey.has(entry.key));
+}
+
+function buildPhaseCheckResultMap(phaseStatus) {
+  const resultsByKey = new Map();
+  for (const result of phaseStatus?.checks ?? []) {
+    resultsByKey.set(phaseCheckReuseKeyFromResult(result), result);
+  }
+  return resultsByKey;
+}
+
+function buildReusedPhaseStatusFromRecord(record, expectation) {
+  const sourcePhaseStatus = record.event.phaseStatus;
+  const sourceResultsByKey = buildPhaseCheckResultMap(sourcePhaseStatus);
+  const results = [];
+  let primaryTestStatus = null;
+
+  for (const entry of expectation.entries) {
+    const sourceResult = sourceResultsByKey.get(entry.key);
+    const result = clonePhaseCheckResultForReuse(
+      { fromPhase: sourcePhaseStatus.phase, result: sourceResult },
+      entry.check,
+      entry.context,
+    );
+    result.reusedFromTurnNumber = Number.isInteger(record.turnNumber) ? record.turnNumber : null;
+    result.reusedFromAction = record.event?.action ?? null;
+    result.reusedFromRecordedAt = record.recordedAt ?? null;
+    result.reuseReason = "--reuse-last-checks";
+    if (result.testStatus && (entry.check.primary || !primaryTestStatus)) {
+      primaryTestStatus = result.testStatus;
+    }
+    results.push(result);
+  }
+
+  const required = results.filter((result) => result.required);
+  const failedRequired = required.filter((result) => !result.passed);
+  const primaryCheck = results.find((result) => result.primary) ?? results[0] ?? null;
+  return {
+    phase: expectation.phaseName,
+    stage: expectation.stage,
+    subset: expectation.subset,
+    ...expectation.sliceInfo,
+    checks: results,
+    primaryCheck,
+    testStatus:
+      primaryTestStatus ??
+      sourcePhaseStatus.testStatus ??
+      buildGenericTestStatus(primaryCheck, expectation.stage, expectation.subset),
+    allRequiredPassed: failedRequired.length === 0,
+    failedRequiredChecks: failedRequired,
+    checksReusedFrom: {
+      eventLogAction: record.event?.action ?? null,
+      recordedAt: record.recordedAt ?? null,
+      turnNumber: Number.isInteger(record.turnNumber) ? record.turnNumber : null,
+    },
+  };
+}
+
+async function findLatestMatchingJsonlRecord(filePath, predicate) {
+  let handle;
+  try {
+    handle = await fs.open(filePath, "r");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+
+  try {
+    const stat = await handle.stat();
+    let position = stat.size;
+    let partialLine = "";
+    const chunkSize = 1024 * 1024;
+
+    while (position > 0) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, position);
+      const text = buffer.toString("utf8") + partialLine;
+      const lines = text.split(/\r?\n/);
+      partialLine = lines.shift() ?? "";
+
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const record = parseJsonlRecord(lines[index]);
+        if (record && predicate(record)) {
+          return record;
+        }
+      }
+    }
+
+    const record = parseJsonlRecord(partialLine);
+    return record && predicate(record) ? record : null;
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseJsonlRecord(line) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch (_) {
+    return null;
+  }
 }
 
 function buildPhaseCheckReuse(phaseStatus, nextPhase) {
@@ -5983,7 +6239,7 @@ async function loadStageCountHints(state) {
       continue;
     }
     const filePath = path.join(EVENTS_DIR_PATH, file.name);
-    const raw = await fs.readFile(filePath, "utf8");
+    const raw = await readRecentText(filePath, STAGE_COUNT_HINTS_TAIL_BYTES);
     for (const line of raw.split(/\r?\n/)) {
       if (!line.trim()) {
         continue;
@@ -6195,9 +6451,12 @@ async function latestEventLogTurnNumber(state) {
   if (!eventLogPath) {
     return 0;
   }
-  let raw;
   try {
-    raw = await fs.readFile(eventLogPath, "utf8");
+    const tail = await readRecentText(eventLogPath, EVENT_LOG_TURN_TAIL_BYTES);
+    const latestFromTail = latestTurnNumberFromJsonlText(tail);
+    if (latestFromTail > 0) {
+      return latestFromTail;
+    }
   } catch (error) {
     if (error?.code === "ENOENT") {
       return 0;
@@ -6206,7 +6465,38 @@ async function latestEventLogTurnNumber(state) {
   }
 
   let latest = 0;
-  for (const line of raw.split(/\r?\n/)) {
+  try {
+    for await (const record of readJsonlRecords(eventLogPath)) {
+      if (Number.isInteger(record?.turnNumber) && record.turnNumber > latest) {
+        latest = record.turnNumber;
+      }
+    }
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+  return latest;
+}
+
+function latestTurnNumberFromJsonlText(text) {
+  const lines = text.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const record = parseJsonlRecord(lines[index]);
+    if (Number.isInteger(record?.turnNumber) && record.turnNumber > 0) {
+      return record.turnNumber;
+    }
+  }
+  return 0;
+}
+
+async function* readJsonlRecords(filePath) {
+  const lines = readline.createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
     if (!line.trim()) {
       continue;
     }
@@ -6216,11 +6506,8 @@ async function latestEventLogTurnNumber(state) {
     } catch (_) {
       continue;
     }
-    if (Number.isInteger(record?.turnNumber) && record.turnNumber > latest) {
-      latest = record.turnNumber;
-    }
+    yield record;
   }
-  return latest;
 }
 
 async function saveState(state) {
