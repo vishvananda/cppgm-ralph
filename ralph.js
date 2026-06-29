@@ -2946,14 +2946,20 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
     return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
   }
 
-  if (!threadId) {
-    log("Using portable loop goal for new Codex exec thread; no local rollout exists yet.");
-    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
-  }
-
   try {
     return await withCodexAppServer(async (client) => {
-      const activeThreadId = threadId;
+      let activeThreadId = threadId;
+      let startedThread = false;
+      if (!activeThreadId) {
+        const startResponse = await client.request("thread/start", buildAppServerThreadStartParams());
+        activeThreadId = startResponse?.thread?.id ?? null;
+        if (!activeThreadId) {
+          throw new Error(`thread/start did not return a thread id: ${JSON.stringify(startResponse)}`);
+        }
+        startedThread = true;
+        log(`Pre-created Codex thread ${activeThreadId} for loop goal`);
+      }
+
       await client.request("thread/goal/clear", { threadId: activeThreadId });
 
       const params = {
@@ -2970,7 +2976,7 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
         throw new Error(`thread/goal/set did not return a goal: ${JSON.stringify(response)}`);
       }
       log(`Set Codex loop goal: ${previewText(response.goal.objective)}`);
-      return { threadId: activeThreadId, goal: response.goal, startedThread: false };
+      return { threadId: activeThreadId, goal: response.goal, startedThread };
     });
   } catch (error) {
     log(`Failed to set Codex loop goal; using portable prompt goal: ${formatErrorMessage(error)}`);
@@ -3855,8 +3861,6 @@ function buildAppServerThreadStartParams() {
     config,
     serviceName: "ralph",
     threadSource: "user",
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
   };
 }
 

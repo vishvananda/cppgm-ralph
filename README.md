@@ -20,11 +20,10 @@ Ralph now also enforces a clean repository handoff:
 - if the worktree is dirty, Ralph sends the agent back instead of accepting the handoff
 
 For Codex runs, Ralph can also turn each outer loop into a persisted Codex goal.
-When a real Codex thread id already exists, Ralph uses `codex app-server` to
-clear any previous loop goal and set a fresh active goal for the current
-blocker before resuming that thread. For a brand-new `codex exec` thread,
-Ralph carries the same goal in the prompt until the CLI creates the local
-rollout-backed thread id.
+Ralph uses `codex app-server` to create or resume the thread, clear any previous
+loop goal, and set a fresh active goal for the current blocker before running
+the turn through `codex exec resume`. If app-server goal setup fails before a
+thread exists, Ralph falls back to carrying the same goal in the prompt.
 
 For Antigravity runs, Ralph uses portable goals instead. It writes the same loop
 objective to `.ralph/<run-name>/current-goal.json`, appends it to the turn
