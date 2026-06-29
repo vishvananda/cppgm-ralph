@@ -251,8 +251,11 @@ function activeCurrentTurnDurationSpan(best, cached, live, options = {}) {
   if (!candidates.length) {
     return best;
   }
+  if (options.activeStartMs == null) {
+    return best;
+  }
   const activeStartMs = Number(options.activeStartMs);
-  if (!Number.isFinite(activeStartMs)) {
+  if (!Number.isFinite(activeStartMs) || activeStartMs <= 0) {
     return best;
   }
   const first = activeStartMs;
