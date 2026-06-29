@@ -930,7 +930,9 @@ button:hover { background: #252525; }
 .file-kind { color: var(--accent); margin-right: 0.3rem; font-size: 0.7rem; }
 .file-path { color: #ba8; }
 pre.file-diff,
-pre.file-diff[class*="language-"] {
+pre.file-diff[class*="language-"],
+pre.file-source,
+pre.file-source[class*="language-"] {
   margin: 0.1rem 0 0.35rem 1rem;
   padding: 0.4rem 0.5rem;
   border-left: 2px solid #3a3124;
@@ -943,8 +945,15 @@ pre.file-diff[class*="language-"] {
   box-shadow: none;
 }
 
+pre.file-source,
+pre.file-source[class*="language-"] {
+  border-left-color: #2d4b36;
+}
+
 pre.file-diff > code,
-pre.file-diff > code[class*="language-"] {
+pre.file-diff > code[class*="language-"],
+pre.file-source > code,
+pre.file-source > code[class*="language-"] {
   color: inherit;
   background: transparent;
   font-family: inherit;

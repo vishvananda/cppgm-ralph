@@ -1019,7 +1019,19 @@ function renderFileChangeCard(record) {
     const path = c.movePath ? `${c.path} -> ${c.movePath}` : c.path;
     row.innerHTML = `<span class="file-kind">${c.kind}</span> <span class="file-path">${path}</span>`;
     list.append(row);
-    if (c.diff) {
+    const addedText = addedFileTextFromDiff(c);
+    if (addedText != null) {
+      const lang = sourceLanguageForPath(c.path);
+      const pre = document.createElement("pre");
+      pre.className = `file-source language-${lang}`;
+      pre.dataset.contentScrollKey = `source:${fileChangeEntryKey(record)}:${fileChangePathText(c)}`;
+      const code = document.createElement("code");
+      code.className = `language-${lang}`;
+      code.textContent = addedText;
+      pre.append(code);
+      highlightCodeBlock(code);
+      list.append(pre);
+    } else if (c.diff) {
       const pre = document.createElement("pre");
       pre.className = "file-diff";
       pre.dataset.contentScrollKey = `diff:${fileChangeEntryKey(record)}:${fileChangePathText(c)}`;
@@ -1027,7 +1039,7 @@ function renderFileChangeCard(record) {
       code.className = "language-diff-cpp diff-highlight";
       code.textContent = c.diff;
       pre.append(code);
-      highlightDiffCodeBlock(code);
+      highlightCodeBlock(code);
       list.append(pre);
     }
   }
@@ -1036,14 +1048,59 @@ function renderFileChangeCard(record) {
   return card;
 }
 
-function highlightDiffCodeBlock(code) {
+function addedFileTextFromDiff(change) {
+  if (change?.kind !== "add" || typeof change?.diff !== "string" || !change.diff) {
+    return null;
+  }
+  const lines = change.diff.split(/\r?\n/);
+  const hasUnifiedHeaders = lines.some((line) => line.startsWith("@@") || line.startsWith("--- "));
+  const added = [];
+  let inHunk = !hasUnifiedHeaders;
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (hasUnifiedHeaders && (line.startsWith("--- ") || line.startsWith("+++ "))) {
+      continue;
+    }
+    if (line.startsWith("+") && inHunk) {
+      added.push(line.slice(1));
+    }
+  }
+  if (added.length === 0 && !change.diff.startsWith("+")) {
+    return null;
+  }
+  return added.join("\n");
+}
+
+function sourceLanguageForPath(filePath) {
+  const name = String(filePath ?? "").split("/").pop() ?? "";
+  const lower = name.toLowerCase();
+  if (name === "Makefile" || lower === "makefile" || lower.endsWith(".mk")) return "makefile";
+  if (lower.endsWith(".cpp") || lower.endsWith(".cc") || lower.endsWith(".cxx") || lower.endsWith(".hpp") || lower.endsWith(".hh") || lower.endsWith(".hxx") || lower.endsWith(".h")) return "cpp";
+  if (lower.endsWith(".c")) return "c";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
+  if (lower.endsWith(".ts")) return "typescript";
+  if (lower.endsWith(".json") || lower.endsWith(".jsonl")) return "json";
+  if (lower.endsWith(".py")) return "python";
+  if (lower.endsWith(".pl") || lower.endsWith(".pm")) return "perl";
+  if (lower.endsWith(".sh") || lower.endsWith(".bash")) return "bash";
+  if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
+  if (lower.endsWith(".html") || lower.endsWith(".xml")) return "markup";
+  if (lower.endsWith(".css")) return "css";
+  return "none";
+}
+
+function highlightCodeBlock(code) {
   if (!code || !window.Prism?.highlightElement) {
     return;
   }
   try {
     window.Prism.highlightElement(code);
   } catch (_) {
-    // Keep the raw diff visible if Prism fails to parse a large or unusual hunk.
+    // Keep the raw text visible if Prism fails to parse a large or unusual block.
   }
 }
 
