@@ -29,10 +29,26 @@ const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
-const CODEX_TRANSIENT_RETRY_MAX = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX ?? 20);
-const CODEX_TRANSIENT_RETRY_INITIAL_MS = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_INITIAL_MS ?? 60_000);
-const CODEX_TRANSIENT_RETRY_MAX_WAIT_MS = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX_WAIT_MS ?? 15 * 60 * 1000);
-const CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR = Number(process.env.RALPH_CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR ?? 2);
+const PROVIDER_TRANSIENT_RETRY_MAX = Number(
+  process.env.RALPH_PROVIDER_TRANSIENT_RETRY_MAX ??
+  process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX ??
+  20,
+);
+const PROVIDER_TRANSIENT_RETRY_INITIAL_MS = Number(
+  process.env.RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS ??
+  process.env.RALPH_CODEX_TRANSIENT_RETRY_INITIAL_MS ??
+  60_000,
+);
+const PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS = Number(
+  process.env.RALPH_PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS ??
+  process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX_WAIT_MS ??
+  15 * 60 * 1000,
+);
+const PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR = Number(
+  process.env.RALPH_PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR ??
+  process.env.RALPH_CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR ??
+  2,
+);
 // How many turns in a row may be lost to OOM kills before the loop gives up.
 const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
@@ -512,18 +528,18 @@ async function main() {
       } catch (error) {
         if (shouldRetryTransientProviderError(error) && !shutdownInProgress) {
           transientRetryAttempts += 1;
-          const retryMax = codexTransientRetryMax();
+          const retryMax = transientProviderRetryMax();
           if (transientRetryAttempts > retryMax) {
             throw new Error(
-              `Codex transient provider error persisted after ${retryMax} retry attempts: ` +
+              `${providerLabel} transient provider error persisted after ${retryMax} retry attempts: ` +
                 formatErrorMessage(error),
             );
           }
 
           const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
-          const waitMs = codexTransientRetryWaitMs(transientRetryAttempts);
+          const waitMs = transientProviderRetryWaitMs(transientRetryAttempts);
           log(
-            `Codex transient provider error during turn ${turnNumber + 1}: ` +
+            `${providerLabel} transient provider error during turn ${turnNumber + 1}: ` +
               `${formatErrorMessage(error)}; waiting ${formatDurationForLog(waitMs)} before retry ` +
               `${transientRetryAttempts}/${retryMax}.`,
           );
@@ -650,10 +666,14 @@ function buildOomRecoveryNote() {
 }
 
 function shouldRetryTransientProviderError(error) {
-  if (CONFIG.provider !== "codex") {
-    return false;
+  const message = formatErrorMessage(error);
+  if (CONFIG.provider === "codex") {
+    return isCodexTransientProviderMessage(message);
   }
-  return isCodexTransientProviderMessage(formatErrorMessage(error));
+  if (CONFIG.provider === "claude") {
+    return isClaudeTransientProviderMessage(message);
+  }
+  return false;
 }
 
 function isCodexTransientProviderMessage(message) {
@@ -668,26 +688,37 @@ function isCodexTransientProviderMessage(message) {
   );
 }
 
-function codexTransientRetryWaitMs(attempt) {
+function isClaudeTransientProviderMessage(message) {
+  if (typeof message !== "string" || !message.trim()) {
+    return false;
+  }
+  return (
+    /\bserver\b.*\btemporarily limiting requests\b/i.test(message) ||
+    /\btemporarily limiting requests\b/i.test(message) ||
+    (/\brate limited\b/i.test(message) && /\bnot your usage limit\b/i.test(message))
+  );
+}
+
+function transientProviderRetryWaitMs(attempt) {
   const safeAttempt = Math.max(1, Number.isFinite(attempt) ? attempt : 1);
-  const factor = Number.isFinite(CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR) &&
-    CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR > 1
-    ? CODEX_TRANSIENT_RETRY_BACKOFF_FACTOR
+  const factor = Number.isFinite(PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR) &&
+    PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR > 1
+    ? PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR
     : 2;
-  const base = Number.isFinite(CODEX_TRANSIENT_RETRY_INITIAL_MS) &&
-    CODEX_TRANSIENT_RETRY_INITIAL_MS > 0
-    ? CODEX_TRANSIENT_RETRY_INITIAL_MS
+  const base = Number.isFinite(PROVIDER_TRANSIENT_RETRY_INITIAL_MS) &&
+    PROVIDER_TRANSIENT_RETRY_INITIAL_MS > 0
+    ? PROVIDER_TRANSIENT_RETRY_INITIAL_MS
     : 60_000;
-  const max = Number.isFinite(CODEX_TRANSIENT_RETRY_MAX_WAIT_MS) &&
-    CODEX_TRANSIENT_RETRY_MAX_WAIT_MS > 0
-    ? CODEX_TRANSIENT_RETRY_MAX_WAIT_MS
+  const max = Number.isFinite(PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS) &&
+    PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS > 0
+    ? PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS
     : 15 * 60 * 1000;
   return Math.min(max, Math.round(base * (factor ** (safeAttempt - 1))));
 }
 
-function codexTransientRetryMax() {
-  return Number.isInteger(CODEX_TRANSIENT_RETRY_MAX) && CODEX_TRANSIENT_RETRY_MAX > 0
-    ? CODEX_TRANSIENT_RETRY_MAX
+function transientProviderRetryMax() {
+  return Number.isInteger(PROVIDER_TRANSIENT_RETRY_MAX) && PROVIDER_TRANSIENT_RETRY_MAX > 0
+    ? PROVIDER_TRANSIENT_RETRY_MAX
     : 20;
 }
 
