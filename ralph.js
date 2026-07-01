@@ -335,6 +335,32 @@ async function main() {
         }),
       );
       await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
+      if (phase.checkpointOnRequiredChecks && !phasePrimaryCheckPassed(phaseStatus)) {
+        await saveState({
+          threadId,
+          eventLogPath: buildEventLogPath(threadId),
+          turnsCompleted: turnNumber,
+          lastExitCode: 0,
+          lastTestStatus: testStatus,
+          activeStage: normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
+          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+          activePhase: phase.name,
+          phaseAttempted: false,
+          updatedAt: new Date().toISOString(),
+        });
+        state.threadId = threadId;
+        state.lastExitCode = 0;
+        state.lastTestStatus = testStatus;
+        state.activeStage = normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus);
+        state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
+        state.activePhase = phase.name;
+        state.phaseAttempted = false;
+        log(
+          `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
+            "full primary check is still incomplete, so the next turn will continue the same target.",
+        );
+        continue;
+      }
       const nextPhase = getNextPhase(phase, state);
       if (nextPhase) {
         phaseCheckReuse = buildPhaseCheckReuse(phaseStatus, nextPhase);
@@ -1781,6 +1807,8 @@ function buildFailedRequiredCheckDetailsLines(phaseStatus) {
         lines.push("  Prior subset commands run by this gate:");
         lines.push(...commands.map((command) => `  - \`${command}\``));
       }
+    } else if (isCurrentStageProgressCheck(check)) {
+      lines.push("  This gate compares the current PA-local report against the turn-start baseline.");
     }
   }
   return lines;
@@ -1804,6 +1832,17 @@ function buildCheckValidationLines(check, phaseStatus) {
     }
     return lines;
   }
+  if (isCurrentStageProgressCheck(check)) {
+    const lines = [
+      `- ${check.name} [${status}]: current PA tests must either pass fully or increase above the turn-start baseline while earlier PAs pass.`,
+    ];
+    if (check.skipped) {
+      lines.push(`  Skipped because ${check.skipReason ?? "a dependency did not pass"}.`);
+    } else if (!check.passed && check.outputPath) {
+      lines.push(`  Failure log: \`${check.outputPath}\``);
+    }
+    return lines;
+  }
 
   const line = check.command
     ? `- ${check.name} [${status}]: \`${check.command}\``
@@ -1819,6 +1858,10 @@ function buildCheckValidationLines(check, phaseStatus) {
 function isPriorStageSubsetCheck(check) {
   return check?.name === "priorStageSubsetTests" ||
     parseInternalCheckCommand(check?.command ?? "") === "prior-stage-subsets";
+}
+
+function isCurrentStageProgressCheck(check) {
+  return parseInternalCheckCommand(check?.command ?? "") === "current-stage-progress";
 }
 
 function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
@@ -1858,6 +1901,9 @@ function formatPhaseChecksForTemplate(phase, stage, subset = null) {
       const internalCheck = parseInternalCheckCommand(command);
       if (internalCheck === "prior-stage-subsets") {
         return `- ${check.name}: Ralph internal prior same-stage subset gate (${required}${primary}${dependsOn}; not a shell command)`;
+      }
+      if (internalCheck === "current-stage-progress") {
+        return `- ${check.name}: Ralph internal current-stage progress gate (${required}${primary}${dependsOn}; not a shell command)`;
       }
       return `- ${check.name}: \`${command}\` (${required}${primary}${dependsOn})`;
     })
@@ -2299,7 +2345,8 @@ async function runPhaseChecks(state, phase, reuse = null) {
   }
   const results = [];
   let primaryTestStatus = null;
-  let previousTestStatus = state.lastTestStatus;
+  const baselineTestStatus = state.lastTestStatus;
+  let previousTestStatus = baselineTestStatus;
   const resultsByName = new Map();
 
   for (const check of checks) {
@@ -2360,6 +2407,8 @@ async function runPhaseChecks(state, phase, reuse = null) {
       check,
       context,
       previousTestStatus,
+      baselineTestStatus,
+      resultsByName,
     });
     const outputPath = await writeCheckLog(check.name, run.output);
     const result = {
@@ -2740,10 +2789,17 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-async function runCheckWithTimeoutRetries({ phase, check, context, previousTestStatus }) {
+async function runCheckWithTimeoutRetries({
+  phase,
+  check,
+  context,
+  previousTestStatus,
+  baselineTestStatus,
+  resultsByName,
+}) {
   let retryAttempts = 0;
   await removeDevBuildLockBeforeTestCheck(check);
-  let run = await runCheckCommand(context);
+  let run = await runCheckCommand(context, { baselineTestStatus, resultsByName });
   let testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
 
   while (shouldRetryTimeoutOnlyCheck({ check, run, testStatus, retryAttempts })) {
@@ -2753,7 +2809,7 @@ async function runCheckWithTimeoutRetries({ phase, check, context, previousTestS
         `(${retryAttempts}/${CONFIG.testTimeoutRetries}): ${formatTestStatusSummary(testStatus)}`,
     );
     await removeDevBuildLockBeforeTestCheck(check);
-    run = await runCheckCommand(context);
+    run = await runCheckCommand(context, { baselineTestStatus, resultsByName });
     testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
   }
 
@@ -2795,9 +2851,9 @@ async function removeDevBuildLockBeforeTestCheck(check) {
   }
 }
 
-async function runCheckCommand(context) {
+async function runCheckCommand(context, checkState = {}) {
   return context.internalCheck
-    ? runInternalCheck(context)
+    ? runInternalCheck(context, checkState)
     : runCommand(context.command, CONFIG.workdir, { limitResources: true });
 }
 
@@ -3411,14 +3467,122 @@ function parseInternalCheckCommand(command) {
   if (command.startsWith("ralph:prior-stage-subsets")) {
     return "prior-stage-subsets";
   }
+  if (command.startsWith("ralph:current-stage-progress")) {
+    return "current-stage-progress";
+  }
   return null;
 }
 
-async function runInternalCheck(context) {
+async function runInternalCheck(context, checkState = {}) {
   if (context.internalCheck === "prior-stage-subsets") {
     return runPriorStageSubsetsCheck(context);
   }
+  if (context.internalCheck === "current-stage-progress") {
+    return runCurrentStageProgressCheck(context, checkState);
+  }
   throw new Error(`Unknown internal check ${context.internalCheck}`);
+}
+
+async function runCurrentStageProgressCheck(context, checkState = {}) {
+  const stage = normalizeStageName(context.stage);
+  const sourceCheckName = parseCurrentStageProgressSourceCheckName(context.command);
+  const sourceResult = sourceCheckName
+    ? checkState.resultsByName?.get(sourceCheckName)
+    : findLatestTestResult(checkState.resultsByName);
+  const currentStatus = sourceResult?.testStatus;
+  const baselineStatus = checkState.baselineTestStatus;
+  const currentStage = findTestStatusStage(currentStatus, stage);
+  const baselineStage = findTestStatusStage(baselineStatus, stage);
+  const currentPassed = currentStagePassedCount(currentStage);
+  const baselinePassed = currentStagePassedCount(baselineStage);
+  const currentTotal = Number.isFinite(currentStage?.total) ? currentStage.total : null;
+  const earlierStagesPass = testStatusStagesBeforeTargetPass(currentStatus, stage);
+  const stageComplete = currentStage?.status === "pass" &&
+    currentTotal != null &&
+    currentPassed >= currentTotal;
+
+  const lines = [
+    `Ralph current-stage progress check for ${stage ?? "unknown stage"}.`,
+    `Source check: ${sourceCheckName ?? "latest test check"}.`,
+    `Baseline ${stage ?? "stage"}: ${formatCountPair(baselinePassed, Number.isFinite(baselineStage?.total) ? baselineStage.total : null)}.`,
+    `Current ${stage ?? "stage"}: ${formatCountPair(currentPassed, currentTotal)}.`,
+    `Earlier stages: ${earlierStagesPass ? "pass" : "fail or unknown"}.`,
+  ];
+
+  if (!stage) {
+    lines.push("FAIL: no active PA stage is available.");
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (!sourceResult?.testStatus) {
+    lines.push(`FAIL: source test check ${sourceCheckName ?? "(latest)"} did not produce a test status.`);
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (!currentStage) {
+    lines.push(`FAIL: source test status does not include ${stage}.`);
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (!earlierStagesPass) {
+    lines.push(`FAIL: a stage before ${stage} is not passing in the source test status.`);
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (stageComplete) {
+    lines.push(`PASS: ${stage} is complete.`);
+    lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
+    return { exitCode: 0, output: lines.join("\n") };
+  }
+  if (!baselineStage) {
+    lines.push(`FAIL: no turn-start baseline for ${stage}; make progress in a provider turn before accepting a checkpoint.`);
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (currentPassed > baselinePassed) {
+    lines.push(`PASS: ${stage} passing tests increased by ${currentPassed - baselinePassed}.`);
+    lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
+    return { exitCode: 0, output: lines.join("\n") };
+  }
+
+  lines.push(`FAIL: ${stage} passing tests did not increase above the turn-start baseline.`);
+  return { exitCode: 1, output: lines.join("\n") };
+}
+
+function parseCurrentStageProgressSourceCheckName(command) {
+  const parts = String(command ?? "").trim().split(/\s+/);
+  return parts.length > 1 ? sanitizeIdentifier(parts[1], "current-stage-progress source check") : null;
+}
+
+function findLatestTestResult(resultsByName) {
+  let latest = null;
+  for (const result of resultsByName?.values?.() ?? []) {
+    if (result?.testStatus) {
+      latest = result;
+    }
+  }
+  return latest;
+}
+
+function findTestStatusStage(testStatus, stageName) {
+  const stage = normalizeStageName(stageName);
+  if (!stage) {
+    return null;
+  }
+  return (testStatus?.stages ?? []).find((candidate) => candidate.name === stage) ?? null;
+}
+
+function currentStagePassedCount(stage) {
+  return Number.isFinite(stage?.passed) ? stage.passed : 0;
+}
+
+function testStatusStagesBeforeTargetPass(testStatus, stageName) {
+  const stage = normalizeStageName(stageName);
+  const stages = testStatus?.stages ?? [];
+  const index = stages.findIndex((candidate) => candidate.name === stage);
+  if (!stage || index < 0) {
+    return false;
+  }
+  return stages.slice(0, index).every((candidate) => candidate.status === "pass");
+}
+
+function formatCountPair(passed, total) {
+  return total == null ? `${passed}/?` : `${passed}/${total}`;
 }
 
 async function runPriorStageSubsetsCheck(context) {
@@ -3559,6 +3723,11 @@ function shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state }) {
     phaseStatus.allRequiredPassed &&
     gitStatus.clean &&
     state.phaseAttempted !== true;
+}
+
+function phasePrimaryCheckPassed(phaseStatus) {
+  const primary = phaseStatus?.primaryCheck;
+  return primary ? primary.passed === true : phaseStatus?.allRequiredPassed === true;
 }
 
 function getNextStageAfterPassingCommand(testStatus, gitStatus) {
@@ -7017,6 +7186,7 @@ function normalizePhaseDefinition(phase, checks) {
     runWhenChecksPass: parseBoolean(phase.runWhenChecksPass, false),
     runOnFirstSubsetOnly: parseBoolean(phase.runOnFirstSubsetOnly, false),
     runOnLastSubsetOnly: parseBoolean(phase.runOnLastSubsetOnly, false),
+    checkpointOnRequiredChecks: parseBoolean(phase.checkpointOnRequiredChecks, false),
   };
 }
 
