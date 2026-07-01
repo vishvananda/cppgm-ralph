@@ -1478,7 +1478,9 @@ function applyStageCountHintFloors(stages, options = {}) {
     }
     const passed = stage.status === "pass"
       ? hint.total
-      : Math.min(stage.passed ?? 0, hint.total);
+      : Number.isFinite(stage.failed)
+        ? Math.max(0, hint.total - stage.failed)
+        : Math.min(stage.passed ?? 0, hint.total);
     setStageStatus(stage, stage.status, passed, hint.total);
   }
 }
@@ -6264,6 +6266,7 @@ async function loadStageCountHints(state) {
     files = await fs.readdir(EVENTS_DIR_PATH, { withFileTypes: true });
   } catch (error) {
     if (error?.code === "ENOENT") {
+      await addStageCountHintsFromWorktree(hints);
       return hints;
     }
     throw error;
@@ -6291,6 +6294,7 @@ async function loadStageCountHints(state) {
     }
   }
 
+  await addStageCountHintsFromWorktree(hints);
   return hints;
 }
 
@@ -6374,6 +6378,51 @@ function addInferredStageCountHintFromStatus(hints, testStatus) {
       total,
     });
   }
+}
+
+async function addStageCountHintsFromWorktree(hints) {
+  if (!CONFIG?.workdir || !Array.isArray(TEST_STAGE_NAMES)) {
+    return;
+  }
+  for (const stage of TEST_STAGE_NAMES) {
+    const stageName = normalizeStageName(stage);
+    if (!stageName) {
+      continue;
+    }
+    const total = await countTestFiles(path.join(CONFIG.workdir, stageName, "tests"));
+    if (total <= 0) {
+      continue;
+    }
+    hints.set(stageName, {
+      name: stageName,
+      status: "pass",
+      passed: total,
+      total,
+    });
+  }
+}
+
+async function countTestFiles(rootDir) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(rootDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+
+  let total = 0;
+  for (const entry of entries) {
+    const entryPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      total += await countTestFiles(entryPath);
+    } else if (entry.isFile() && entry.name.endsWith(".t")) {
+      total += 1;
+    }
+  }
+  return total;
 }
 
 async function loadState() {
