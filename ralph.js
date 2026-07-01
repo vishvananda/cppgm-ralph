@@ -1264,6 +1264,9 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     (sum, stage) => sum + (stage.timeoutExpectations ?? 0),
     0,
   );
+  const reportSummaryHasCounts = reportSummary
+    ? Number.isFinite(reportSummary.passed) && Number.isFinite(reportSummary.total)
+    : false;
 
   return {
     recordedAt: new Date().toISOString(),
@@ -1290,6 +1293,8 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     firstFailureKind: classifyFailureLine(firstFailureLine),
     timeoutFailures,
     timeoutExpectationFailures,
+    hasReportSummary: Boolean(reportSummary),
+    reportSummaryHasCounts,
     regressions,
     stages,
   };
@@ -1304,6 +1309,7 @@ function parseReportSummary(output) {
       allPassed: true,
       passed: parseOptionalCount(allPassedMatch[1]),
       total: parseOptionalCount(allPassedMatch[2]),
+      hasCounts: allPassedMatch[1] != null && allPassedMatch[2] != null,
     };
   }
 
@@ -1313,6 +1319,7 @@ function parseReportSummary(output) {
       allPassed: false,
       passed: Number.parseInt(summaryMatch[1], 10),
       total: Number.parseInt(summaryMatch[2], 10),
+      hasCounts: true,
     };
   }
 
@@ -1454,6 +1461,9 @@ function applyInferredCurrentStageCountAnchor(stages, reportSummary, options = {
     stages.at(-1)?.name;
   const targetIndex = stages.findIndex((stage) => stage.name === targetStage);
   if (targetIndex < 0) {
+    return;
+  }
+  if (stages.slice(0, targetIndex).some((stage) => stage.status !== "pass")) {
     return;
   }
 
@@ -2289,7 +2299,7 @@ function terminateChildProcess(child, signal = "SIGTERM") {
 
 async function runCommand(command, cwd, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnTracked("bash", ["-lc", command], {
+    const child = spawnTracked("bash", ["-o", "pipefail", "-lc", command], {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -2411,6 +2421,9 @@ async function runPhaseChecks(state, phase, reuse = null) {
       resultsByName,
     });
     const outputPath = await writeCheckLog(check.name, run.output);
+    const resultPassed = check.kind === "test"
+      ? testCheckPassed({ check, context, run, testStatus })
+      : run.exitCode === 0;
     const result = {
       name: check.name,
       kind: check.kind,
@@ -2425,7 +2438,7 @@ async function runPhaseChecks(state, phase, reuse = null) {
       targetStage: context.stage,
       targetSubset: context.subset,
       exitCode: run.exitCode,
-      passed: run.exitCode === 0,
+      passed: resultPassed,
       outputPath,
       outputPreview: previewText(run.output),
     };
@@ -2855,6 +2868,36 @@ async function runCheckCommand(context, checkState = {}) {
   return context.internalCheck
     ? runInternalCheck(context, checkState)
     : runCommand(context.command, CONFIG.workdir, { limitResources: true });
+}
+
+function testCheckPassed({ run, testStatus }) {
+  if (run.exitCode !== 0) {
+    return false;
+  }
+  if (!testStatus) {
+    return false;
+  }
+  if (testStatus.allTestsPassed !== true) {
+    return false;
+  }
+  return hasTrustworthyTestCompletionEvidence(testStatus);
+}
+
+function hasTrustworthyTestCompletionEvidence(testStatus) {
+  if (testStatus.hasReportSummary && testStatus.reportSummaryHasCounts) {
+    return true;
+  }
+  if (testStatus.hasReportSummary && testStatus.testsTotal === 0 && testStatus.testsPassed === 0) {
+    return true;
+  }
+  const stages = Array.isArray(testStatus.stages) ? testStatus.stages : [];
+  return stages.length > 0 &&
+    stages.every((stage) =>
+      stage?.status === "pass" &&
+      hasStageCounts(stage) &&
+      stage.passed === stage.total &&
+      (stage.targets?.length ?? 0) > 0
+    );
 }
 
 function analyzeCheckTestStatus(check, context, run, previousTestStatus) {

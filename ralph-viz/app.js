@@ -28,7 +28,7 @@ const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
 const SCROLL_DEBUG_DEFAULT = false;
 const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
-const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v1";
+const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v2";
 const PROGRESS_BEST_CACHE_LIMIT = 600;
 const STATIC_DATA_ROOT = staticDataRootFromUrl();
 const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
@@ -3361,11 +3361,34 @@ function inferredStagePassedFromThroughStatus(testStatus, stage, tracker) {
     return null;
   }
   const number = stageNumber(stage);
+  if (!testStatusPriorStagesPass(testStatus, number)) {
+    return null;
+  }
   const priorTotal = number ? knownPriorStageTotal(tracker, number) : null;
   if (priorTotal == null || !Number.isFinite(testStatus?.testsPassed)) {
     return null;
   }
   return Math.max(0, testStatus.testsPassed - priorTotal);
+}
+
+function testStatusPriorStagesPass(testStatus, stageNumberValue) {
+  if (!Number.isInteger(stageNumberValue) || stageNumberValue <= 1) {
+    return true;
+  }
+  const stages = Array.isArray(testStatus?.stages) ? testStatus.stages : [];
+  if (stages.length === 0) {
+    return false;
+  }
+  for (const stage of stages) {
+    const number = stageNumber(stage?.name);
+    if (!Number.isInteger(number) || number >= stageNumberValue) {
+      continue;
+    }
+    if (stage.status !== "pass") {
+      return false;
+    }
+  }
+  return true;
 }
 
 function progressTargetKey(turn, stage) {
@@ -3411,6 +3434,9 @@ function hasTrustworthyStageTotals(testStatus) {
 
 function parseAgentTestCommand(command) {
   const text = unwrapCommand(command).replace(/\s+\(continued session \d+\)\s*$/, "");
+  if (hasProgressUnsafeShellOperator(text)) {
+    return null;
+  }
   let match = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
   if (match) {
     const number = Number.parseInt(match[1], 10);
@@ -3451,6 +3477,10 @@ function parseAgentTestCommand(command) {
     target: `test-pa${number}`,
     hasSubset: false,
   };
+}
+
+function hasProgressUnsafeShellOperator(text) {
+  return /[|<>]/.test(text);
 }
 
 function parseActiveTestReportStages(text) {
@@ -3522,6 +3552,9 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   if (!summary) {
     return null;
   }
+  if (!throughOutputPriorStagesPass(output, commandInfo.stageNumber)) {
+    return null;
+  }
   const priorTotal = knownPriorStageTotal(tracker, commandInfo.stageNumber);
   if (priorTotal == null) {
     return null;
@@ -3539,6 +3572,25 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
     passed,
     total,
     status: summary.allTestsPassed || (item.exit_code === 0 && passed === total) ? "pass" : "fail",
+  });
+}
+
+function throughOutputPriorStagesPass(output, targetStageNumber) {
+  if (!Number.isInteger(targetStageNumber) || targetStageNumber <= 1) {
+    return true;
+  }
+  const priorSections = parseStageSections(output)
+    .filter((section) => {
+      const number = stageNumber(section.name);
+      return Number.isInteger(number) && number < targetStageNumber;
+    });
+  if (priorSections.length < targetStageNumber - 1) {
+    return false;
+  }
+  const progressByStage = parseStageProgressFromAgentOutput(output, null);
+  return priorSections.every((section) => {
+    const progress = progressByStage.get(section.name);
+    return progress?.status === "pass" && countStageFailureLines(section.body) === 0;
   });
 }
 

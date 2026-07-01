@@ -32,7 +32,7 @@ const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 1;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 2;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -470,22 +470,7 @@ function progressEventsFromRunEvents(events) {
     if (!output) {
       continue;
     }
-    const summary = parseSessionTestSummary(output);
-    if (!summary) {
-      continue;
-    }
-    const stage = inferSingleSessionProgressStage(output);
-    if (!stage) {
-      continue;
-    }
-    const observation = normalizeProgressObservation({
-      recordedAt: record.recordedAt,
-      stage,
-      passed: summary.testsPassed,
-      total: summary.testsTotal,
-      status: summary.allTestsPassed ? "pass" : "fail",
-      hasSubset: false,
-    });
+    const observation = progressObservationFromSessionOutput(output, record.recordedAt);
     if (!observation) {
       continue;
     }
@@ -4085,6 +4070,10 @@ function progressObservationFromCodexOutputRecord(record) {
     return null;
   }
   const output = String(record.payload.output ?? "");
+  return progressObservationFromSessionOutput(output, record.timestamp);
+}
+
+function progressObservationFromSessionOutput(output, recordedAt) {
   const summary = parseSessionTestSummary(output);
   if (!summary) {
     return null;
@@ -4093,14 +4082,68 @@ function progressObservationFromCodexOutputRecord(record) {
   if (!stage) {
     return null;
   }
+  const progress = parseSingleStageProgressFromSessionOutput(output, stage);
+  if (!progress || progress.total <= 0) {
+    return null;
+  }
   return normalizeProgressObservation({
-    recordedAt: record.timestamp,
+    recordedAt,
     stage,
-    passed: summary.testsPassed,
-    total: summary.testsTotal,
-    status: summary.allTestsPassed ? "pass" : "fail",
+    passed: progress.passed,
+    total: progress.total,
+    status: summary.allTestsPassed && progress.status === "pass" ? "pass" : progress.status,
     hasSubset: false,
   });
+}
+
+function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
+  const section = parseStageSections(String(output ?? "")).find((candidate) => candidate.name === expectedStage);
+  if (!section) {
+    return null;
+  }
+  const targets = new Map();
+  for (const line of section.body.split(/\r?\n/)) {
+    let match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
+    if (match) {
+      targets.set(match[1], {
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "pass",
+      });
+      continue;
+    }
+    match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/) ??
+      line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
+    if (match) {
+      targets.set(match[1], {
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+      });
+    }
+  }
+  const entries = [...targets.entries()];
+  const nonAggregateEntries = entries.filter(([target]) =>
+    !isStageAggregateProgressTarget(target, expectedStage));
+  const selectedTargets = (nonAggregateEntries.length ? nonAggregateEntries : entries)
+    .map(([, target]) => target);
+  if (selectedTargets.length === 0) {
+    return null;
+  }
+  const passed = selectedTargets.reduce((sum, target) => sum + target.passed, 0);
+  const total = selectedTargets.reduce((sum, target) => sum + target.total, 0);
+  const failed = selectedTargets.some((target) => target.status === "fail");
+  const allPassed = selectedTargets.every((target) => target.status === "pass");
+  return {
+    passed,
+    total,
+    status: failed ? "fail" : allPassed ? "pass" : "running",
+  };
+}
+
+function isStageAggregateProgressTarget(target, stage) {
+  const normalized = String(target ?? "").trim().replace(/\s+/g, " ");
+  return normalized === `${stage} tests` || normalized === `${stage}/tests`;
 }
 
 function parseSessionTestSummary(output) {
