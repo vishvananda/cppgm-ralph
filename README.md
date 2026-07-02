@@ -223,6 +223,12 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
   the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
   turn even when checks already pass, which is useful for audit/cleanup phases.
+  `checkpointOnRequiredChecks` can accept a partial checkpoint when required
+  checks pass but the primary check is still incomplete. Set `checkpointPhase`
+  to send that checkpoint through a named audit/review phase first. A
+  checkpoint phase can set `checkpointOnly: true` so normal phase advancement
+  skips it, and `returnPhaseOnIncompletePrimary` to return to implementation
+  after the checkpoint audit unless the primary check has become complete.
   In slice mode, `runOnLastSubsetOnly: true` skips a phase until the final
   subset for the active PA.
 - `driverMode`
@@ -424,6 +430,12 @@ route around. If an agent discovers a pre-existing audit violation or a blind
 spot such as hidden include fragments, macro-mediated includes, unchecked
 extensions, or weakened check commands, the current phase should require fixing
 that issue rather than deferring it because the visible checks pass.
+
+The internal `ralph:current-stage-progress` check accepts an optional source
+check name and `mode=improve` or `mode=preserve`. `improve` requires the current
+PA pass count to increase above the turn-start baseline unless the PA fully
+passes. `preserve` is useful for checkpoint audit phases and requires the pass
+count to stay at or above the baseline.
 
 Example two-phase setup:
 

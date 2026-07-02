@@ -281,6 +281,10 @@ async function main() {
       log("Found stop-after-turn file; exiting cleanly before the next turn.");
       return;
     }
+    if (isCompletedRunState(state)) {
+      log("Run state is already complete; exiting.");
+      return;
+    }
     const phase = resolveActivePhase(state);
     const phaseStatus = reuseLastChecksForNextTurn
       ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId })
@@ -336,6 +340,38 @@ async function main() {
       );
       await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
       if (phase.checkpointOnRequiredChecks && !phasePrimaryCheckPassed(phaseStatus)) {
+        const checkpointPhase = getPhaseByName(phase.checkpointPhase);
+        if (checkpointPhase && phaseAppliesToCurrentTarget(checkpointPhase, {
+          activeStage: normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
+          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+          lastTestStatus: testStatus,
+        })) {
+          phaseCheckReuse = buildPhaseCheckReuse(phaseStatus, checkpointPhase);
+          await saveState({
+            threadId,
+            eventLogPath: buildEventLogPath(threadId),
+            turnsCompleted: turnNumber,
+            lastExitCode: 0,
+            lastTestStatus: testStatus,
+            activeStage: normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
+            activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+            activePhase: checkpointPhase.name,
+            phaseAttempted: false,
+            updatedAt: new Date().toISOString(),
+          });
+          state.threadId = threadId;
+          state.lastExitCode = 0;
+          state.lastTestStatus = testStatus;
+          state.activeStage = normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus);
+          state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
+          state.activePhase = checkpointPhase.name;
+          state.phaseAttempted = false;
+          log(
+            `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
+              `advancing to checkpoint phase ${checkpointPhase.name}.`,
+          );
+          continue;
+        }
         await saveState({
           threadId,
           eventLogPath: buildEventLogPath(threadId),
@@ -358,6 +394,33 @@ async function main() {
         log(
           `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
             "full primary check is still incomplete, so the next turn will continue the same target.",
+        );
+        continue;
+      }
+      const returnPhase = getPhaseByName(phase.returnPhaseOnIncompletePrimary);
+      if (returnPhase && !phasePrimaryCheckPassed(phaseStatus)) {
+        await saveState({
+          threadId,
+          eventLogPath: buildEventLogPath(threadId),
+          turnsCompleted: turnNumber,
+          lastExitCode: 0,
+          lastTestStatus: testStatus,
+          activeStage: getStateActiveStageAfterTest(testStatus),
+          activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+          activePhase: returnPhase.name,
+          phaseAttempted: false,
+          updatedAt: new Date().toISOString(),
+        });
+        state.threadId = threadId;
+        state.lastExitCode = 0;
+        state.lastTestStatus = testStatus;
+        state.activeStage = getStateActiveStageAfterTest(testStatus);
+        state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
+        state.activePhase = returnPhase.name;
+        state.phaseAttempted = false;
+        log(
+          `Phase ${phase.name} completed for partial ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
+            `returning to phase ${returnPhase.name}.`,
         );
         continue;
       }
@@ -1818,7 +1881,7 @@ function buildFailedRequiredCheckDetailsLines(phaseStatus) {
         lines.push(...commands.map((command) => `  - \`${command}\``));
       }
     } else if (isCurrentStageProgressCheck(check)) {
-      lines.push("  This gate compares the current PA-local report against the turn-start baseline.");
+      lines.push(`  ${currentStageProgressValidationDescription(check)}.`);
     }
   }
   return lines;
@@ -1844,7 +1907,7 @@ function buildCheckValidationLines(check, phaseStatus) {
   }
   if (isCurrentStageProgressCheck(check)) {
     const lines = [
-      `- ${check.name} [${status}]: current PA tests must either pass fully or increase above the turn-start baseline while earlier PAs pass.`,
+      `- ${check.name} [${status}]: ${currentStageProgressValidationDescription(check)}.`,
     ];
     if (check.skipped) {
       lines.push(`  Skipped because ${check.skipReason ?? "a dependency did not pass"}.`);
@@ -1872,6 +1935,13 @@ function isPriorStageSubsetCheck(check) {
 
 function isCurrentStageProgressCheck(check) {
   return parseInternalCheckCommand(check?.command ?? "") === "current-stage-progress";
+}
+
+function currentStageProgressValidationDescription(check) {
+  const mode = parseCurrentStageProgressOptions(check?.command ?? "").mode;
+  return mode === "preserve"
+    ? "current PA tests must either pass fully or stay at or above the turn-start baseline while earlier PAs pass"
+    : "current PA tests must either pass fully or increase above the turn-start baseline while earlier PAs pass";
 }
 
 function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
@@ -1913,7 +1983,8 @@ function formatPhaseChecksForTemplate(phase, stage, subset = null) {
         return `- ${check.name}: Ralph internal prior same-stage subset gate (${required}${primary}${dependsOn}; not a shell command)`;
       }
       if (internalCheck === "current-stage-progress") {
-        return `- ${check.name}: Ralph internal current-stage progress gate (${required}${primary}${dependsOn}; not a shell command)`;
+        const mode = parseCurrentStageProgressOptions(command).mode;
+        return `- ${check.name}: Ralph internal current-stage ${mode} gate (${required}${primary}${dependsOn}; not a shell command)`;
       }
       return `- ${check.name}: \`${command}\` (${required}${primary}${dependsOn})`;
     })
@@ -3528,7 +3599,9 @@ async function runInternalCheck(context, checkState = {}) {
 
 async function runCurrentStageProgressCheck(context, checkState = {}) {
   const stage = normalizeStageName(context.stage);
-  const sourceCheckName = parseCurrentStageProgressSourceCheckName(context.command);
+  const progressOptions = parseCurrentStageProgressOptions(context.command);
+  const sourceCheckName = progressOptions.sourceCheckName;
+  const mode = progressOptions.mode;
   const sourceResult = sourceCheckName
     ? checkState.resultsByName?.get(sourceCheckName)
     : findLatestTestResult(checkState.resultsByName);
@@ -3547,6 +3620,7 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
   const lines = [
     `Ralph current-stage progress check for ${stage ?? "unknown stage"}.`,
     `Source check: ${sourceCheckName ?? "latest test check"}.`,
+    `Mode: ${mode}.`,
     `Baseline ${stage ?? "stage"}: ${formatCountPair(baselinePassed, Number.isFinite(baselineStage?.total) ? baselineStage.total : null)}.`,
     `Current ${stage ?? "stage"}: ${formatCountPair(currentPassed, currentTotal)}.`,
     `Earlier stages: ${earlierStagesPass ? "pass" : "fail or unknown"}.`,
@@ -3574,22 +3648,74 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     return { exitCode: 0, output: lines.join("\n") };
   }
   if (!baselineStage) {
-    lines.push(`FAIL: no turn-start baseline for ${stage}; make progress in a provider turn before accepting a checkpoint.`);
+    lines.push(`FAIL: no turn-start baseline for ${stage}; run a provider turn before accepting this gate.`);
     return { exitCode: 1, output: lines.join("\n") };
   }
-  if (currentPassed > baselinePassed) {
+  if (mode === "preserve" && currentPassed >= baselinePassed) {
+    lines.push(`PASS: ${stage} passing tests stayed at or above the turn-start baseline.`);
+    lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
+    return { exitCode: 0, output: lines.join("\n") };
+  }
+  if (mode === "improve" && currentPassed > baselinePassed) {
     lines.push(`PASS: ${stage} passing tests increased by ${currentPassed - baselinePassed}.`);
     lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
     return { exitCode: 0, output: lines.join("\n") };
   }
 
-  lines.push(`FAIL: ${stage} passing tests did not increase above the turn-start baseline.`);
+  lines.push(mode === "preserve"
+    ? `FAIL: ${stage} passing tests dropped below the turn-start baseline.`
+    : `FAIL: ${stage} passing tests did not increase above the turn-start baseline.`);
   return { exitCode: 1, output: lines.join("\n") };
 }
 
-function parseCurrentStageProgressSourceCheckName(command) {
+function parseCurrentStageProgressOptions(command) {
   const parts = String(command ?? "").trim().split(/\s+/);
-  return parts.length > 1 ? sanitizeIdentifier(parts[1], "current-stage-progress source check") : null;
+  let sourceCheckName = null;
+  let mode = "improve";
+  for (const part of parts.slice(1)) {
+    if (!part) {
+      continue;
+    }
+    const assignment = part.match(/^([A-Za-z0-9._-]+)=(.+)$/);
+    if (assignment) {
+      const key = assignment[1];
+      const value = assignment[2];
+      if (key === "mode") {
+        mode = normalizeCurrentStageProgressMode(value);
+      } else if (key === "source" || key === "sourceCheck" || key === "check") {
+        sourceCheckName = sanitizeIdentifier(value, "current-stage-progress source check");
+      }
+      continue;
+    }
+    const normalizedMode = tryNormalizeCurrentStageProgressMode(part);
+    if (normalizedMode) {
+      mode = normalizedMode;
+      continue;
+    }
+    if (!sourceCheckName) {
+      sourceCheckName = sanitizeIdentifier(part, "current-stage-progress source check");
+    }
+  }
+  return { sourceCheckName, mode };
+}
+
+function normalizeCurrentStageProgressMode(value) {
+  const mode = tryNormalizeCurrentStageProgressMode(value);
+  if (!mode) {
+    throw new Error(`current-stage-progress mode must be improve or preserve: ${value}`);
+  }
+  return mode;
+}
+
+function tryNormalizeCurrentStageProgressMode(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (text === "improve" || text === ">" || text === "increase") {
+    return "improve";
+  }
+  if (text === "preserve" || text === ">=" || text === "nonregression" || text === "non-regression") {
+    return "preserve";
+  }
+  return null;
 }
 
 function findLatestTestResult(resultsByName) {
@@ -3727,7 +3853,18 @@ function resolveActivePhase(state) {
   if (savedPhase && phaseAppliesToCurrentTarget(savedPhase, state)) {
     return savedPhase;
   }
-  return CONFIG.phases.find((phase) => phaseAppliesToCurrentTarget(phase, state)) ?? CONFIG.phases[0];
+  return CONFIG.phases.find((phase) => !phase.checkpointOnly && phaseAppliesToCurrentTarget(phase, state)) ?? CONFIG.phases[0];
+}
+
+function isCompletedRunState(state) {
+  return Boolean(
+    state &&
+    state.turnsCompleted > 0 &&
+    state.lastExitCode === 0 &&
+    state.activeStage == null &&
+    state.activeSubset == null &&
+    state.activePhase == null,
+  );
 }
 
 function getNextPhase(phase, state = null) {
@@ -3736,11 +3873,21 @@ function getNextPhase(phase, state = null) {
     return null;
   }
   for (const candidate of CONFIG.phases.slice(index + 1)) {
+    if (candidate.checkpointOnly) {
+      continue;
+    }
     if (phaseAppliesToCurrentTarget(candidate, state)) {
       return candidate;
     }
   }
   return null;
+}
+
+function getPhaseByName(name) {
+  if (!name) {
+    return null;
+  }
+  return CONFIG.phases.find((phase) => phase.name === name) ?? null;
 }
 
 function phaseAppliesToCurrentTarget(phase, state = null) {
@@ -5369,93 +5516,115 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
 }
 
 async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
-	const files = await findCodexSessionFiles(threadId);
-	let latestLifecycleEvent = null;
-	let latestGoalEvent = null;
-	for (const filePath of files) {
-		const raw = await readRecentText(filePath, CODEX_SESSION_WATCH_TAIL_BYTES);
-		const lines = raw.split(/\r?\n/);
-		if (raw.length >= CODEX_SESSION_WATCH_TAIL_BYTES) {
-			lines.shift();
-		}
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed) {
-				continue;
-			}
-			let record;
-			try {
-				record = JSON.parse(trimmed);
-			} catch (_) {
-				continue;
-			}
-			const eventType = record?.payload?.type;
-			if (
-				record?.type !== "event_msg" ||
-				(
-					eventType !== "task_complete" &&
-					eventType !== "task_started" &&
-					eventType !== "thread_goal_updated"
-				)
-			) {
-				continue;
-			}
-			const timestampMs = Date.parse(record.timestamp ?? "");
-			if (!Number.isFinite(timestampMs) || timestampMs < startedAtMs - 5000) {
-				continue;
-			}
-			if (eventType === "thread_goal_updated") {
-				latestGoalEvent = {
-					status: String(record?.payload?.goal?.status ?? ""),
-					timestampMs,
-					turnId: record?.payload?.turnId ?? null,
-				};
-			} else {
-				latestLifecycleEvent = {
-					type: eventType,
-					timestampMs,
-					turnId: record?.payload?.turn_id ?? null,
-					lastAgentMessage: record?.payload?.last_agent_message ?? null,
-				};
-			}
-		}
-	}
+  const files = await findCodexSessionFiles(threadId);
+  let latestLifecycleEvent = null;
+  let latestGoalEvent = null;
+  for (const filePath of files) {
+    const raw = await readRecentText(filePath, CODEX_SESSION_WATCH_TAIL_BYTES);
+    const lines = raw.split(/\r?\n/);
+    if (raw.length >= CODEX_SESSION_WATCH_TAIL_BYTES) {
+      lines.shift();
+    }
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      let record;
+      try {
+        record = JSON.parse(trimmed);
+      } catch (_) {
+        continue;
+      }
+      const timestampMs = Date.parse(record.timestamp ?? "");
+      if (!Number.isFinite(timestampMs) || timestampMs < startedAtMs - 5000) {
+        continue;
+      }
+      const payload = record?.payload ?? {};
+      const eventType = payload?.type;
+      if (record?.type === "event_msg") {
+        if (eventType === "thread_goal_updated") {
+          latestGoalEvent = {
+            status: String(payload?.goal?.status ?? ""),
+            timestampMs,
+            turnId: payload?.turnId ?? null,
+          };
+        } else if (eventType === "task_complete" || eventType === "task_started") {
+          latestLifecycleEvent = {
+            type: eventType,
+            timestampMs,
+            turnId: payload?.turn_id ?? null,
+            lastAgentMessage: payload?.last_agent_message ?? null,
+          };
+        }
+      } else if (record?.type === "response_item" && eventType === "function_call_output") {
+        const goalStatus = parseCodexToolGoalStatus(payload?.output, threadId);
+        if (goalStatus) {
+          latestGoalEvent = {
+            status: goalStatus,
+            timestampMs,
+            turnId: payload?.internal_chat_message_metadata_passthrough?.turn_id ?? null,
+          };
+        }
+      }
+    }
+  }
 
-	if (latestLifecycleEvent?.type !== "task_complete") {
-		return { status: "pending" };
-	}
-	if (
-		Number.isFinite(latestLifecycleEvent.timestampMs) &&
-		Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
-	) {
-		return { status: "pending" };
-	}
-	const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
-	const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
-	const latestGoalStatus = latestGoalEvent?.status ?? "";
-	if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
-		const ageMs = Number.isFinite(latestLifecycleEvent.timestampMs)
-			? Date.now() - latestLifecycleEvent.timestampMs
-			: CODEX_GOAL_CONTINUATION_GRACE_MS;
-		if (latestGoalStatus === "active" && ageMs < CODEX_GOAL_CONTINUATION_GRACE_MS) {
-			return { status: "pending" };
-		}
-		return {
-			status: "incomplete",
-			reason:
-				`Codex task ended while loop goal status was ${latestGoalStatus}; ` +
-				"leaving the Ralph turn incomplete so it can be restarted.",
-		};
-	}
-	if (!hasFinalMessage && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
-		return {
-			status: "incomplete",
-			reason:
-				"Codex task_complete did not include a final agent message; " +
-				"leaving the Ralph turn incomplete so it can be restarted.",
-		};
-	}
-	return { status: "complete" };
+  if (latestLifecycleEvent?.type !== "task_complete") {
+    return { status: "pending" };
+  }
+  if (
+    Number.isFinite(latestLifecycleEvent.timestampMs) &&
+    Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
+  ) {
+    return { status: "pending" };
+  }
+  const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
+  const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
+  const latestGoalStatus = latestGoalEvent?.status ?? "";
+  if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
+    const ageMs = Number.isFinite(latestLifecycleEvent.timestampMs)
+      ? Date.now() - latestLifecycleEvent.timestampMs
+      : CODEX_GOAL_CONTINUATION_GRACE_MS;
+    if (latestGoalStatus === "active" && ageMs < CODEX_GOAL_CONTINUATION_GRACE_MS) {
+      return { status: "pending" };
+    }
+    return {
+      status: "incomplete",
+      reason:
+        `Codex task ended while loop goal status was ${latestGoalStatus}; ` +
+        "leaving the Ralph turn incomplete so it can be restarted.",
+    };
+  }
+  if (!hasFinalMessage && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
+    return {
+      status: "incomplete",
+      reason:
+        "Codex task_complete did not include a final agent message; " +
+        "leaving the Ralph turn incomplete so it can be restarted.",
+    };
+  }
+  return { status: "complete" };
+}
+
+function parseCodexToolGoalStatus(output, threadId) {
+  if (typeof output !== "string" || output.trim() === "") {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch (_) {
+    return null;
+  }
+  const goal = parsed?.goal;
+  if (!goal || typeof goal.status !== "string") {
+    return null;
+  }
+  if (goal.threadId && threadId && goal.threadId !== threadId) {
+    return null;
+  }
+  return goal.status;
 }
 
 async function readRecentText(filePath, maxBytes) {
@@ -7163,23 +7332,27 @@ function normalizeCheckDefinition(name, definition) {
 function normalizePhaseConfig(rawPhases, checks) {
   if (!rawPhases) {
     const primary = checks.find((check) => check.primary) ?? checks[0];
-    return [
+    const phases = [
       normalizePhaseDefinition({
         name: "default",
         promptTemplate: "default",
         checks: [primary.name],
       }, checks),
     ];
+    validatePhaseControlTargets(phases);
+    return phases;
   }
   if (!Array.isArray(rawPhases) || rawPhases.length === 0) {
     throw new Error("Config phases must be a non-empty array");
   }
-  return rawPhases.map((phase, index) =>
+  const phases = rawPhases.map((phase, index) =>
     normalizePhaseDefinition({
       name: phase?.name ?? `phase${index + 1}`,
       ...phase,
     }, checks),
   );
+  validatePhaseControlTargets(phases);
+  return phases;
 }
 
 function normalizePhaseDefinition(phase, checks) {
@@ -7230,7 +7403,27 @@ function normalizePhaseDefinition(phase, checks) {
     runOnFirstSubsetOnly: parseBoolean(phase.runOnFirstSubsetOnly, false),
     runOnLastSubsetOnly: parseBoolean(phase.runOnLastSubsetOnly, false),
     checkpointOnRequiredChecks: parseBoolean(phase.checkpointOnRequiredChecks, false),
+    checkpointOnly: parseBoolean(phase.checkpointOnly, false),
+    checkpointPhase: sanitizeOptionalIdentifier(phase.checkpointPhase, `phases.${name}.checkpointPhase`),
+    returnPhaseOnIncompletePrimary: sanitizeOptionalIdentifier(
+      phase.returnPhaseOnIncompletePrimary,
+      `phases.${name}.returnPhaseOnIncompletePrimary`,
+    ),
   };
+}
+
+function validatePhaseControlTargets(phases) {
+  const names = new Set(phases.map((phase) => phase.name));
+  for (const phase of phases) {
+    for (const [field, target] of [
+      ["checkpointPhase", phase.checkpointPhase],
+      ["returnPhaseOnIncompletePrimary", phase.returnPhaseOnIncompletePrimary],
+    ]) {
+      if (target && !names.has(target)) {
+        throw new Error(`Config phase ${phase.name} ${field} references unknown phase ${target}`);
+      }
+    }
+  }
 }
 
 function normalizeStageTemplateMap(value, label) {
@@ -7278,6 +7471,13 @@ function sanitizeOptionalTemplateName(value) {
     return null;
   }
   return sanitizeIdentifier(value, "template name");
+}
+
+function sanitizeOptionalIdentifier(value, label) {
+  if (value == null || value === "") {
+    return null;
+  }
+  return sanitizeIdentifier(value, label);
 }
 
 function normalizeCheckDependencyList(value, label) {

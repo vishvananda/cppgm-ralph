@@ -201,6 +201,7 @@ function readRunState(filePath) {
       activePhase: typeof state.activePhase === "string" ? state.activePhase : null,
       activeSubset: typeof state.activeSubset === "string" ? state.activeSubset : null,
       turnsCompleted: Number.isInteger(state.turnsCompleted) ? state.turnsCompleted : null,
+      lastExitCode: Number.isInteger(state.lastExitCode) ? state.lastExitCode : null,
       phaseAttempted: state.phaseAttempted === true,
     };
   } catch (_) {
@@ -1274,10 +1275,12 @@ function paSummary(run, pa) {
     };
   }
   const number = stageNumber(pa);
+  const runComplete = isCompleteRunState(run.state);
   const runAdvancedPastPa =
     Number.isInteger(number) &&
-    Number.isInteger(run.state?.activeStageNumber) &&
-    run.state.activeStageNumber > number;
+    (runComplete ||
+      (Number.isInteger(run.state?.activeStageNumber) &&
+        run.state.activeStageNumber > number));
   const activeInThisPa =
     Number.isInteger(number) &&
     run.state?.activeStageNumber === number &&
@@ -1291,6 +1294,17 @@ function paSummary(run, pa) {
         : "complete",
     phases: [...row.phases.entries()].map(([phase, count]) => `${phase}:${count}`).join(","),
   };
+}
+
+function isCompleteRunState(state) {
+  return Boolean(
+    state &&
+      state.lastExitCode === 0 &&
+      state.activeStage == null &&
+      state.activePhase == null &&
+      Number.isInteger(state.turnsCompleted) &&
+      state.turnsCompleted > 0,
+  );
 }
 
 function totalSummary(rows) {
