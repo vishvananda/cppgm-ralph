@@ -29,6 +29,7 @@ const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
+const CLAUDE_INCOMPLETE_GOAL_RETRY_MAX = Number(process.env.RALPH_CLAUDE_INCOMPLETE_GOAL_RETRY_MAX ?? 20);
 const PROVIDER_TRANSIENT_RETRY_MAX = Number(
   process.env.RALPH_PROVIDER_TRANSIENT_RETRY_MAX ??
   process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX ??
@@ -4755,12 +4756,43 @@ class ClaudeThread {
       }
     }
 
-    const shared = { started: false, pendingToolUses: new Map() };
+    const shared = { started: false, pendingToolUses: new Map(), latestGoalStatus: null };
     let attemptInput = message;
     let attemptSystemPrompt = appendSystemPrompt;
     let limitRetries = 0;
+    let incompleteGoalRetries = 0;
     while (true) {
       const attempt = yield* this.runAttempt(attemptInput, attemptSystemPrompt, turnOptions, shared);
+      if (attempt.goalIncomplete) {
+        incompleteGoalRetries += 1;
+        if (incompleteGoalRetries > CLAUDE_INCOMPLETE_GOAL_RETRY_MAX) {
+          yield {
+            type: "turn.failed",
+            error: {
+              message:
+                `Claude ended with an incomplete loop goal after ${CLAUDE_INCOMPLETE_GOAL_RETRY_MAX} ` +
+                "resume attempts.",
+            },
+          };
+          return;
+        }
+        log(
+          `Claude ended while loop goal was incomplete; resuming session ${this._id ?? "(unknown)"} ` +
+            `(attempt ${incompleteGoalRetries}/${CLAUDE_INCOMPLETE_GOAL_RETRY_MAX})`,
+        );
+        yield {
+          type: "claude.goal_continue",
+          thread_id: this._id,
+          attempt: incompleteGoalRetries,
+          reason: attempt.goalStatus?.reason ?? "",
+        };
+        attemptInput =
+          "Ralph observed that your active /goal was still incomplete when you ended your response. " +
+          "Continue the same Ralph loop goal from the current repository state. Do not hand control " +
+          "back until the required exit criteria pass or you are blocked by an external condition.";
+        attemptSystemPrompt = appendSystemPrompt;
+        continue;
+      }
       if (!attempt.limitMessage) {
         return;
       }
@@ -4885,9 +4917,18 @@ class ClaudeThread {
         yield { type: "thread.started", thread_id: sessionId };
         yield { type: "turn.started", thread_id: sessionId };
       }
-      yield* translateClaudeEvent(event, shared.pendingToolUses);
+      if (
+        event.type === "result" &&
+        !event.is_error &&
+        event.subtype === "success" &&
+        CONFIG.loopGoalsEnabled &&
+        shared.latestGoalStatus?.status === "incomplete"
+      ) {
+        return { limitMessage: null, rateLimitInfo, goalIncomplete: true, goalStatus: shared.latestGoalStatus };
+      }
+      yield* translateClaudeEvent(event, shared);
     }
-    return { limitMessage: null, rateLimitInfo };
+    return { limitMessage: null, rateLimitInfo, goalIncomplete: false };
   }
 }
 
@@ -4914,10 +4955,28 @@ function sleepMs(durationMs) {
   });
 }
 
-function* translateClaudeEvent(event, pendingToolUses) {
+function* translateClaudeEvent(event, shared) {
+  const pendingToolUses = shared.pendingToolUses;
   // Events with a parent_tool_use_id come from subagent (Task) internals; the
   // Task call itself surfaces as a normal tool_use/tool_result pair.
   if (event.parent_tool_use_id) {
+    return;
+  }
+
+  if (event.type === "attachment" && event.attachment?.type === "goal_status") {
+    const met = event.attachment.met === true;
+    shared.latestGoalStatus = {
+      status: met ? "complete" : "incomplete",
+      reason: typeof event.attachment.reason === "string" ? event.attachment.reason : "",
+      condition: typeof event.attachment.condition === "string" ? event.attachment.condition : "",
+    };
+    yield {
+      type: "claude.goal_status",
+      status: shared.latestGoalStatus.status,
+      met,
+      reason: shared.latestGoalStatus.reason,
+      condition: shared.latestGoalStatus.condition,
+    };
     return;
   }
 
@@ -4982,6 +5041,17 @@ function* translateClaudeEvent(event, pendingToolUses) {
         (typeof event.result === "string" && event.result.trim()) ||
         `Claude turn ended with ${event.subtype ?? "an error"}`;
       yield { type: "turn.failed", error: { message } };
+      return;
+    }
+    if (CONFIG.loopGoalsEnabled && shared.latestGoalStatus?.status === "incomplete") {
+      yield {
+        type: "turn.failed",
+        error: {
+          message:
+            "Claude task ended while loop goal status was incomplete; " +
+            "leaving the Ralph turn incomplete so it can be restarted.",
+        },
+      };
       return;
     }
     yield {
@@ -6415,6 +6485,12 @@ function summarizeEvent(event) {
   }
   if (event.type === "claude.limit_wait") {
     return `limit_wait ${Math.ceil((event.wait_ms ?? 0) / 60000)}m ${previewText(event.message ?? "")}`;
+  }
+  if (event.type === "claude.goal_status") {
+    return `goal_status ${event.status ?? (event.met ? "complete" : "incomplete")} ${previewText(event.reason ?? "")}`;
+  }
+  if (event.type === "claude.goal_continue") {
+    return `goal_continue attempt=${event.attempt ?? "?"} ${previewText(event.reason ?? "")}`;
   }
   if (event.type === "ralph.limit_wait") {
     return `limit_wait ${formatDurationForLog(event.wait_ms ?? 0)} ${previewText(event.message ?? "")}`;
