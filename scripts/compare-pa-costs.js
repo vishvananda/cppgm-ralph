@@ -6,6 +6,7 @@ import path from "path";
 import readline from "readline";
 
 const DEFAULT_RATES = {
+  "gpt-5.6-sol": { input: 5.0, cachedInput: 0.5, output: 30.0 },
   "gpt-5.5": { input: 5.0, cachedInput: 0.5, output: 30.0 },
   "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15.0 },
   "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
@@ -29,7 +30,7 @@ const DEFAULTS = {
   format: "markdown",
 };
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
-const SESSION_FALLBACK_CACHE_VERSION = 2;
+const SESSION_FALLBACK_CACHE_VERSION = 3;
 
 function usage() {
   return `Usage: node scripts/compare-pa-costs.js [options] [runSpec ...]
@@ -587,8 +588,7 @@ function buildSessionTurnResolver(events) {
 
 function buildRawTurnAttemptWindows(events) {
   const starts = events
-    .filter((event) => event.eventType === "ralph.phase-status" &&
-      event.event?.action === "turn-start" &&
+    .filter((event) => isTurnAttemptBoundaryEvent(event) &&
       Number.isInteger(event.turnNumber) &&
       event.turnNumber > 0)
     .map((event) => ({
@@ -609,6 +609,11 @@ function buildRawTurnAttemptWindows(events) {
       key: `${start.turnNumber}\0${attemptIndex}`,
     };
   });
+}
+
+function isTurnAttemptBoundaryEvent(event) {
+  return event?.eventType === "ralph.turn-restart" ||
+    (event?.eventType === "ralph.phase-status" && event.event?.action === "turn-start");
 }
 
 function rawTurnAttemptForTime(attempts, turnNumber, time) {
@@ -1322,6 +1327,38 @@ function totalSummary(rows) {
   );
 }
 
+function turnDurationSummaries(run) {
+  return [...run.byTurn.values()]
+    .filter((turn) => Number.isInteger(turn.turn) && turn.turn > 0 && turn.durationMs > 0)
+    .sort((left, right) =>
+      left.turn - right.turn ||
+      left.attemptIndex - right.attemptIndex)
+    .map((turn) => ({
+      turnNumber: turn.turn,
+      attemptIndex: turn.attemptIndex,
+      durationMs: turn.durationMs,
+      phase: turn.phase ?? null,
+      stage: turn.stage ?? null,
+      key: turn.key ?? String(turn.turn),
+    }));
+}
+
+function turnUsageSummaries(run) {
+  return [...run.byTurn.values()]
+    .filter((turn) => Number.isInteger(turn.turn) && turn.turn > 0 && hasUsage(turn.usage))
+    .sort((left, right) =>
+      left.turn - right.turn ||
+      left.attemptIndex - right.attemptIndex)
+    .map((turn) => ({
+      turnNumber: turn.turn,
+      attemptIndex: turn.attemptIndex,
+      usage: normalizeUsage(turn.usage) ?? emptyUsage(),
+      phase: turn.phase ?? null,
+      stage: turn.stage ?? null,
+      key: turn.key ?? String(turn.turn),
+    }));
+}
+
 function hhhmmss(durationMs) {
   const seconds = Math.max(0, Math.round(durationMs / 1000));
   const hours = Math.floor(seconds / 3600);
@@ -1353,6 +1390,8 @@ function buildComparison(options, summaries) {
       spec: run.spec,
       filePath: run.filePath,
       total: totalSummary(rows.map((row) => row.runs[index])),
+      turnDurations: turnDurationSummaries(run),
+      turnUsages: turnUsageSummaries(run),
     })),
     rows,
   };

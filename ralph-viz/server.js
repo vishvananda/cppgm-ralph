@@ -27,7 +27,7 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
-const RUN_USAGE_CACHE_VERSION = 22;
+const RUN_USAGE_CACHE_VERSION = 24;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
@@ -470,7 +470,11 @@ function progressEventsFromRunEvents(events) {
     if (!output) {
       continue;
     }
-    const observation = progressObservationFromSessionOutput(output, record.recordedAt);
+    const observation = progressObservationFromSessionOutput(
+      output,
+      record.recordedAt,
+      String(item.command ?? ""),
+    );
     if (!observation) {
       continue;
     }
@@ -1752,7 +1756,9 @@ function turnExecutionDurationEntries(events, sessionTiming = new Map(), options
       );
     }
     const fallbackMs = fallbackDurations.get(attemptKey) ?? 0;
-    if (attemptDurationMs > 0) {
+    if (attemptDurationMs > 0 && timing?.hasTaskComplete) {
+      attemptDurations.set(attemptKey, attemptDurationMs);
+    } else if (attemptDurationMs > 0) {
       attemptDurations.set(attemptKey, Math.max(attemptDurationMs, fallbackMs));
     } else if (fallbackDurations.has(attemptKey)) {
       attemptDurations.set(attemptKey, fallbackMs);
@@ -1989,6 +1995,7 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
       turnNumber: turn,
       attemptKey: key,
       durationMs: 0,
+      hasTaskComplete: false,
       goalTimeUsedMs: 0,
       sessionFirstMs: null,
       sessionLastMs: null,
@@ -2011,6 +2018,7 @@ async function readCodexSessionTimingIntoTurns(filePath, resolveTurn, timingByTu
       const durationMs = Number(record.payload.duration_ms ?? 0);
       if (Number.isFinite(durationMs) && durationMs > 0) {
         timing.durationMs += durationMs;
+        timing.hasTaskComplete = true;
       }
     } else if (record.type === "event_msg" && record.payload?.type === "thread_goal_updated") {
       const timeUsedSeconds = Number(record.payload.goal?.timeUsedSeconds ?? 0);
@@ -3233,7 +3241,8 @@ function parseTestReportSummary(output) {
     };
   }
 
-  const summary = output.match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
+  const summary = output.match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m) ??
+    output.match(/^(\d+)\s*\/\s*(\d+)\s+TESTS PASSED$/m);
   if (!summary) {
     return null;
   }
@@ -3645,8 +3654,7 @@ function buildSessionTurnAttemptResolver(events) {
 
 function buildRawTurnAttemptWindows(events) {
   const starts = events
-    .filter((event) => event.eventType === "ralph.phase-status" &&
-      event.event?.action === "turn-start" &&
+    .filter((event) => isTurnAttemptBoundaryEvent(event) &&
       Number.isInteger(event.turnNumber) &&
       event.turnNumber > 0)
     .map((event) => ({
@@ -3667,6 +3675,11 @@ function buildRawTurnAttemptWindows(events) {
       key: `${start.turnNumber}\0${attemptIndex}`,
     };
   });
+}
+
+function isTurnAttemptBoundaryEvent(event) {
+  return event?.eventType === "ralph.turn-restart" ||
+    (event?.eventType === "ralph.phase-status" && event.event?.action === "turn-start");
 }
 
 function rawTurnAttemptForTime(attempts, turnNumber, time) {
@@ -4073,16 +4086,20 @@ function progressObservationFromCodexOutputRecord(record) {
   return progressObservationFromSessionOutput(output, record.timestamp);
 }
 
-function progressObservationFromSessionOutput(output, recordedAt) {
-  const summary = parseSessionTestSummary(output);
+function progressObservationFromSessionOutput(output, recordedAt, command = "") {
+  const commandInfo = parseSingleStageProgressCommand(command);
+  const summary = commandInfo?.kind === "selected"
+    ? parseLastSessionTestSummary(output)
+    : parseSessionTestSummary(output);
   if (!summary) {
     return null;
   }
-  const stage = inferSingleSessionProgressStage(output);
+  const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   if (!stage) {
     return null;
   }
-  const progress = parseSingleStageProgressFromSessionOutput(output, stage);
+  const progress = parseSingleStageProgressFromSessionOutput(output, stage) ??
+    parseSingleStageSummaryProgressFromSessionOutput(summary, command, stage);
   if (!progress || progress.total <= 0) {
     return null;
   }
@@ -4141,34 +4158,59 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   };
 }
 
+function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage) {
+  const commandInfo = parseSingleStageProgressCommand(command);
+  if (!commandInfo || commandInfo.stage !== expectedStage || commandInfo.hasSubset) {
+    return null;
+  }
+  if (commandInfo.kind !== "selected") {
+    return null;
+  }
+  return {
+    passed: summary.testsPassed,
+    total: summary.testsTotal,
+    status: summary.allTestsPassed || summary.testsPassed === summary.testsTotal ? "pass" : "fail",
+  };
+}
+
 function isStageAggregateProgressTarget(target, stage) {
   const normalized = String(target ?? "").trim().replace(/\s+/g, " ");
   return normalized === `${stage} tests` || normalized === `${stage}/tests`;
 }
 
 function parseSessionTestSummary(output) {
+  return parseSessionTestSummaries(output)[0] ?? null;
+}
+
+function parseLastSessionTestSummary(output) {
+  return parseSessionTestSummaries(output).at(-1) ?? null;
+}
+
+function parseSessionTestSummaries(output) {
+  const summaries = [];
   const allPassed = String(output ?? "").match(
     /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \((\d+)\s*\/\s*(\d+)\))? =====$/m,
   );
   if (allPassed) {
     const testsPassed = parseOptionalInt(allPassed[1]);
     const testsTotal = parseOptionalInt(allPassed[2]);
-    return {
+    summaries.push({
       allTestsPassed: true,
       testsPassed: testsPassed ?? testsTotal ?? 0,
       testsTotal: testsTotal ?? testsPassed ?? 0,
-    };
+    });
   }
 
-  const summary = String(output ?? "").match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
-  if (!summary) {
-    return null;
+  const summaryRegex = /^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$|^(\d+)\s*\/\s*(\d+)\s+TESTS PASSED$/gm;
+  let summary;
+  while ((summary = summaryRegex.exec(String(output ?? ""))) !== null) {
+    summaries.push({
+      allTestsPassed: false,
+      testsPassed: Number.parseInt(summary[1] ?? summary[3], 10),
+      testsTotal: Number.parseInt(summary[2] ?? summary[4], 10),
+    });
   }
-  return {
-    allTestsPassed: false,
-    testsPassed: Number.parseInt(summary[1], 10),
-    testsTotal: Number.parseInt(summary[2], 10),
-  };
+  return summaries;
 }
 
 function inferSingleSessionProgressStage(output) {
@@ -4179,6 +4221,96 @@ function inferSingleSessionProgressStage(output) {
     return unique[0];
   }
   return null;
+}
+
+function inferSingleSessionProgressStageFromCommand(command) {
+  return parseSingleStageProgressCommand(command)?.stage ?? null;
+}
+
+function parseSingleStageProgressCommand(command) {
+  const text = String(command ?? "");
+  if (hasProgressUnsafeShellOperator(text)) {
+    return null;
+  }
+  const selected = parseActiveTestReportStagesFromCommand(text);
+  if (selected.length === 1 && /\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
+    return {
+      kind: "selected",
+      stage: selected[0],
+      hasSubset: /\bGLOB\s*=/.test(text),
+    };
+  }
+  const through = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
+  if (through) {
+    return {
+      kind: "through",
+      stage: `pa${Number.parseInt(through[1], 10)}`,
+      hasSubset: false,
+    };
+  }
+  return null;
+}
+
+function hasProgressUnsafeShellOperator(text) {
+  const scanText = shellOperatorScanText(text);
+  if (!/[|<>]/.test(scanText)) {
+    return false;
+  }
+  return !isSafeFilteredTestReportCommand(text);
+}
+
+function isSafeFilteredTestReportCommand(text) {
+  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
+    return false;
+  }
+  const scanText = shellOperatorScanText(text);
+  const withoutSafeRedirects = scanText
+    .replace(/\s*\d?>&\d+/g, "")
+    .replace(/\s*\d?>\s*\/dev\/null\b/g, "");
+  if (/[<>]/.test(withoutSafeRedirects)) {
+    return false;
+  }
+  const pipeSegments = scanText.split("|").slice(1);
+  if (pipeSegments.length === 0) {
+    return true;
+  }
+  return pipeSegments.every((segment) =>
+    /^\s*(grep|egrep|fgrep|sed|tail|head|awk|sort|uniq|wc|cat|cut|tr)\b/.test(segment));
+}
+
+function shellOperatorScanText(text) {
+  const value = String(text ?? "");
+  let result = "";
+  let quote = null;
+  let escaped = false;
+  for (const char of value) {
+    if (quote) {
+      if (quote === '"' && escaped) {
+        escaped = false;
+      } else if (quote === '"' && char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      result += " ";
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      result += " ";
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+function parseActiveTestReportStagesFromCommand(command) {
+  const match = String(command ?? "").match(
+    /\bACTIVE_TEST_REPORT_PAS\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/,
+  );
+  const raw = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
+  return [...raw.matchAll(/\bpa\d+\b/g)].map((stage) => stage[0]);
 }
 
 function normalizeProgressObservation(raw) {
@@ -4624,6 +4756,7 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
         .map((event) => event.event.item.id),
     );
     if (!neededCommandStarts.size) {
+      keepReferencedTestReportLogWriters(group, tail, keep);
       continue;
     }
     for (const event of group) {
@@ -4635,9 +4768,54 @@ function limitSessionEventsByTurn(events, maxEventsPerTurn) {
         keep.add(event);
       }
     }
+    keepReferencedTestReportLogWriters(group, tail, keep);
   }
 
   return events.filter((event) => keep.has(event));
+}
+
+function keepReferencedTestReportLogWriters(group, tail, keep) {
+  const referencedLogs = new Set();
+  for (const event of tail) {
+    const item = event.event?.item;
+    if (item?.type !== "command_execution") {
+      continue;
+    }
+    for (const logPath of extractReferencedTempLogPaths(item.command ?? "")) {
+      referencedLogs.add(logPath);
+    }
+  }
+  if (referencedLogs.size === 0) {
+    return;
+  }
+  const keptCommandIds = new Set();
+  for (const event of group) {
+    const item = event.event?.item;
+    if (event.eventType !== "item.completed" || item?.type !== "command_execution") {
+      continue;
+    }
+    const redirected = extractRedirectedTempLogPaths(item.command ?? "");
+    if (!redirected.some((logPath) => referencedLogs.has(logPath))) {
+      continue;
+    }
+    keep.add(event);
+    if (item.id) {
+      keptCommandIds.add(item.id);
+    }
+  }
+  if (keptCommandIds.size === 0) {
+    return;
+  }
+  for (const event of group) {
+    const item = event.event?.item;
+    if (
+      event.eventType === "item.started" &&
+      item?.type === "command_execution" &&
+      keptCommandIds.has(item.id)
+    ) {
+      keep.add(event);
+    }
+  }
 }
 
 function keepSessionBoundaryEvents(group, keep) {
@@ -4664,10 +4842,36 @@ function isAlwaysKeptSessionEvent(event) {
     "ralph.phase-status",
     "ralph.prompt",
     "ralph.test-status",
+    "ralph.turn-restart",
     "turn.completed",
     "turn.failed",
     "turn.started",
   ].includes(event.eventType);
+}
+
+function extractRedirectedTempLogPaths(text) {
+  const paths = [];
+  const regex = /(?:^|[\s;])(?:\d?>{1,2}|&>{1,2})\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
+  let match;
+  while ((match = regex.exec(String(text ?? ""))) !== null) {
+    const logPath = normalizeTempLogPath(match[1] ?? match[2] ?? match[3] ?? "");
+    if (logPath) {
+      paths.push(logPath);
+    }
+  }
+  return [...new Set(paths)];
+}
+
+function extractReferencedTempLogPaths(text) {
+  const paths = [...String(text ?? "").matchAll(/\/tmp\/[A-Za-z0-9._/-]+\.log\b/g)]
+    .map((match) => normalizeTempLogPath(match[0]))
+    .filter(Boolean);
+  return [...new Set(paths)];
+}
+
+function normalizeTempLogPath(logPath) {
+  const path = String(logPath ?? "").trim();
+  return /^\/tmp\/[A-Za-z0-9._/-]+\.log$/.test(path) ? path : "";
 }
 
 async function findCodexSessionFiles(threadId) {

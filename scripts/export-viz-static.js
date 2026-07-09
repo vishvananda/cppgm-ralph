@@ -13,26 +13,17 @@ const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const DEFAULT_RUNS = [
-  "phases-gpt-5.5-xhigh",
   "trusted-gpt-5.5-xhigh",
   "fable-claude-fable-5-xhigh",
   "opus-opus-xhigh",
+  "mini-gpt-5.6-sol-xhigh",
 ];
-const SPARK_RUN = "spark-gpt-5.4-medium";
 const FORMAT_VERSION = 1;
-const ASSIGNMENT_LAYOUTS = {
-  v1: {
-    id: "v1",
-    shortLabel: "v1",
-    label: "v1 legacy layout",
-    description: "Legacy assignment layout used by phases and spark. It tops out at pa37 Inception.",
-  },
-  v2: {
-    id: "v2",
-    shortLabel: "v2",
-    label: "v2 current layout",
-    description: "Current assignment layout used by trusted, fable, and opus. It includes abimangle at pa30 and tops out at pa39 Inception.",
-  },
+const CURRENT_ASSIGNMENT_LAYOUT = {
+  id: "current",
+  shortLabel: "current",
+  label: "current assignment layout",
+  description: "Current assignment layout used by trusted, fable, opus, and mini. It includes abimangle at pa30 and tops out at pa39 Inception.",
 };
 
 function usage() {
@@ -42,9 +33,8 @@ Export Ralph run viewer data as static files.
 
 Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
-  --run <spec>          Run to export; repeatable. Defaults to phases/trusted/fable/opus
+  --run <spec>          Run to export; repeatable. Defaults to trusted/fable/opus/mini
   --runs <a,b,c>        Comma-separated run specs
-  --include-spark       Include ${SPARK_RUN}
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
@@ -84,8 +74,6 @@ function parseArgs(argv) {
       options.runs.push(next());
     } else if (arg === "--runs") {
       options.runs.push(...next().split(",").map((value) => value.trim()).filter(Boolean));
-    } else if (arg === "--include-spark" || arg === "--spark") {
-      options.includeSpark = true;
     } else if (arg === "--through") {
       options.through = normalizePa(next());
     } else if (arg === "--ralph-dir") {
@@ -106,9 +94,6 @@ function parseArgs(argv) {
   }
   if (!options.runs.length) {
     options.runs = [...DEFAULT_RUNS];
-  }
-  if (options.includeSpark && !options.runs.includes(SPARK_RUN)) {
-    options.runs.push(SPARK_RUN);
   }
   return options;
 }
@@ -133,11 +118,7 @@ function paNumber(value) {
 }
 
 function inferAssignmentLayout(shape) {
-  const text = String(shape ?? "");
-  if (text.startsWith("phases") || text.startsWith("spark")) {
-    return ASSIGNMENT_LAYOUTS.v1;
-  }
-  return ASSIGNMENT_LAYOUTS.v2;
+  return CURRENT_ASSIGNMENT_LAYOUT;
 }
 
 function inferRunWorktree(run, options) {
@@ -371,7 +352,7 @@ async function collectDocs(run, options, outRunDir) {
 }
 
 function inferDocPrefix(shape) {
-  for (const prefix of ["phases", "trusted", "fable", "opus", "spark"]) {
+  for (const prefix of ["trusted", "fable", "opus", "mini"]) {
     if (shape.startsWith(prefix)) return prefix;
   }
   return shape.split("-")[0] || shape;
@@ -423,8 +404,7 @@ async function buildComparison(options, runs) {
   if (!options.compare || !runs.length) {
     return null;
   }
-  const comparisonRuns = runs.filter((run) => inferAssignmentLayout(run.shape).id === "v2");
-  if (!comparisonRuns.length) {
+  if (!runs.length) {
     return null;
   }
   const scriptPath = path.join(REPO_ROOT, "scripts", "compare-pa-costs.js");
@@ -434,7 +414,7 @@ async function buildComparison(options, runs) {
     "--through", options.through,
     "--ralph-dir", options.ralphDir,
     "--codex-dir", options.codexDir,
-    ...comparisonRuns.map((run) => run.spec),
+    ...runs.map((run) => run.spec),
   ];
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, args, {
@@ -466,7 +446,7 @@ function annotateComparison(comparison, runMetas) {
     run.assignmentTitles = meta.assignmentTitles;
     run.dataPath = meta.dataPath;
   }
-  comparison.assignmentLayouts = ASSIGNMENT_LAYOUTS;
+  comparison.assignmentLayouts = { current: CURRENT_ASSIGNMENT_LAYOUT };
   comparison.series = comparisonSeries(comparison);
   return comparison;
 }
@@ -510,13 +490,12 @@ function comparisonSummaryStarted(summary) {
     summary.status === "complete";
 }
 
-function totalForRun(comparison, run) {
-  const entry = comparison?.runs?.find((candidate) =>
+function comparisonRunForExport(comparison, run) {
+  return comparison?.runs?.find((candidate) =>
     candidate.spec === run.spec ||
     candidate.label === run.spec ||
     candidate.label === run.label ||
-    path.resolve(candidate.filePath ?? "") === path.resolve(run.filePath));
-  return entry?.total ?? null;
+    path.resolve(candidate.filePath ?? "") === path.resolve(run.filePath)) ?? null;
 }
 
 async function exportRun(run, options, comparison) {
@@ -550,7 +529,8 @@ async function exportRun(run, options, comparison) {
   const assignmentTitles = await collectAssignmentTitles(run, options);
   const state = await readRunStateSummary(run);
   const bounds = eventTimeBounds(events);
-  const total = totalForRun(comparison, run);
+  const comparisonRun = comparisonRunForExport(comparison, run);
+  const total = comparisonRun?.total ?? null;
   const shapeUsage = total?.usage
     ? {
         runCount: 1,
@@ -558,6 +538,15 @@ async function exportRun(run, options, comparison) {
         durationMs: total.durationMs ?? 0,
         usage: total.usage,
         cost: total.cost ?? 0,
+        runs: [{
+          id: `${run.id}/run`,
+          threadId: null,
+          threadIds: [],
+          durationMs: total.durationMs ?? 0,
+          turnDurations: comparisonRun?.turnDurations ?? [],
+          turnUsages: comparisonRun?.turnUsages ?? [],
+          usage: total.usage,
+        }],
       }
     : null;
   const runMeta = {

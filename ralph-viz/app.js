@@ -35,6 +35,7 @@ const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min
 let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map([
+  ["gpt-5.6-sol", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
   ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
   ["gpt-5.4-mini", { input: 0.75, cachedInput: 0.075, output: 4.50 }],
   ["gpt-5.4", { input: 2.50, cachedInput: 0.25, output: 15.00 }],
@@ -101,7 +102,7 @@ const NOISE_TYPES = new Set([
   "thread.started", "turn.started", "turn.completed", "turn.failed",
   "item.started", "error", "codex.session.token_count", "codex.task_complete",
   "codex.thread_goal_updated", "ralph.test-status",
-  "ralph.agent-progress",
+  "ralph.agent-progress", "ralph.turn-restart",
   // Gemini streaming noise
   "content", "finished", "model_info", "tool_call_response",
 ]);
@@ -238,10 +239,8 @@ function bestTurnDurationSpan(shapeUsage, turn, durationMap, options = {}) {
   let best = null;
   if (!cached) {
     best = live;
-  } else if (!live) {
-    best = cached;
   } else {
-    best = (live.durationMs ?? 0) > (cached.durationMs ?? 0) ? live : cached;
+    best = cached;
   }
   return options.activeCurrentTurn ? activeCurrentTurnDurationSpan(best, cached, live, options) : best;
 }
@@ -294,8 +293,7 @@ function latestTurnStartMs(records, turn) {
   let latest = null;
   for (const record of Array.isArray(records) ? records : []) {
     if (
-      record?.eventType !== "ralph.phase-status" ||
-      record.event?.action !== "turn-start" ||
+      !isTurnAttemptBoundaryRecord(record) ||
       displayTurnForRecord(record) !== turn
     ) {
       continue;
@@ -312,22 +310,30 @@ function shapeUsageTurnDuration(shapeUsage, turn) {
   if (!Number.isInteger(turn) || turn <= 0) {
     return null;
   }
+  let first = null;
+  let last = null;
+  let durationMs = 0;
   for (const run of Array.isArray(shapeUsage?.runs) ? shapeUsage.runs : []) {
     for (const entry of Array.isArray(run?.turnDurations) ? run.turnDurations : []) {
       if (Number(entry?.turnNumber) !== turn) {
         continue;
       }
-      const durationMs = Number(entry?.durationMs);
-      if (Number.isFinite(durationMs) && durationMs > 0) {
-        return {
-          first: entry.firstAt ? Date.parse(entry.firstAt) : null,
-          last: entry.lastAt ? Date.parse(entry.lastAt) : null,
-          durationMs,
-        };
+      const entryDurationMs = Number(entry?.durationMs);
+      if (!Number.isFinite(entryDurationMs) || entryDurationMs <= 0) {
+        continue;
       }
+      const entryFirst = entry.firstAt ? Date.parse(entry.firstAt) : null;
+      const entryLast = entry.lastAt ? Date.parse(entry.lastAt) : null;
+      if (Number.isFinite(entryFirst)) {
+        first = first == null ? entryFirst : Math.min(first, entryFirst);
+      }
+      if (Number.isFinite(entryLast)) {
+        last = last == null ? entryLast : Math.max(last, entryLast);
+      }
+      durationMs += entryDurationMs;
     }
   }
-  return null;
+  return durationMs > 0 ? { first, last, durationMs } : null;
 }
 
 function bestTurnUsage(shapeUsage, turn, liveUsage = null) {
@@ -1303,6 +1309,8 @@ function renderSystemCard(record) {
   } else if (record.eventType === "turn.failed") {
     text = `turn failed: ${cleanText(record.event?.error?.message) || "unknown"}`;
     div.classList.add("ev-sys-err");
+  } else if (record.eventType === "ralph.turn-restart") {
+    text = `ralph restart: resumed turn ${record.turnNumber ?? "?"}`;
   } else if (isLimitWaitEvent(record)) {
     const minutes = Math.ceil((record.event?.wait_ms ?? 0) / 60000);
     const label = record.eventType === "ralph.limit_wait" ? "provider wait" : "quota wait";
@@ -1787,6 +1795,7 @@ function buildTurnDurationMap(records, options = {}) {
         turn,
         attemptIndex,
         durationMs: 0,
+        hasTaskComplete: false,
         goalTimeUsedMs: 0,
         sessionFirstMs: null,
         sessionLastMs: null,
@@ -1797,6 +1806,7 @@ function buildTurnDurationMap(records, options = {}) {
         const durationMs = Number(record.event?.durationMs ?? 0);
         if (Number.isFinite(durationMs) && durationMs > 0) {
           timing.durationMs += durationMs;
+          timing.hasTaskComplete = true;
         }
       } else if (record.eventType === "codex.thread_goal_updated") {
         const timeUsedSeconds = Number(record.event?.timeUsedSeconds ?? 0);
@@ -1851,6 +1861,9 @@ function buildTurnDurationMap(records, options = {}) {
     attemptDurations.set(key, (attemptDurations.get(key) ?? 0) + durationMs);
   }
   for (const [key, lifecycle] of ralphLifecycleByTurnAttempt.entries()) {
+    if (sessionTimingByTurnAttempt.has(key)) {
+      continue;
+    }
     if (
       Number.isFinite(lifecycle.startMs) &&
       Number.isFinite(lifecycle.checkedMs) &&
@@ -1895,7 +1908,10 @@ function buildTurnDurationMap(records, options = {}) {
       );
     }
     if (durationMs > 0) {
-      attemptDurations.set(key, Math.max(attemptDurations.get(key) ?? 0, durationMs));
+      attemptDurations.set(
+        key,
+        timing.hasTaskComplete ? durationMs : Math.max(attemptDurations.get(key) ?? 0, durationMs),
+      );
     }
   }
   const totalByTurn = new Map();
@@ -1938,8 +1954,7 @@ function subtractLimitWaitOverlap(durationMs, spanStartMs, spanEndMs, waits) {
 function buildTurnAttemptWindows(records) {
   const attempts = new Map();
   const starts = records
-    .filter((record) => record.eventType === "ralph.phase-status" &&
-      record.event?.action === "turn-start" &&
+    .filter((record) => isTurnAttemptBoundaryRecord(record) &&
       Number.isInteger(displayTurnForRecord(record)))
     .map((record) => ({
       turn: displayTurnForRecord(record),
@@ -1962,6 +1977,11 @@ function buildTurnAttemptWindows(records) {
     attempts.set(start.turn, list);
   }
   return attempts;
+}
+
+function isTurnAttemptBoundaryRecord(record) {
+  return record?.eventType === "ralph.turn-restart" ||
+    (record?.eventType === "ralph.phase-status" && record.event?.action === "turn-start");
 }
 
 function findTurnAttemptIndex(attempts, turn, time) {
@@ -2814,11 +2834,14 @@ function deriveTestStatusFromCommand(record) {
   const item = record.event?.item ?? {};
   const command = unwrapCommand(item.command ?? "");
   const output = cleanText(item.aggregated_output);
-  if (!output || !parseAgentTestCommand(command)) {
+  const commandInfo = parseAgentTestCommand(command);
+  if (!output || !commandInfo) {
     return null;
   }
 
-  const summary = parseTestReportSummary(output);
+  const summary = commandInfo.kind === "selected"
+    ? parseLastTestReportSummary(output)
+    : parseTestReportSummary(output);
   if (!summary) {
     return null;
   }
@@ -2937,28 +2960,38 @@ function classifyFailureLine(line) {
 }
 
 function parseTestReportSummary(output) {
+  return parseTestReportSummaries(output)[0] ?? null;
+}
+
+function parseLastTestReportSummary(output) {
+  return parseTestReportSummaries(output).at(-1) ?? null;
+}
+
+function parseTestReportSummaries(output) {
+  const summaries = [];
   const allPassed = output.match(
     /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \((\d+)\s*\/\s*(\d+)\))? =====$/m,
   );
   if (allPassed) {
     const testsPassed = parseOptionalInt(allPassed[1]);
     const testsTotal = parseOptionalInt(allPassed[2]);
-    return {
+    summaries.push({
       allTestsPassed: true,
       testsPassed: testsPassed ?? testsTotal ?? 0,
       testsTotal: testsTotal ?? testsPassed ?? 0,
-    };
+    });
   }
 
-  const summary = output.match(/^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$/m);
-  if (!summary) {
-    return null;
+  const summaryRegex = /^===== TEST SUMMARY: (\d+)\s*\/\s*(\d+) TESTS PASSED =====$|^(\d+)\s*\/\s*(\d+)\s+TESTS PASSED$/gm;
+  let summary;
+  while ((summary = summaryRegex.exec(String(output ?? ""))) !== null) {
+    summaries.push({
+      allTestsPassed: false,
+      testsPassed: Number.parseInt(summary[1] ?? summary[3], 10),
+      testsTotal: Number.parseInt(summary[2] ?? summary[4], 10),
+    });
   }
-  return {
-    allTestsPassed: false,
-    testsPassed: Number.parseInt(summary[1], 10),
-    testsTotal: Number.parseInt(summary[2], 10),
-  };
+  return summaries;
 }
 
 function parseOptionalInt(value) {
@@ -2988,6 +3021,7 @@ function buildAgentTestProgressState(records) {
     latest: null,
   };
   const byTurn = new Map();
+  const testReportLogCommands = new Map();
 
   for (const record of records) {
     seedAgentTestProgressTracker(tracker, record);
@@ -3006,7 +3040,9 @@ function buildAgentTestProgressState(records) {
       continue;
     }
 
-    const commandInfo = parseAgentTestCommand(item.command ?? "");
+    rememberTestReportLogCommands(testReportLogCommands, record, item.command ?? "");
+    const commandInfo = parseAgentTestCommand(item.command ?? "") ??
+      inferAgentTestCommandFromReferencedLog(testReportLogCommands, record, item.command ?? "");
     if (!commandInfo) {
       continue;
     }
@@ -3437,19 +3473,11 @@ function parseAgentTestCommand(command) {
   if (hasProgressUnsafeShellOperator(text)) {
     return null;
   }
-  let match = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
-  if (match) {
-    const number = Number.parseInt(match[1], 10);
-    return {
-      kind: "through",
-      stage: `pa${number}`,
-      stageNumber: number,
-      target: `test-report-through-pa${number}`,
-      hasSubset: false,
-    };
-  }
+  return parseAgentTestCommandTarget(text);
+}
 
-  match = text.match(/\bmake\b[\s\S]*?\btest-report\b/);
+function parseAgentTestCommandTarget(text) {
+  let match = text.match(/\bmake\b[\s\S]*?\btest-report\b/);
   if (match) {
     const stages = parseActiveTestReportStages(text);
     if (stages.length > 0) {
@@ -3463,6 +3491,18 @@ function parseAgentTestCommand(command) {
         hasSubset: hasTestGlob(text),
       };
     }
+  }
+
+  match = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
+  if (match) {
+    const number = Number.parseInt(match[1], 10);
+    return {
+      kind: "through",
+      stage: `pa${number}`,
+      stageNumber: number,
+      target: `test-report-through-pa${number}`,
+      hasSubset: false,
+    };
   }
 
   match = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
@@ -3479,8 +3519,117 @@ function parseAgentTestCommand(command) {
   };
 }
 
+function rememberTestReportLogCommands(logCommands, record, command) {
+  const text = unwrapCommand(command).replace(/\s+\(continued session \d+\)\s*$/, "");
+  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
+    return;
+  }
+  const commandInfo = parseAgentTestCommandTarget(text);
+  if (!commandInfo) {
+    return;
+  }
+  for (const logPath of extractRedirectedTempLogPaths(text)) {
+    logCommands.set(testReportLogCommandKey(record, logPath), {
+      ...commandInfo,
+      target: `${commandInfo.target} via ${logPath}`,
+    });
+  }
+}
+
+function inferAgentTestCommandFromReferencedLog(logCommands, record, command) {
+  for (const logPath of extractReferencedTempLogPaths(command)) {
+    const commandInfo = logCommands.get(testReportLogCommandKey(record, logPath));
+    if (commandInfo) {
+      return commandInfo;
+    }
+  }
+  return null;
+}
+
+function testReportLogCommandKey(record, logPath) {
+  return [
+    Number.isInteger(record?.turnNumber) ? record.turnNumber : "",
+    normalizeTempLogPath(logPath),
+  ].join("\0");
+}
+
+function extractRedirectedTempLogPaths(text) {
+  const paths = [];
+  const regex = /(?:^|[\s;])(?:\d?>{1,2}|&>{1,2})\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
+  let match;
+  while ((match = regex.exec(String(text ?? ""))) !== null) {
+    const logPath = normalizeTempLogPath(match[1] ?? match[2] ?? match[3] ?? "");
+    if (logPath) {
+      paths.push(logPath);
+    }
+  }
+  return [...new Set(paths)];
+}
+
+function extractReferencedTempLogPaths(text) {
+  const paths = [...String(text ?? "").matchAll(/\/tmp\/[A-Za-z0-9._/-]+\.log\b/g)]
+    .map((match) => normalizeTempLogPath(match[0]))
+    .filter(Boolean);
+  return [...new Set(paths)];
+}
+
+function normalizeTempLogPath(logPath) {
+  const path = String(logPath ?? "").trim();
+  return /^\/tmp\/[A-Za-z0-9._/-]+\.log$/.test(path) ? path : "";
+}
+
 function hasProgressUnsafeShellOperator(text) {
-  return /[|<>]/.test(text);
+  const scanText = shellOperatorScanText(text);
+  if (!/[|<>]/.test(scanText)) {
+    return false;
+  }
+  return !isSafeFilteredTestReportCommand(text);
+}
+
+function isSafeFilteredTestReportCommand(text) {
+  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
+    return false;
+  }
+  const scanText = shellOperatorScanText(text);
+  const withoutSafeRedirects = scanText
+    .replace(/\s*\d?>&\d+/g, "")
+    .replace(/\s*\d?>\s*\/dev\/null\b/g, "");
+  if (/[<>]/.test(withoutSafeRedirects)) {
+    return false;
+  }
+  const pipeSegments = scanText.split("|").slice(1);
+  if (pipeSegments.length === 0) {
+    return true;
+  }
+  return pipeSegments.every((segment) =>
+    /^\s*(grep|egrep|fgrep|sed|tail|head|awk|sort|uniq|wc|cat|cut|tr)\b/.test(segment));
+}
+
+function shellOperatorScanText(text) {
+  const value = String(text ?? "");
+  let result = "";
+  let quote = null;
+  let escaped = false;
+  for (const char of value) {
+    if (quote) {
+      if (quote === '"' && escaped) {
+        escaped = false;
+      } else if (quote === '"' && char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      result += " ";
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      result += " ";
+      continue;
+    }
+    result += char;
+  }
+  return result;
 }
 
 function parseActiveTestReportStages(text) {
@@ -3552,7 +3701,8 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   if (!summary) {
     return null;
   }
-  if (!throughOutputPriorStagesPass(output, commandInfo.stageNumber)) {
+  const stageSections = parseStageSections(output);
+  if (stageSections.length > 0 && !throughOutputPriorStagesPass(output, commandInfo.stageNumber)) {
     return null;
   }
   const priorTotal = knownPriorStageTotal(tracker, commandInfo.stageNumber);
@@ -3610,7 +3760,7 @@ function buildAgentTestProgressObservation(record, commandInfo, progress) {
 }
 
 function inferSelectedReportSummaryProgress(output, commandInfo, tracker, exitCode) {
-  const summary = parseTestReportSummary(output);
+  const summary = parseLastTestReportSummary(output);
   if (!summary) {
     return null;
   }
@@ -3656,6 +3806,9 @@ function inferMultiStageSelectedProgress(output, stages, summary, tracker) {
   const failuresByStage = new Map(
     parseStageSections(output).map((section) => [section.name, countStageFailureLines(section.body)]),
   );
+  if (!summary.allTestsPassed && failuresByStage.size === 0) {
+    return [];
+  }
   const inferred = [];
   let knownTotal = 0;
   const unknownStages = [];
@@ -5407,7 +5560,7 @@ function runDocGroupHtml(group, selectedDoc) {
 
 function shortDocName(name) {
   return String(name ?? "")
-    .replace(/^(trusted|phases|fable|opus|spark)\./, "")
+    .replace(/^(trusted|fable|opus|mini)\./, "")
     .replace(/\.md$/i, "")
     .replace(/\.json$/i, "");
 }

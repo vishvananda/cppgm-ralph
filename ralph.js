@@ -5653,6 +5653,9 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
   const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
   const latestGoalStatus = latestGoalEvent?.status ?? "";
   if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
+    if (latestGoalStatus === "active" && hasFinalMessage) {
+      return { status: "complete" };
+    }
     const ageMs = Number.isFinite(latestLifecycleEvent.timestampMs)
       ? Date.now() - latestLifecycleEvent.timestampMs
       : CODEX_GOAL_CONTINUATION_GRACE_MS;
@@ -6598,6 +6601,21 @@ function buildRalphGoalEventRecord({ action, goal, threadId, turnNumber, testSta
   };
 }
 
+function buildRalphTurnRestartEventRecord({ threadId, turnNumber, previousTurnsCompleted, reason }) {
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.turn-restart",
+    event: {
+      type: "ralph.turn-restart",
+      sender: "ralph",
+      previousTurnsCompleted,
+      reason,
+    },
+  };
+}
+
 function applyThreadIdToPendingRecords(eventRecords, threadId) {
   if (!threadId) {
     return;
@@ -6981,6 +6999,12 @@ async function reconcileTurnsCompletedWithEventLog(state) {
       `Event log already contains turn ${latestEventTurn}; ` +
         `using it instead of state turnsCompleted ${stateTurn}.`,
     );
+    await appendRalphEventRecord(buildRalphTurnRestartEventRecord({
+      threadId: state?.threadId ?? null,
+      turnNumber: latestEventTurn,
+      previousTurnsCompleted: stateTurn,
+      reason: "event-log-ahead-of-state",
+    }));
     state.turnsCompleted = latestEventTurn;
     return latestEventTurn;
   }
