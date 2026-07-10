@@ -369,6 +369,10 @@ function isWaitCommandItem(item) {
   return item?.type === "command_execution" && waitCommandCellId(item.command) != null;
 }
 
+function isApplyPatchCommand(command) {
+  return unwrapCommand(command).trim() === "apply_patch";
+}
+
 function asyncCellIdFromOutput(output) {
   const chunkSessionId = codexCommandOutputChunks(output)
     .map((chunk) => chunk.session_id)
@@ -938,14 +942,17 @@ function buildDisplayEntries(records) {
     const item = record.event?.item;
     const isCmd = item?.type === "command_execution";
     const waitCellId = isCmd ? waitCommandCellId(item.command) : null;
+    const commandNoise = Boolean(waitCellId) || (isCmd && isApplyPatchCommand(item.command));
 
     if (record.eventType === "item.started" && isCmd) {
       const entry = { kind: "command", startRecord: record, endRecord: null };
-      if (waitCellId) {
+      if (commandNoise) {
         entry.noise = true;
+      }
+      if (waitCellId) {
         entry.asyncWaitCellId = waitCellId;
       }
-      if (!waitCellId || !hideNoise) {
+      if (!commandNoise || !hideNoise) {
         entries.push(entry);
       }
       if (item.id) cmdStarts.set(item.id, entry);
@@ -978,10 +985,10 @@ function buildDisplayEntries(records) {
           kind: "command",
           startRecord: null,
           endRecord: record,
-          noise: Boolean(waitCellId),
+          noise: commandNoise,
           asyncWaitCellId: waitCellId,
         };
-        if (!waitCellId || !hideNoise) {
+        if (!commandNoise || !hideNoise) {
           entries.push(entry);
         }
         registerAsyncEntry(entry);
