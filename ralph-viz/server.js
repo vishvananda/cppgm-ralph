@@ -30,9 +30,9 @@ const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_CACHE_VERSION = 24;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 5;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 6;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 5;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 6;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -458,6 +458,7 @@ function filterEventsToWindows(events, selectedWindows) {
 
 function progressEventsFromRunEvents(events) {
   const progressEvents = [];
+  const commandsByAsyncCell = new Map();
   for (const record of events) {
     const item = record?.event?.item;
     if (record?.eventType !== "item.completed" || item?.type !== "command_execution") {
@@ -466,14 +467,22 @@ function progressEventsFromRunEvents(events) {
     if (!Number.isInteger(record.turnNumber) || record.turnNumber <= 0) {
       continue;
     }
-    const output = textValue(item.aggregated_output);
+    const output = commandOutputText(item.aggregated_output);
     if (!output) {
       continue;
     }
+    const waitCellId = waitCommandCellId(item.command);
+    const outputCellId = commandOutputSessionId(item.aggregated_output);
+    if (outputCellId && !waitCellId) {
+      commandsByAsyncCell.set(outputCellId, String(item.command ?? ""));
+    }
+    const command = waitCellId && commandsByAsyncCell.has(waitCellId)
+      ? `${commandsByAsyncCell.get(waitCellId)} (continued session ${waitCellId})`
+      : String(item.command ?? "");
     const observation = progressObservationFromSessionOutput(
       output,
       record.recordedAt,
-      String(item.command ?? ""),
+      command,
     );
     if (!observation) {
       continue;
@@ -494,6 +503,29 @@ function progressEventsFromRunEvents(events) {
     });
   }
   return compactBestProgressEvents(progressEvents);
+}
+
+function waitCommandCellId(command) {
+  const text = String(command ?? "");
+  const continuedMatch = text.match(/\(continued session ([^)]+)\)\s*$/);
+  if (continuedMatch) {
+    return continuedMatch[1];
+  }
+  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?\bsession_id\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
+  if (writeStdinMatch) {
+    return writeStdinMatch[1] ?? writeStdinMatch[2] ?? writeStdinMatch[3] ?? null;
+  }
+  const waitMatch = text.match(/^wait\s+(\{.*\})$/s);
+  if (!waitMatch) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(waitMatch[1]);
+    return parsed?.cell_id != null ? String(parsed.cell_id) : null;
+  } catch (_) {
+    const fallback = text.match(/"cell_id"\s*:\s*"([^"]+)"/);
+    return fallback ? fallback[1] : null;
+  }
 }
 
 async function readShapeUsage(shape, selected = {}) {
@@ -4088,6 +4120,7 @@ function codexSessionProgressCachePath(filePath) {
 async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
   const observations = [];
   const callsById = new Map();
+  const commandsBySessionId = new Map();
   const stream = createReadStream(filePath, { encoding: "utf8", start: Math.max(0, startOffset) });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const rawLine of lines) {
@@ -4116,7 +4149,7 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
         callsById.set(payload.call_id, {
           name: payload.name,
           args,
-          command: formatFunctionCall(payload, args, { commandsBySessionId: new Map() }),
+          command: formatFunctionCall(payload, args, { commandsBySessionId }),
         });
       }
       continue;
@@ -4127,10 +4160,17 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
     ) {
       continue;
     }
+    const call = callsById.get(payload.call_id) ?? null;
+    if (isExecCallName(call?.name)) {
+      const sessionId = parseRunningSessionId(payload.output);
+      if (sessionId && call.command) {
+        commandsBySessionId.set(sessionId, call.command);
+      }
+    }
     if (!line.includes("TEST SUMMARY") && !line.includes("ALL TESTS PASSED SUCCESSFULLY")) {
       continue;
     }
-    const command = callsById.get(payload.call_id)?.command ?? "";
+    const command = call?.command ?? "";
     const observation = progressObservationFromCodexOutputRecord(record, command);
     if (observation) {
       observations.push(observation);
@@ -4147,7 +4187,7 @@ function progressObservationFromCodexOutputRecord(record, command = "") {
   ) {
     return null;
   }
-  const output = textValue(record.payload.output);
+  const output = commandOutputText(record.payload.output);
   return progressObservationFromSessionOutput(output, record.timestamp, command);
 }
 
@@ -4303,7 +4343,7 @@ function inferSingleSessionProgressStageFromCommand(command) {
 }
 
 function parseSingleStageProgressCommand(command) {
-  const text = String(command ?? "");
+  const text = String(command ?? "").replace(/\s+\(continued session \d+\)\s*$/, "");
   if (hasProgressUnsafeShellOperator(text)) {
     return null;
   }
@@ -5220,7 +5260,7 @@ function formatFunctionCall(payload, args, context) {
     return "apply_patch";
   }
   if (payload.name === "exec" && typeof args.input === "string") {
-    return formatCustomExecCommand(args.input);
+    return formatCustomExecCommand(args.input, context);
   }
   return `${payload.name} ${JSON.stringify(args)}`;
 }
@@ -5229,7 +5269,11 @@ function isExecCallName(name) {
   return name === "exec_command" || name === "exec";
 }
 
-function formatCustomExecCommand(input) {
+function formatCustomExecCommand(input, context = null) {
+  const writeStdinArgs = extractToolWriteStdinArgs(input);
+  if (writeStdinArgs) {
+    return formatWriteStdinCommand(writeStdinArgs, context ?? {});
+  }
   const commands = extractToolExecCommands(input);
   if (commands.length === 1) {
     return commands[0];
@@ -5244,6 +5288,24 @@ function formatCustomExecCommand(input) {
     return "update_goal";
   }
   return `exec ${input}`;
+}
+
+function extractToolWriteStdinArgs(input) {
+  const text = String(input ?? "");
+  const match = text.match(/\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/);
+  if (!match) {
+    return null;
+  }
+  return {
+    session_id: jsObjectPropertyValue(match[1], "session_id"),
+    chars: jsObjectPropertyValue(match[1], "chars") ?? "",
+  };
+}
+
+function jsObjectPropertyValue(text, propertyName) {
+  const pattern = new RegExp(`\\b${propertyName}\\s*:\\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))`);
+  const match = String(text ?? "").match(pattern);
+  return match ? match[1] ?? match[2] ?? match[3] ?? null : null;
 }
 
 function extractToolExecCommands(input) {
@@ -5291,6 +5353,12 @@ function formatWriteStdinCommand(args, context) {
 }
 
 function parseRunningSessionId(output) {
+  const chunkSessionId = codexCommandOutputChunks(output)
+    .map((chunk) => chunk.session_id)
+    .find((sessionId) => sessionId != null && sessionId !== "");
+  if (chunkSessionId != null) {
+    return String(chunkSessionId);
+  }
   const match = textValue(output).match(/Process running with session ID (\d+)/);
   return match ? match[1] : null;
 }
@@ -5312,6 +5380,12 @@ function truncateMiddle(value, maxLength) {
 }
 
 function parseFunctionOutputExitCode(output) {
+  const chunkExitCode = codexCommandOutputChunks(output)
+    .map((chunk) => chunk.exit_code)
+    .find((exitCode) => Number.isFinite(exitCode));
+  if (Number.isFinite(chunkExitCode)) {
+    return chunkExitCode;
+  }
   const match = textValue(output).match(/Process exited with code (-?\d+)/);
   return match ? Number.parseInt(match[1], 10) : null;
 }
@@ -5327,6 +5401,9 @@ function textValue(value) {
     return joinTextParts(value.map((entry) => textValue(entry)));
   }
   if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      return value.output;
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -5342,7 +5419,26 @@ function textValue(value) {
   return String(value);
 }
 
+function commandOutputText(value) {
+  const chunks = codexCommandOutputChunks(value);
+  if (chunks.length > 0) {
+    return joinTextParts(chunks.map((chunk) => chunk.output));
+  }
+  return textValue(value);
+}
+
+function commandOutputSessionId(value) {
+  const sessionId = codexCommandOutputChunks(value)
+    .map((chunk) => chunk.session_id)
+    .find((candidate) => candidate != null && candidate !== "");
+  return sessionId == null ? null : String(sessionId);
+}
+
 function structuredTextStringValue(value) {
+  const envelope = codexCommandOutputEnvelopeText(value);
+  if (envelope != null) {
+    return envelope;
+  }
   const trimmed = value.trim();
   if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
     return value;
@@ -5353,7 +5449,89 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) ? textValue(parsed) : value;
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+    ? textValue(parsed)
+    : value;
+}
+
+function codexCommandOutputEnvelopeText(value) {
+  const text = String(value ?? "");
+  const match = text.match(/^([\s\S]*?\bOutput:\r?\n)(\{[\s\S]*\})\s*$/);
+  if (!match) {
+    return null;
+  }
+  const chunk = parseCodexCommandOutputChunk(match[2]);
+  return chunk ? `${match[1]}${chunk.output}` : null;
+}
+
+function codexCommandOutputChunks(value) {
+  const chunks = [];
+  collectCodexCommandOutputChunks(value, chunks);
+  return chunks;
+}
+
+function collectCodexCommandOutputChunks(value, chunks) {
+  if (value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    const direct = parseCodexCommandOutputChunk(value);
+    if (direct) {
+      chunks.push(direct);
+      return;
+    }
+    const envelope = String(value).match(/\bOutput:\s*(\{[\s\S]*\})\s*$/);
+    const nested = envelope ? parseCodexCommandOutputChunk(envelope[1]) : null;
+    if (nested) {
+      chunks.push(nested);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectCodexCommandOutputChunks(entry, chunks);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      chunks.push(value);
+      return;
+    }
+    if (typeof value.text === "string") {
+      collectCodexCommandOutputChunks(value.text, chunks);
+    }
+    if (typeof value.output === "string") {
+      collectCodexCommandOutputChunks(value.output, chunks);
+    }
+  }
+}
+
+function parseCodexCommandOutputChunk(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed[0] !== "{") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isCodexCommandOutputChunk(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isCodexCommandOutputChunk(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.output === "string" &&
+      (typeof value.chunk_id === "string" ||
+        Object.prototype.hasOwnProperty.call(value, "wall_time_seconds") ||
+        Object.prototype.hasOwnProperty.call(value, "session_id") ||
+        Object.prototype.hasOwnProperty.call(value, "exit_code") ||
+        Object.prototype.hasOwnProperty.call(value, "original_token_count")),
+  );
 }
 
 function isStructuredTextPayload(value) {

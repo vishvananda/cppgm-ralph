@@ -6743,6 +6743,9 @@ function textForPreview(value) {
     return joinTextParts(value.map((entry) => textForPreview(entry)));
   }
   if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      return value.output;
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -6759,6 +6762,10 @@ function textForPreview(value) {
 }
 
 function structuredTextStringValue(value) {
+  const envelope = codexCommandOutputEnvelopeText(value);
+  if (envelope != null) {
+    return envelope;
+  }
   const trimmed = value.trim();
   if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
     return value;
@@ -6769,7 +6776,46 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) ? textForPreview(parsed) : value;
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+    ? textForPreview(parsed)
+    : value;
+}
+
+function codexCommandOutputEnvelopeText(value) {
+  const text = String(value ?? "");
+  const match = text.match(/^([\s\S]*?\bOutput:\r?\n)(\{[\s\S]*\})\s*$/);
+  if (!match) {
+    return null;
+  }
+  const chunk = parseCodexCommandOutputChunk(match[2]);
+  return chunk ? `${match[1]}${chunk.output}` : null;
+}
+
+function parseCodexCommandOutputChunk(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed[0] !== "{") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isCodexCommandOutputChunk(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isCodexCommandOutputChunk(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.output === "string" &&
+      (typeof value.chunk_id === "string" ||
+        Object.prototype.hasOwnProperty.call(value, "wall_time_seconds") ||
+        Object.prototype.hasOwnProperty.call(value, "session_id") ||
+        Object.prototype.hasOwnProperty.call(value, "exit_code") ||
+        Object.prototype.hasOwnProperty.call(value, "original_token_count")),
+  );
 }
 
 function isStructuredTextPayload(value) {

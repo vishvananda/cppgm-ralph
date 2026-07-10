@@ -383,7 +383,7 @@ function formatFunctionCall(payload, args, context) {
     return "apply_patch";
   }
   if (payload.name === "exec" && typeof args.input === "string") {
-    return formatCustomExecCommand(args.input);
+    return formatCustomExecCommand(args.input, context);
   }
   return `${payload.name} ${JSON.stringify(args)}`;
 }
@@ -392,7 +392,11 @@ function isExecCallName(name) {
   return name === "exec_command" || name === "exec";
 }
 
-function formatCustomExecCommand(input) {
+function formatCustomExecCommand(input, context = null) {
+  const writeStdinArgs = extractToolWriteStdinArgs(input);
+  if (writeStdinArgs) {
+    return formatWriteStdinCommand(writeStdinArgs, context ?? {});
+  }
   const commands = extractToolExecCommands(input);
   if (commands.length === 1) {
     return commands[0];
@@ -407,6 +411,24 @@ function formatCustomExecCommand(input) {
     return "update_goal";
   }
   return `exec ${input}`;
+}
+
+function extractToolWriteStdinArgs(input) {
+  const text = String(input ?? "");
+  const match = text.match(/\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/);
+  if (!match) {
+    return null;
+  }
+  return {
+    session_id: jsObjectPropertyValue(match[1], "session_id"),
+    chars: jsObjectPropertyValue(match[1], "chars") ?? "",
+  };
+}
+
+function jsObjectPropertyValue(text, propertyName) {
+  const pattern = new RegExp(`\\b${propertyName}\\s*:\\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))`);
+  const match = String(text ?? "").match(pattern);
+  return match ? match[1] ?? match[2] ?? match[3] ?? null : null;
 }
 
 function extractToolExecCommands(input) {
@@ -454,6 +476,12 @@ function formatWriteStdinCommand(args, context) {
 }
 
 function parseRunningSessionId(output) {
+  const chunkSessionId = codexCommandOutputChunks(output)
+    .map((chunk) => chunk.session_id)
+    .find((sessionId) => sessionId != null && sessionId !== "");
+  if (chunkSessionId != null) {
+    return String(chunkSessionId);
+  }
   const match = textValue(output).match(/Process running with session ID (\d+)/);
   return match ? match[1] : null;
 }
@@ -475,6 +503,12 @@ function truncateMiddle(value, maxLength) {
 }
 
 function parseFunctionOutputExitCode(output) {
+  const chunkExitCode = codexCommandOutputChunks(output)
+    .map((chunk) => chunk.exit_code)
+    .find((exitCode) => Number.isFinite(exitCode));
+  if (Number.isFinite(chunkExitCode)) {
+    return chunkExitCode;
+  }
   const match = textValue(output).match(/Process exited with code (-?\d+)/);
   return match ? Number.parseInt(match[1], 10) : null;
 }
@@ -490,6 +524,9 @@ function textValue(value) {
     return joinTextParts(value.map((entry) => textValue(entry)));
   }
   if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      return value.output;
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -506,6 +543,10 @@ function textValue(value) {
 }
 
 function structuredTextStringValue(value) {
+  const envelope = codexCommandOutputEnvelopeText(value);
+  if (envelope != null) {
+    return envelope;
+  }
   const trimmed = value.trim();
   if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
     return value;
@@ -516,7 +557,89 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) ? textValue(parsed) : value;
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+    ? textValue(parsed)
+    : value;
+}
+
+function codexCommandOutputEnvelopeText(value) {
+  const text = String(value ?? "");
+  const match = text.match(/^([\s\S]*?\bOutput:\r?\n)(\{[\s\S]*\})\s*$/);
+  if (!match) {
+    return null;
+  }
+  const chunk = parseCodexCommandOutputChunk(match[2]);
+  return chunk ? `${match[1]}${chunk.output}` : null;
+}
+
+function codexCommandOutputChunks(value) {
+  const chunks = [];
+  collectCodexCommandOutputChunks(value, chunks);
+  return chunks;
+}
+
+function collectCodexCommandOutputChunks(value, chunks) {
+  if (value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    const direct = parseCodexCommandOutputChunk(value);
+    if (direct) {
+      chunks.push(direct);
+      return;
+    }
+    const envelope = String(value).match(/\bOutput:\s*(\{[\s\S]*\})\s*$/);
+    const nested = envelope ? parseCodexCommandOutputChunk(envelope[1]) : null;
+    if (nested) {
+      chunks.push(nested);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectCodexCommandOutputChunks(entry, chunks);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      chunks.push(value);
+      return;
+    }
+    if (typeof value.text === "string") {
+      collectCodexCommandOutputChunks(value.text, chunks);
+    }
+    if (typeof value.output === "string") {
+      collectCodexCommandOutputChunks(value.output, chunks);
+    }
+  }
+}
+
+function parseCodexCommandOutputChunk(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed[0] !== "{") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isCodexCommandOutputChunk(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isCodexCommandOutputChunk(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.output === "string" &&
+      (typeof value.chunk_id === "string" ||
+        Object.prototype.hasOwnProperty.call(value, "wall_time_seconds") ||
+        Object.prototype.hasOwnProperty.call(value, "session_id") ||
+        Object.prototype.hasOwnProperty.call(value, "exit_code") ||
+        Object.prototype.hasOwnProperty.call(value, "original_token_count")),
+  );
 }
 
 function isStructuredTextPayload(value) {

@@ -178,6 +178,9 @@ function textValue(value) {
     return joinTextParts(value.map((entry) => textValue(entry)));
   }
   if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      return value.output;
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -193,7 +196,19 @@ function textValue(value) {
   return String(value);
 }
 
+function commandOutputText(value) {
+  const chunks = codexCommandOutputChunks(value);
+  if (chunks.length > 0) {
+    return joinTextParts(chunks.map((chunk) => chunk.output));
+  }
+  return textValue(value);
+}
+
 function structuredTextStringValue(value) {
+  const envelope = codexCommandOutputEnvelopeText(value);
+  if (envelope != null) {
+    return envelope;
+  }
   const trimmed = value.trim();
   if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
     return value;
@@ -204,7 +219,89 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) ? textValue(parsed) : value;
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+    ? textValue(parsed)
+    : value;
+}
+
+function codexCommandOutputEnvelopeText(value) {
+  const text = String(value ?? "");
+  const match = text.match(/^([\s\S]*?\bOutput:\r?\n)(\{[\s\S]*\})\s*$/);
+  if (!match) {
+    return null;
+  }
+  const chunk = parseCodexCommandOutputChunk(match[2]);
+  return chunk ? `${match[1]}${chunk.output}` : null;
+}
+
+function codexCommandOutputChunks(value) {
+  const chunks = [];
+  collectCodexCommandOutputChunks(value, chunks);
+  return chunks;
+}
+
+function collectCodexCommandOutputChunks(value, chunks) {
+  if (value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    const direct = parseCodexCommandOutputChunk(value);
+    if (direct) {
+      chunks.push(direct);
+      return;
+    }
+    const envelope = String(value).match(/\bOutput:\s*(\{[\s\S]*\})\s*$/);
+    const nested = envelope ? parseCodexCommandOutputChunk(envelope[1]) : null;
+    if (nested) {
+      chunks.push(nested);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectCodexCommandOutputChunks(entry, chunks);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    if (isCodexCommandOutputChunk(value)) {
+      chunks.push(value);
+      return;
+    }
+    if (typeof value.text === "string") {
+      collectCodexCommandOutputChunks(value.text, chunks);
+    }
+    if (typeof value.output === "string") {
+      collectCodexCommandOutputChunks(value.output, chunks);
+    }
+  }
+}
+
+function parseCodexCommandOutputChunk(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed[0] !== "{") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isCodexCommandOutputChunk(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isCodexCommandOutputChunk(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.output === "string" &&
+      (typeof value.chunk_id === "string" ||
+        Object.prototype.hasOwnProperty.call(value, "wall_time_seconds") ||
+        Object.prototype.hasOwnProperty.call(value, "session_id") ||
+        Object.prototype.hasOwnProperty.call(value, "exit_code") ||
+        Object.prototype.hasOwnProperty.call(value, "original_token_count")),
+  );
 }
 
 function isStructuredTextPayload(value) {
@@ -247,6 +344,14 @@ function unwrapCommand(command) {
 
 function waitCommandCellId(command) {
   const text = unwrapCommand(command);
+  const continuedMatch = text.match(/\(continued session ([^)]+)\)\s*$/);
+  if (continuedMatch) {
+    return continuedMatch[1];
+  }
+  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?\bsession_id\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
+  if (writeStdinMatch) {
+    return writeStdinMatch[1] ?? writeStdinMatch[2] ?? writeStdinMatch[3] ?? null;
+  }
   const match = text.match(/^wait\s+(\{.*\})$/s);
   if (!match) {
     return null;
@@ -265,15 +370,30 @@ function isWaitCommandItem(item) {
 }
 
 function asyncCellIdFromOutput(output) {
+  const chunkSessionId = codexCommandOutputChunks(output)
+    .map((chunk) => chunk.session_id)
+    .find((sessionId) => sessionId != null && sessionId !== "");
+  if (chunkSessionId != null) {
+    return String(chunkSessionId);
+  }
   const match = cleanText(output).match(/Script running with cell ID\s+([A-Za-z0-9._-]+)/);
   return match ? match[1] : null;
 }
 
 function asyncOutputCompleted(output) {
+  const chunks = codexCommandOutputChunks(output);
+  if (chunks.length > 0) {
+    return chunks.some((chunk) => Number.isFinite(chunk.exit_code));
+  }
   return /^Script completed\b/m.test(cleanText(output));
 }
 
 function asyncOutputStillRunning(output) {
+  const chunks = codexCommandOutputChunks(output);
+  if (chunks.length > 0) {
+    return chunks.some((chunk) => chunk.session_id != null && chunk.session_id !== "") &&
+      !chunks.some((chunk) => Number.isFinite(chunk.exit_code));
+  }
   return /^Script running with cell ID\b/m.test(cleanText(output));
 }
 
@@ -804,7 +924,7 @@ function buildDisplayEntries(records) {
   const hideNoise = hideNoiseToggle?.checked ?? true;
 
   const registerAsyncEntry = (entry) => {
-    const output = cleanText(entry.endRecord?.event?.item?.aggregated_output);
+    const output = entry.endRecord?.event?.item?.aggregated_output;
     const cellId = asyncCellIdFromOutput(output);
     if (!cellId || isWaitCommandItem(entry.endRecord?.event?.item)) {
       return;
@@ -1012,23 +1132,37 @@ function renderCommandCard(entry) {
 }
 
 function commandEntryOutput(entry) {
-  const endOutput = cleanText(entry.endRecord?.event?.item?.aggregated_output);
-  const pollOutputs = (entry.asyncPollRecords ?? [])
-    .map((record) => cleanText(record.event?.item?.aggregated_output))
-    .filter(Boolean);
-  if (!pollOutputs.length) {
-    return endOutput;
+  const outputRecords = [
+    entry.endRecord?.event?.item?.aggregated_output,
+    ...(entry.asyncPollRecords ?? []).map((record) => record.event?.item?.aggregated_output),
+  ].filter((output) => output != null);
+  if (!outputRecords.length) {
+    return "";
   }
-  const usefulPollOutputs = [...new Set(pollOutputs.filter((output) => !asyncOutputStillRunning(output)))];
-  if (usefulPollOutputs.length) {
-    return usefulPollOutputs.join("\n");
+  const usefulOutputs = [];
+  for (const rawOutput of outputRecords) {
+    const text = commandOutputText(rawOutput).trim();
+    if (!text) {
+      continue;
+    }
+    if (asyncOutputStillRunning(rawOutput) && codexCommandOutputChunks(rawOutput).length === 0) {
+      continue;
+    }
+    usefulOutputs.push(text);
   }
-  return endOutput;
+  const uniqueOutputs = [...new Set(usefulOutputs)];
+  if (uniqueOutputs.length) {
+    return uniqueOutputs.join("\n");
+  }
+  return commandOutputText(outputRecords[0]).trim();
 }
 
 function commandEntryExitCode(entry) {
   const item = entry.asyncCompletedRecord?.event?.item ?? entry.endRecord?.event?.item ?? {};
-  return item.exit_code;
+  const chunkExitCode = codexCommandOutputChunks(item.aggregated_output)
+    .map((chunk) => chunk.exit_code)
+    .find((exitCode) => Number.isFinite(exitCode));
+  return Number.isFinite(chunkExitCode) ? chunkExitCode : item.exit_code;
 }
 
 function commandEntryRecordedAt(entry) {
@@ -3038,7 +3172,7 @@ function normalizeStageName(stage) {
 function deriveTestStatusFromCommand(record) {
   const item = record.event?.item ?? {};
   const command = unwrapCommand(item.command ?? "");
-  const output = cleanText(item.aggregated_output);
+  const output = commandOutputText(item.aggregated_output).trim();
   const commandInfo = parseAgentTestCommand(command);
   if (!output || !commandInfo) {
     return null;
@@ -3227,6 +3361,7 @@ function buildAgentTestProgressState(records) {
   };
   const byTurn = new Map();
   const testReportLogCommands = new Map();
+  const commandsByAsyncCell = new Map();
 
   for (const record of records) {
     seedAgentTestProgressTracker(tracker, record);
@@ -3245,9 +3380,18 @@ function buildAgentTestProgressState(records) {
       continue;
     }
 
-    rememberTestReportLogCommands(testReportLogCommands, record, item.command ?? "");
-    const commandInfo = parseAgentTestCommand(item.command ?? "") ??
-      inferAgentTestCommandFromReferencedLog(testReportLogCommands, record, item.command ?? "");
+    const waitCellId = waitCommandCellId(item.command);
+    const outputCellId = asyncCellIdFromOutput(item.aggregated_output);
+    if (outputCellId && !waitCellId) {
+      commandsByAsyncCell.set(outputCellId, item.command ?? "");
+    }
+    const commandForProgress = waitCellId && commandsByAsyncCell.has(waitCellId)
+      ? `${commandsByAsyncCell.get(waitCellId)} (continued session ${waitCellId})`
+      : item.command ?? "";
+
+    rememberTestReportLogCommands(testReportLogCommands, record, commandForProgress);
+    const commandInfo = parseAgentTestCommand(commandForProgress) ??
+      inferAgentTestCommandFromReferencedLog(testReportLogCommands, record, commandForProgress);
     if (!commandInfo) {
       continue;
     }
@@ -3849,7 +3993,7 @@ function hasTestGlob(text) {
 
 function deriveAgentTestProgress(record, commandInfo, tracker) {
   const item = record.event?.item ?? {};
-  const output = cleanText(item.aggregated_output);
+  const output = commandOutputText(item.aggregated_output).trim();
   if (!output) {
     return null;
   }
