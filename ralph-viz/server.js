@@ -30,7 +30,7 @@ const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_CACHE_VERSION = 24;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 4;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 5;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 5;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -5321,10 +5321,10 @@ function textValue(value) {
     return "";
   }
   if (typeof value === "string") {
-    return value;
+    return structuredTextStringValue(value);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => textValue(entry)).join("");
+    return joinTextParts(value.map((entry) => textValue(entry)));
   }
   if (typeof value === "object") {
     if (typeof value.text === "string") {
@@ -5340,6 +5340,45 @@ function textValue(value) {
     }
   }
   return String(value);
+}
+
+function structuredTextStringValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
+    return value;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_) {
+    return value;
+  }
+  return isStructuredTextPayload(parsed) ? textValue(parsed) : value;
+}
+
+function isStructuredTextPayload(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every(isStructuredTextPayload);
+  }
+  const type = typeof value?.type === "string" ? value.type : "";
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (type === "input_text" || type === "output_text") &&
+      (typeof value.text === "string" || typeof value.output === "string"),
+  );
+}
+
+function joinTextParts(parts) {
+  const filtered = parts.filter((part) => part !== "");
+  let result = "";
+  for (const part of filtered) {
+    if (result && !/[\r\n]$/.test(result) && !/^[\r\n]/.test(part)) {
+      result += "\n";
+    }
+    result += part;
+  }
+  return result;
 }
 
 function extractAssistantMessageText(payload) {

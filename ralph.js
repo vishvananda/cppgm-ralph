@@ -6737,10 +6737,10 @@ function textForPreview(value) {
     return "";
   }
   if (typeof value === "string") {
-    return value;
+    return structuredTextStringValue(value);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => textForPreview(entry)).join("");
+    return joinTextParts(value.map((entry) => textForPreview(entry)));
   }
   if (typeof value === "object") {
     if (typeof value.text === "string") {
@@ -6756,6 +6756,45 @@ function textForPreview(value) {
     }
   }
   return String(value);
+}
+
+function structuredTextStringValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
+    return value;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_) {
+    return value;
+  }
+  return isStructuredTextPayload(parsed) ? textForPreview(parsed) : value;
+}
+
+function isStructuredTextPayload(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every(isStructuredTextPayload);
+  }
+  const type = typeof value?.type === "string" ? value.type : "";
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (type === "input_text" || type === "output_text") &&
+      (typeof value.text === "string" || typeof value.output === "string"),
+  );
+}
+
+function joinTextParts(parts) {
+  const filtered = parts.filter((part) => part !== "");
+  let result = "";
+  for (const part of filtered) {
+    if (result && !/[\r\n]$/.test(result) && !/^[\r\n]/.test(part)) {
+      result += "\n";
+    }
+    result += part;
+  }
+  return result;
 }
 
 function getEventThreadId(event) {

@@ -24,6 +24,8 @@ const COMBINED_RUN_CARD_LIMIT = 3;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const SCROLL_JUMP_LOG_PX = 80;
 const MOBILE_SCROLL_REFRESH_PAUSE_MS = AUTO_REFRESH_MS;
+const TEXT_SELECTION_REFRESH_PAUSE_MS = AUTO_REFRESH_MS * 2;
+const DROPDOWN_REFRESH_PAUSE_MS = 8000;
 const SCROLL_DEBUG_PARAM = "scrollDebug";
 const SCROLL_DEBUG_STORAGE_KEY = "ralphScrollDebug";
 const SCROLL_DEBUG_DEFAULT = false;
@@ -91,6 +93,7 @@ const state = {
   lastObservedScrollTop: null,
   lastUserScrollAt: 0,
   mobileScrollPauseUntil: 0,
+  interactionRefreshPauseUntil: 0,
   lastProgrammaticScrollAt: 0,
   lastProgrammaticScrollReason: null,
 };
@@ -169,10 +172,10 @@ function textValue(value) {
     return "";
   }
   if (typeof value === "string") {
-    return value;
+    return structuredTextStringValue(value);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => textValue(entry)).join("");
+    return joinTextParts(value.map((entry) => textValue(entry)));
   }
   if (typeof value === "object") {
     if (typeof value.text === "string") {
@@ -188,6 +191,45 @@ function textValue(value) {
     }
   }
   return String(value);
+}
+
+function structuredTextStringValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "[" && trimmed[0] !== "{")) {
+    return value;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_) {
+    return value;
+  }
+  return isStructuredTextPayload(parsed) ? textValue(parsed) : value;
+}
+
+function isStructuredTextPayload(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every(isStructuredTextPayload);
+  }
+  const type = typeof value?.type === "string" ? value.type : "";
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (type === "input_text" || type === "output_text") &&
+      (typeof value.text === "string" || typeof value.output === "string"),
+  );
+}
+
+function joinTextParts(parts) {
+  const filtered = parts.filter((part) => part !== "");
+  let result = "";
+  for (const part of filtered) {
+    if (result && !/[\r\n]$/.test(result) && !/^[\r\n]/.test(part)) {
+      result += "\n";
+    }
+    result += part;
+  }
+  return result;
 }
 
 function unwrapCommand(command) {
@@ -6155,6 +6197,48 @@ function shouldPauseRefreshForMobileScroll() {
   return performance.now() < state.mobileScrollPauseUntil;
 }
 
+function markInteractionRefreshPause(source = "unknown", pauseMs = TEXT_SELECTION_REFRESH_PAUSE_MS) {
+  const until = performance.now() + pauseMs;
+  state.interactionRefreshPauseUntil = Math.max(state.interactionRefreshPauseUntil, until);
+  scrollDebug("interaction-refresh-pause", {
+    source,
+    pauseMs,
+    remainingMs: Math.max(0, Math.round(state.interactionRefreshPauseUntil - performance.now())),
+  });
+}
+
+function selectLikeTarget(target) {
+  const element = target instanceof Element ? target : null;
+  return element?.closest?.("select,[role='combobox'],[aria-haspopup='listbox']") ?? null;
+}
+
+function hasActiveTextSelection() {
+  const selection = window.getSelection?.();
+  if (selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.toString().trim()) {
+    return true;
+  }
+  const active = document.activeElement;
+  if (
+    (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) &&
+    typeof active.selectionStart === "number" &&
+    typeof active.selectionEnd === "number" &&
+    active.selectionEnd > active.selectionStart
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function refreshInteractionPauseReason() {
+  if (hasActiveTextSelection()) {
+    return "text-selection";
+  }
+  if (performance.now() < state.interactionRefreshPauseUntil) {
+    return "interactive-control";
+  }
+  return null;
+}
+
 function scrollDebug(label, extra = {}) {
   if (!state.scrollDebugEnabled) {
     return;
@@ -6343,6 +6427,14 @@ async function refreshActiveRun() {
     });
     return;
   }
+  const interactionPauseReason = refreshInteractionPauseReason();
+  if (interactionPauseReason) {
+    scrollDebug("refresh-skipped-interaction", {
+      reason: interactionPauseReason,
+      remainingMs: Math.max(0, Math.round(state.interactionRefreshPauseUntil - performance.now())),
+    });
+    return;
+  }
   state.refreshInFlight = true;
   try {
     const scrollSnapshot = captureScrollSnapshot();
@@ -6434,15 +6526,39 @@ if (fullViewToggle) {
 window.addEventListener("scroll", handleObservedScroll, { passive: true });
 window.addEventListener("resize", scheduleProgressDockSpaceUpdate, { passive: true });
 window.addEventListener("focusin", (event) => {
+  if (selectLikeTarget(event.target)) {
+    markInteractionRefreshPause("dropdown-focus", DROPDOWN_REFRESH_PAUSE_MS);
+  }
   scrollDebug("focusin", { target: describeElementForScroll(event.target) });
+}, { passive: true });
+window.addEventListener("change", (event) => {
+  if (selectLikeTarget(event.target)) {
+    markInteractionRefreshPause("dropdown-change", AUTO_REFRESH_MS);
+  }
+}, true);
+document.addEventListener("selectionchange", () => {
+  if (hasActiveTextSelection()) {
+    markInteractionRefreshPause("selectionchange", TEXT_SELECTION_REFRESH_PAUSE_MS);
+  }
+});
+window.addEventListener("selectstart", () => {
+  markInteractionRefreshPause("selectstart", TEXT_SELECTION_REFRESH_PAUSE_MS);
 }, { passive: true });
 window.addEventListener("wheel", () => markUserScrollIntent("wheel"), { passive: true });
 window.addEventListener("touchstart", () => markUserScrollIntent("touchstart"), { passive: true });
 window.addEventListener("touchmove", () => markUserScrollIntent("touchmove"), { passive: true });
 window.addEventListener("touchend", () => markMobileScrollPause("touchend"), { passive: true });
 window.addEventListener("touchcancel", () => markMobileScrollPause("touchcancel"), { passive: true });
-window.addEventListener("pointerdown", () => markUserScrollIntent("pointerdown"), { passive: true });
+window.addEventListener("pointerdown", (event) => {
+  if (selectLikeTarget(event.target)) {
+    markInteractionRefreshPause("dropdown-pointerdown", DROPDOWN_REFRESH_PAUSE_MS);
+  }
+  markUserScrollIntent("pointerdown");
+}, { passive: true });
 window.addEventListener("keydown", (event) => {
+  if (selectLikeTarget(event.target)) {
+    markInteractionRefreshPause(`dropdown-keydown:${event.key}`, DROPDOWN_REFRESH_PAUSE_MS);
+  }
   if (SCROLL_KEYS.has(event.key)) {
     markUserScrollIntent(`keydown:${event.key}`);
   }
