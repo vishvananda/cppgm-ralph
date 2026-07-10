@@ -1163,6 +1163,8 @@ pre.file-diff .token.prefix {
 
 .cmd-lines { color: #555; font-size: 0.7rem; white-space: nowrap; }
 
+.cmd-cell { color: #778; font-size: 0.7rem; white-space: nowrap; }
+
 .ts { color: #555; font-size: 0.68rem; white-space: nowrap; flex-shrink: 0; }
 
 .muted { color: var(--muted); }

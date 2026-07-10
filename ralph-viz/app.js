@@ -161,7 +161,33 @@ function formatBytes(value) {
 }
 
 function cleanText(text) {
-  return (text ?? "").toString().trim();
+  return textValue(text).trim();
+}
+
+function textValue(value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => textValue(entry)).join("");
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") {
+      return value.text;
+    }
+    if (typeof value.output === "string") {
+      return value.output;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 function unwrapCommand(command) {
@@ -175,6 +201,38 @@ function unwrapCommand(command) {
       return wrapped.slice(1, -1);
   }
   return wrapped;
+}
+
+function waitCommandCellId(command) {
+  const text = unwrapCommand(command);
+  const match = text.match(/^wait\s+(\{.*\})$/s);
+  if (!match) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(match[1]);
+    return parsed?.cell_id != null ? String(parsed.cell_id) : null;
+  } catch (_) {
+    const fallback = text.match(/"cell_id"\s*:\s*"([^"]+)"/);
+    return fallback ? fallback[1] : null;
+  }
+}
+
+function isWaitCommandItem(item) {
+  return item?.type === "command_execution" && waitCommandCellId(item.command) != null;
+}
+
+function asyncCellIdFromOutput(output) {
+  const match = cleanText(output).match(/Script running with cell ID\s+([A-Za-z0-9._-]+)/);
+  return match ? match[1] : null;
+}
+
+function asyncOutputCompleted(output) {
+  return /^Script completed\b/m.test(cleanText(output));
+}
+
+function asyncOutputStillRunning(output) {
+  return /^Script running with cell ID\b/m.test(cleanText(output));
 }
 
 function truncate(text, max = 120) {
@@ -697,27 +755,74 @@ function turnUsageCost(usage, model) {
 function buildDisplayEntries(records) {
   const entries = [];
   const cmdStarts = new Map();
+  const asyncEntriesByCell = new Map();
   const todoEntries = new Map();
   // Gemini: accumulate content chunks by traceId into messages
   const contentByTrace = new Map();
+  const hideNoise = hideNoiseToggle?.checked ?? true;
+
+  const registerAsyncEntry = (entry) => {
+    const output = cleanText(entry.endRecord?.event?.item?.aggregated_output);
+    const cellId = asyncCellIdFromOutput(output);
+    if (!cellId || isWaitCommandItem(entry.endRecord?.event?.item)) {
+      return;
+    }
+    entry.asyncCellId = cellId;
+    entry.asyncPollRecords ??= [];
+    asyncEntriesByCell.set(cellId, entry);
+  };
 
   for (const record of records) {
     const item = record.event?.item;
     const isCmd = item?.type === "command_execution";
+    const waitCellId = isCmd ? waitCommandCellId(item.command) : null;
 
     if (record.eventType === "item.started" && isCmd) {
       const entry = { kind: "command", startRecord: record, endRecord: null };
-      entries.push(entry);
+      if (waitCellId) {
+        entry.noise = true;
+        entry.asyncWaitCellId = waitCellId;
+      }
+      if (!waitCellId || !hideNoise) {
+        entries.push(entry);
+      }
       if (item.id) cmdStarts.set(item.id, entry);
       continue;
     }
     if (record.eventType === "item.completed" && isCmd) {
+      if (waitCellId) {
+        const parent = asyncEntriesByCell.get(waitCellId) ?? null;
+        if (parent) {
+          parent.asyncPollRecords ??= [];
+          parent.asyncPollRecords.push(record);
+          if (asyncOutputCompleted(item.aggregated_output)) {
+            parent.asyncCompletedRecord = record;
+            asyncEntriesByCell.delete(waitCellId);
+          }
+          if (item.id) {
+            cmdStarts.delete(item.id);
+          }
+          continue;
+        }
+      }
       if (item.id && cmdStarts.has(item.id)) {
-        cmdStarts.get(item.id).endRecord = record;
+        const entry = cmdStarts.get(item.id);
+        entry.endRecord = record;
         cmdStarts.delete(item.id);
+        registerAsyncEntry(entry);
       } else {
         // Claude emits completed-only command events (no item.started)
-        entries.push({ kind: "command", startRecord: null, endRecord: record });
+        const entry = {
+          kind: "command",
+          startRecord: null,
+          endRecord: record,
+          noise: Boolean(waitCellId),
+          asyncWaitCellId: waitCellId,
+        };
+        if (!waitCellId || !hideNoise) {
+          entries.push(entry);
+        }
+        registerAsyncEntry(entry);
       }
       continue;
     }
@@ -800,9 +905,10 @@ function renderCommandCard(entry) {
   const endItem = entry.endRecord?.event?.item ?? {};
   const item = entry.endRecord ? endItem : startItem;
   const cmd = unwrapCommand(item.command || startItem.command) || "unknown command";
-  const output = cleanText(item.aggregated_output);
-  const exitCode = item.exit_code;
-  const time = fmtShort(entry.endRecord?.recordedAt ?? entry.startRecord?.recordedAt);
+  const output = commandEntryOutput(entry);
+  const exitCode = commandEntryExitCode(entry);
+  const time = fmtShort(commandEntryRecordedAt(entry));
+  const asyncRunning = entry.asyncCellId && !entry.asyncCompletedRecord;
 
   const card = document.createElement("div");
   card.className = "ev ev-cmd" + (exitCode != null && exitCode !== 0 ? " ev-cmd-fail" : "");
@@ -814,6 +920,13 @@ function renderCommandCard(entry) {
   cmdSpan.className = "cmd-inline";
   cmdSpan.textContent = truncate(cmd, 200);
   summary.append(cmdSpan);
+
+  if (entry.asyncCellId || entry.asyncWaitCellId) {
+    const cell = document.createElement("span");
+    cell.className = "cmd-cell";
+    cell.textContent = `cell ${entry.asyncCellId ?? entry.asyncWaitCellId}`;
+    summary.append(cell);
+  }
 
   if (output) {
     const lineCount = output.split(/\r?\n/).length;
@@ -835,10 +948,15 @@ function renderCommandCard(entry) {
     badge.className = exitCode === 0 ? "pill pill-ok" : "pill pill-bad";
     badge.textContent = exitCode === 0 ? "ok" : `exit ${exitCode}`;
     summary.append(badge);
-  } else if (!entry.endRecord) {
+  } else if (asyncRunning || !entry.endRecord) {
     const badge = document.createElement("span");
     badge.className = "pill pill-running";
-    badge.textContent = "running";
+    badge.textContent = asyncRunning ? "async" : "running";
+    summary.append(badge);
+  } else if (entry.asyncCompletedRecord) {
+    const badge = document.createElement("span");
+    badge.className = "pill pill-ok";
+    badge.textContent = "done";
     summary.append(badge);
   }
 
@@ -849,6 +967,32 @@ function renderCommandCard(entry) {
   }
 
   return card;
+}
+
+function commandEntryOutput(entry) {
+  const endOutput = cleanText(entry.endRecord?.event?.item?.aggregated_output);
+  const pollOutputs = (entry.asyncPollRecords ?? [])
+    .map((record) => cleanText(record.event?.item?.aggregated_output))
+    .filter(Boolean);
+  if (!pollOutputs.length) {
+    return endOutput;
+  }
+  const usefulPollOutputs = [...new Set(pollOutputs.filter((output) => !asyncOutputStillRunning(output)))];
+  if (usefulPollOutputs.length) {
+    return usefulPollOutputs.join("\n");
+  }
+  return endOutput;
+}
+
+function commandEntryExitCode(entry) {
+  const item = entry.asyncCompletedRecord?.event?.item ?? entry.endRecord?.event?.item ?? {};
+  return item.exit_code;
+}
+
+function commandEntryRecordedAt(entry) {
+  return entry.asyncCompletedRecord?.recordedAt ??
+    entry.endRecord?.recordedAt ??
+    entry.startRecord?.recordedAt;
 }
 
 const OUTPUT_PREVIEW_CHAR_LIMIT = 2000;
@@ -1135,11 +1279,30 @@ function fileChangeEntryKey(record) {
   const item = record.event?.item ?? {};
   const threadId = record.threadId ?? "thread";
   const turn = record.turnNumber ?? "setup";
-  if (item.id) {
-    return `file:${threadId}:${turn}:${item.id}`;
+  return `file:${threadId}:${turn}:${fileChangeStableDigest(item.changes ?? [])}`;
+}
+
+function fileChangeStableDigest(changes) {
+  const signature = [...changes]
+    .map((change) => [
+      change?.kind ?? "update",
+      change?.path ?? "",
+      change?.movePath ?? change?.move_path ?? "",
+      typeof change?.diff === "string" ? change.diff : "",
+    ].join("\u0000"))
+    .sort()
+    .join("\u0001");
+  return stableHashString(signature || "file");
+}
+
+function stableHashString(value) {
+  let hash = 2166136261;
+  const text = String(value ?? "");
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
   }
-  const paths = (item.changes ?? []).map(fileChangePathText).join(",");
-  return `file:${threadId}:${turn}:${record.recordedAt ?? ""}:${paths}`;
+  return (hash >>> 0).toString(36);
 }
 
 function renderTodoCard(record) {

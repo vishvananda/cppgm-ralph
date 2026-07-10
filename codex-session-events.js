@@ -275,7 +275,7 @@ class CodexSessionConverter {
     if (!payload || typeof payload !== "object") {
       return null;
     }
-    if (payload.type === "function_call") {
+    if (payload.type === "function_call" || payload.type === "custom_tool_call") {
       const args = parseFunctionCallArgs(payload);
       const command = formatFunctionCall(payload, args, this);
       if (payload.call_id) {
@@ -297,9 +297,9 @@ class CodexSessionConverter {
         },
       };
     }
-    if (payload.type === "function_call_output") {
+    if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output") {
       const call = this.functionCallsByCallId.get(payload.call_id) ?? null;
-      if (call?.name === "exec_command") {
+      if (isExecCallName(call?.name)) {
         const sessionId = parseRunningSessionId(payload.output);
         if (sessionId && call.command) {
           this.commandsBySessionId.set(sessionId, call.command);
@@ -359,6 +359,9 @@ class CodexSessionConverter {
 }
 
 function parseFunctionCallArgs(payload) {
+  if (payload.type === "custom_tool_call") {
+    return typeof payload.input === "string" ? { input: payload.input } : {};
+  }
   try {
     return payload.arguments ? JSON.parse(payload.arguments) : {};
   } catch (_) {
@@ -379,7 +382,61 @@ function formatFunctionCall(payload, args, context) {
   if (payload.name === "apply_patch") {
     return "apply_patch";
   }
+  if (payload.name === "exec" && typeof args.input === "string") {
+    return formatCustomExecCommand(args.input);
+  }
   return `${payload.name} ${JSON.stringify(args)}`;
+}
+
+function isExecCallName(name) {
+  return name === "exec_command" || name === "exec";
+}
+
+function formatCustomExecCommand(input) {
+  const commands = extractToolExecCommands(input);
+  if (commands.length === 1) {
+    return commands[0];
+  }
+  if (commands.length > 1) {
+    return commands.map((command, index) => `command ${index + 1}: ${command}`).join("\n");
+  }
+  if (/\btools\.apply_patch\s*\(/.test(input)) {
+    return "apply_patch";
+  }
+  if (/\btools\.update_goal\s*\(/.test(input)) {
+    return "update_goal";
+  }
+  return `exec ${input}`;
+}
+
+function extractToolExecCommands(input) {
+  const commands = [];
+  const text = String(input ?? "");
+  const regex = /\bcmd\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    commands.push(decodeJsStringLiteral(match[2]));
+  }
+  return commands;
+}
+
+function decodeJsStringLiteral(value) {
+  return String(value ?? "")
+    .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\([\s\S])/g, (_, escaped) => {
+      switch (escaped) {
+      case "n": return "\n";
+      case "r": return "\r";
+      case "t": return "\t";
+      case "b": return "\b";
+      case "f": return "\f";
+      case "v": return "\v";
+      case "0": return "\0";
+      default: return escaped;
+      }
+    });
 }
 
 function formatWriteStdinCommand(args, context) {
@@ -397,7 +454,7 @@ function formatWriteStdinCommand(args, context) {
 }
 
 function parseRunningSessionId(output) {
-  const match = String(output ?? "").match(/Process running with session ID (\d+)/);
+  const match = textValue(output).match(/Process running with session ID (\d+)/);
   return match ? match[1] : null;
 }
 
@@ -409,7 +466,7 @@ function normalizeSessionId(value) {
 }
 
 function truncateMiddle(value, maxLength) {
-  const text = String(value ?? "");
+  const text = textValue(value);
   if (text.length <= maxLength) {
     return text;
   }
@@ -418,8 +475,34 @@ function truncateMiddle(value, maxLength) {
 }
 
 function parseFunctionOutputExitCode(output) {
-  const match = String(output ?? "").match(/Process exited with code (-?\d+)/);
+  const match = textValue(output).match(/Process exited with code (-?\d+)/);
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function textValue(value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => textValue(entry)).join("");
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") {
+      return value.text;
+    }
+    if (typeof value.output === "string") {
+      return value.output;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 function extractAssistantMessageText(payload) {
@@ -439,19 +522,21 @@ export function codexEventKey(event, timestamp = "") {
   const item = event?.item;
   if (item) {
     return [
-      timestamp,
       event.type,
       item.id ?? "",
       item.type ?? "",
       item.command ?? "",
       item.text ?? "",
+      item.status ?? "",
     ].join("|");
   }
   return [
-    timestamp,
     event?.type ?? "",
     event?.raw?.turn_id ?? "",
     event?.usage?.total_tokens ?? "",
     event?.timeUsedSeconds ?? "",
+    timestamp && !event?.raw?.turn_id && !event?.usage?.total_tokens && !event?.timeUsedSeconds
+      ? timestamp
+      : "",
   ].join("|");
 }

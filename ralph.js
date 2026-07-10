@@ -307,8 +307,27 @@ async function main() {
     if (phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
       gitStatus = await autoCommitPassingChanges({ phase, phaseStatus, gitStatus });
     }
+    const activeStageForTurn = getStateActiveStageAfterTest(testStatus);
+    const activeSubsetForTurn = getStateActiveSubsetAfterTest(testStatus, state);
+    const computedCleanupOnlyTurn = phaseStatus.allRequiredPassed && !gitStatus.clean;
+    const resumedTurnContext = continueThreadId
+      ? getMatchingActiveTurnContext(state, {
+        turnNumber: turnNumber + 1,
+        phase,
+        stage: activeStageForTurn,
+        subset: activeSubsetForTurn,
+      })
+      : null;
+    const cleanupOnlyTurn = resumedTurnContext?.cleanupOnly ?? computedCleanupOnlyTurn;
+    if (resumedTurnContext && resumedTurnContext.cleanupOnly !== computedCleanupOnlyTurn) {
+      log(
+        `--continue: preserving original turn ${turnNumber + 1} start classification ` +
+          `(cleanupOnly=${resumedTurnContext.cleanupOnly ? "true" : "false"}, ` +
+          `startedClean=${resumedTurnContext.startedClean ? "true" : "false"}) ` +
+          `despite current worktree cleanupOnly=${computedCleanupOnlyTurn ? "true" : "false"}.`,
+      );
+    }
     const shouldRunRequiredPhaseTurn = shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
-    const cleanupOnlyTurn = phaseStatus.allRequiredPassed && !gitStatus.clean;
     log(`Phase check status: ${formatPhaseCheckResults(phaseStatus)}`);
     log(`Primary test status: ${formatTestStatusSummary(testStatus)}`);
     if (testStatus.stages.length > 0) {
@@ -559,10 +578,18 @@ async function main() {
       turnsCompleted: turnNumber,
       lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
       lastTestStatus: testStatus,
-      activeStage: getStateActiveStageAfterTest(testStatus),
-      activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+      activeStage: activeStageForTurn,
+      activeSubset: activeSubsetForTurn,
       activePhase: phase.name,
       phaseAttempted: state.phaseAttempted === true,
+      activeTurn: resumedTurnContext ?? {
+        turnNumber: turnNumber + 1,
+        phase: phase.name,
+        stage: activeStageForTurn,
+        subset: activeSubsetForTurn,
+        startedClean: gitStatus.clean,
+        cleanupOnly: cleanupOnlyTurn,
+      },
       updatedAt: new Date().toISOString(),
     };
     await saveState(preTurnState);
@@ -701,8 +728,8 @@ async function main() {
       turnsCompleted: turnNumber + 1,
       lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
       lastTestStatus: testStatus,
-      activeStage: getStateActiveStageAfterTest(testStatus),
-      activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
+      activeStage: activeStageForTurn,
+      activeSubset: activeSubsetForTurn,
       activePhase: phase.name,
       phaseAttempted: phaseAttemptedAfterTurn,
       updatedAt: new Date().toISOString(),
@@ -710,10 +737,11 @@ async function main() {
     state.threadId = activeThreadId;
     state.lastExitCode = phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode;
     state.lastTestStatus = testStatus;
-    state.activeStage = getStateActiveStageAfterTest(testStatus);
-    state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
+    state.activeStage = activeStageForTurn;
+    state.activeSubset = activeSubsetForTurn;
     state.activePhase = phase.name;
     state.phaseAttempted = phaseAttemptedAfterTurn;
+    state.activeTurn = null;
     turnNumber += 1;
     state.turnsCompleted = turnNumber;
     try {
@@ -866,13 +894,11 @@ function buildContinuePrompt(testStatus, gitStatus, turnNumber = null, phase = n
 }
 
 function buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber = null, phase = null, phaseStatus = null) {
-  const defaultPrompt = buildDefaultPrompt({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
-  if (defaultPromptHasCurrentState(phase, resolveTemplateStage(testStatus, phaseStatus))) {
-    return defaultPrompt;
-  }
-
   return [
-    defaultPrompt,
+    `Clean up \`${phase?.name ?? "current"}\` for ${formatTargetLabel(
+      phaseStatus?.stage ?? testStatus?.targetStage ?? getObjectiveTargetStage(testStatus),
+      phaseStatus?.subset ?? testStatus?.targetSubset ?? null,
+    )}.`,
     "",
     "The required checks now pass, but the worktree is not clean yet.",
     "Commit the intended changes now so `git status --short` is empty before handing control back.",
@@ -4560,6 +4586,7 @@ class CodexExec {
     let lastStdoutEventMs = Date.now();
     let sessionTailer = null;
     let fallbackActivated = false;
+    let fallbackStdoutItemNoticeLogged = false;
 
     const pushStdoutLine = (line) => {
       let event = null;
@@ -4576,14 +4603,20 @@ class CodexExec {
         stdoutNonThreadEventCount += 1;
       }
       lastStdoutEventMs = Date.now();
-      seenEventKeys.add(codexEventKey(event));
+      if (
+        fallbackActivated &&
+        event.type?.startsWith?.("item.") &&
+        !fallbackStdoutItemNoticeLogged
+      ) {
+        fallbackStdoutItemNoticeLogged = true;
+        log("Codex resume stdout emitted item events while session backfill is active; keeping both streams with dedupe.");
+      }
 
-      // Once the session fallback is active, the rollout file is the more
-      // complete source for item cards. Keep terminal stdout events, but avoid
-      // duplicate item cards if stdout recovers later.
-      if (fallbackActivated && event.type?.startsWith?.("item.")) {
+      const key = codexEventKey(event);
+      if (seenEventKeys.has(key)) {
         return;
       }
+      seenEventKeys.add(key);
       lineQueue.push(line);
     };
 
@@ -4593,7 +4626,7 @@ class CodexExec {
       }
       fallbackActivated = true;
       log(
-        `Codex resume stdout is quiet; backfilling events from session log for ${args.threadId}`,
+        `Codex resume session backfill active for ${args.threadId}`,
       );
       sessionTailer = createCodexSessionTailer({
         codexDir: CODEX_DIR,
@@ -4610,6 +4643,10 @@ class CodexExec {
       });
       sessionTailer.start();
     };
+
+    if (args.threadId) {
+      startSessionFallback();
+    }
 
     const fallbackTimer = args.threadId
       ? setInterval(() => {
@@ -5627,7 +5664,10 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
             lastAgentMessage: payload?.last_agent_message ?? null,
           };
         }
-      } else if (record?.type === "response_item" && eventType === "function_call_output") {
+      } else if (
+        record?.type === "response_item" &&
+        (eventType === "function_call_output" || eventType === "custom_tool_call_output")
+      ) {
         const goalStatus = parseCodexToolGoalStatus(payload?.output, threadId);
         if (goalStatus) {
           latestGoalEvent = {
@@ -6679,7 +6719,7 @@ function formatUsage(usage) {
 }
 
 function previewText(text) {
-  const firstLine = text
+  const firstLine = textForPreview(text)
     .split(/\r?\n/, 1)[0]
     .replace(/\s+/g, " ")
     .trim();
@@ -6690,6 +6730,32 @@ function previewText(text) {
     return firstLine;
   }
   return `${firstLine.slice(0, 80)}...`;
+}
+
+function textForPreview(value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => textForPreview(entry)).join("");
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") {
+      return value.text;
+    }
+    if (typeof value.output === "string") {
+      return value.output;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 function getEventThreadId(event) {
@@ -6919,6 +6985,7 @@ async function loadState() {
       activeSubset: normalizeTestSubset(parsed.activeSubset),
       activePhase: typeof parsed.activePhase === "string" ? parsed.activePhase : null,
       phaseAttempted: parsed.phaseAttempted === true,
+      activeTurn: normalizeActiveTurnState(parsed.activeTurn),
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
@@ -6932,10 +6999,47 @@ async function loadState() {
         activeSubset: CONFIG.initialSubset,
         activePhase: null,
         phaseAttempted: false,
+        activeTurn: null,
       };
     }
     throw error;
   }
+}
+
+function normalizeActiveTurnState(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const turnNumber = Number.isInteger(value.turnNumber) ? value.turnNumber : null;
+  const phase = typeof value.phase === "string" ? value.phase : null;
+  if (!turnNumber || !phase) {
+    return null;
+  }
+  return {
+    turnNumber,
+    phase,
+    stage: normalizeStageName(value.stage),
+    subset: normalizeTestSubset(value.subset),
+    startedClean: value.startedClean === true,
+    cleanupOnly: value.cleanupOnly === true,
+  };
+}
+
+function getMatchingActiveTurnContext(state, { turnNumber, phase, stage, subset }) {
+  const activeTurn = state?.activeTurn;
+  if (!activeTurn || activeTurn.turnNumber !== turnNumber) {
+    return null;
+  }
+  if (activeTurn.phase !== phase?.name) {
+    return null;
+  }
+  if ((activeTurn.stage ?? null) !== (normalizeStageName(stage) ?? null)) {
+    return null;
+  }
+  if ((activeTurn.subset ?? null) !== (normalizeTestSubset(subset) ?? null)) {
+    return null;
+  }
+  return activeTurn;
 }
 
 async function findLatestEventLogThreadId() {

@@ -30,9 +30,9 @@ const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_CACHE_VERSION = 24;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 2;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 4;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 2;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 5;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -466,7 +466,7 @@ function progressEventsFromRunEvents(events) {
     if (!Number.isInteger(record.turnNumber) || record.turnNumber <= 0) {
       continue;
     }
-    const output = String(item.aggregated_output ?? "");
+    const output = textValue(item.aggregated_output);
     if (!output) {
       continue;
     }
@@ -3380,7 +3380,7 @@ function mergeEventStreams(primary, secondary) {
     if (
       isDisplayItemCardEvent(event) &&
       !isFileChangeWithDiff(event) &&
-      primaryItemCardStreams.has(eventTurnThreadKey(event))
+      primaryItemCardStreams.has(eventItemCardStreamKey(event))
     ) {
       continue;
     }
@@ -3410,7 +3410,7 @@ function findMergeableFileChangeIndex(events, candidate) {
       event?.event?.item?.type === "file_change" &&
       fileChangeEventSignature(event) === candidateSignature
     ) {
-      if (isFileChangeWithDiff(event)) {
+      if (isFileChangeWithDiff(event) && !fileChangeDiffsCompatible(event, candidate)) {
         continue;
       }
       const eventTime = Date.parse(event?.recordedAt ?? "");
@@ -3427,6 +3427,26 @@ function findMergeableFileChangeIndex(events, candidate) {
     }
   }
   return bestIndex;
+}
+
+function fileChangeDiffsCompatible(existing, candidate) {
+  const existingDiffs = fileChangeDiffMap(existing);
+  const candidateDiffs = fileChangeDiffMap(candidate);
+  for (const [signature, existingDiff] of existingDiffs.entries()) {
+    const candidateDiff = candidateDiffs.get(signature);
+    if (existingDiff && candidateDiff && existingDiff !== candidateDiff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function fileChangeDiffMap(record) {
+  const diffs = new Map();
+  for (const change of record?.event?.item?.changes ?? []) {
+    diffs.set(fileChangeSignature(change), typeof change?.diff === "string" ? change.diff : "");
+  }
+  return diffs;
 }
 
 function mergeFileChangeEventDiffs(existing, rich) {
@@ -3484,10 +3504,25 @@ function primaryItemCardStreamKeys(events) {
   const keys = new Set();
   for (const event of events ?? []) {
     if (isDisplayItemCardEvent(event)) {
-      keys.add(eventTurnThreadKey(event));
+      keys.add(eventItemCardStreamKey(event));
     }
   }
   return keys;
+}
+
+function eventItemCardStreamKey(record) {
+  const item = record?.event?.item ?? {};
+  const base = eventTurnThreadKey(record);
+  if (item.type === "command_execution") {
+    return [base, item.type, item.id ?? "", item.command ?? ""].join("|");
+  }
+  if (item.type === "agent_message" || item.type === "reasoning") {
+    return [base, item.type, item.text ?? ""].join("|");
+  }
+  if (item.type === "file_change") {
+    return [base, item.type, fileChangeEventSignature(record)].join("|");
+  }
+  return [base, item.type ?? "", item.id ?? ""].join("|");
 }
 
 function eventTurnThreadKey(record) {
@@ -4052,16 +4087,20 @@ function codexSessionProgressCachePath(filePath) {
 
 async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
   const observations = [];
+  const callsById = new Map();
   const stream = createReadStream(filePath, { encoding: "utf8", start: Math.max(0, startOffset) });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const rawLine of lines) {
     const line = String(rawLine ?? "").trim();
-    if (
-      !line ||
-      !line.includes('"type":"response_item"') ||
-      !line.includes('"function_call_output"') ||
-      (!line.includes("TEST SUMMARY") && !line.includes("ALL TESTS PASSED SUCCESSFULLY"))
-    ) {
+    if (!line || !line.includes('"type":"response_item"')) {
+      continue;
+    }
+    const isFunctionCallLine =
+      line.includes('"function_call"') ||
+      line.includes('"custom_tool_call"') ||
+      line.includes('"function_call_output"') ||
+      line.includes('"custom_tool_call_output"');
+    if (!isFunctionCallLine) {
       continue;
     }
     let record;
@@ -4070,7 +4109,29 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
     } catch (_) {
       continue;
     }
-    const observation = progressObservationFromCodexOutputRecord(record);
+    const payload = record.payload;
+    if (payload?.type === "function_call" || payload?.type === "custom_tool_call") {
+      if (payload.call_id) {
+        const args = parseFunctionCallArgs(payload);
+        callsById.set(payload.call_id, {
+          name: payload.name,
+          args,
+          command: formatFunctionCall(payload, args, { commandsBySessionId: new Map() }),
+        });
+      }
+      continue;
+    }
+    if (
+      payload?.type !== "function_call_output" &&
+      payload?.type !== "custom_tool_call_output"
+    ) {
+      continue;
+    }
+    if (!line.includes("TEST SUMMARY") && !line.includes("ALL TESTS PASSED SUCCESSFULLY")) {
+      continue;
+    }
+    const command = callsById.get(payload.call_id)?.command ?? "";
+    const observation = progressObservationFromCodexOutputRecord(record, command);
     if (observation) {
       observations.push(observation);
     }
@@ -4078,12 +4139,16 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
   return observations;
 }
 
-function progressObservationFromCodexOutputRecord(record) {
-  if (record?.type !== "response_item" || record.payload?.type !== "function_call_output") {
+function progressObservationFromCodexOutputRecord(record, command = "") {
+  if (
+    record?.type !== "response_item" ||
+    (record.payload?.type !== "function_call_output" &&
+      record.payload?.type !== "custom_tool_call_output")
+  ) {
     return null;
   }
-  const output = String(record.payload.output ?? "");
-  return progressObservationFromSessionOutput(output, record.timestamp);
+  const output = textValue(record.payload.output);
+  return progressObservationFromSessionOutput(output, record.timestamp, command);
 }
 
 function progressObservationFromSessionOutput(output, recordedAt, command = "") {
@@ -4160,7 +4225,17 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
 
 function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage) {
   const commandInfo = parseSingleStageProgressCommand(command);
-  if (!commandInfo || commandInfo.stage !== expectedStage || commandInfo.hasSubset) {
+  if (!commandInfo) {
+    if (!Number.isFinite(summary.testsTotal) || summary.testsTotal <= 0) {
+      return null;
+    }
+    return {
+      passed: summary.testsPassed,
+      total: summary.testsTotal,
+      status: summary.allTestsPassed || summary.testsPassed === summary.testsTotal ? "pass" : "fail",
+    };
+  }
+  if (commandInfo.stage !== expectedStage || commandInfo.hasSubset) {
     return null;
   }
   if (commandInfo.kind !== "selected") {
@@ -4546,18 +4621,7 @@ function processCodexSessionLine(rawLine, readOptions, context, events) {
 }
 
 function shouldSkipSuppressedSessionResponseItem(record, readOptions, context) {
-  if (
-    record?.type !== "response_item" ||
-    !(readOptions?.suppressedItemCardStreams instanceof Set) ||
-    readOptions.suppressedItemCardStreams.size === 0
-  ) {
-    return false;
-  }
-  const turnNumber = context.resolveTurnNumber(record.timestamp);
-  return readOptions.suppressedItemCardStreams.has(eventTurnThreadKey({
-    threadId: context.threadId,
-    turnNumber,
-  }));
+  return false;
 }
 
 function shouldSkipSuppressedSessionItemCard(record, readOptions) {
@@ -4566,7 +4630,7 @@ function shouldSkipSuppressedSessionItemCard(record, readOptions) {
   }
   return (
     readOptions?.suppressedItemCardStreams instanceof Set &&
-    readOptions.suppressedItemCardStreams.has(eventTurnThreadKey(record)) &&
+    readOptions.suppressedItemCardStreams.has(eventItemCardStreamKey(record)) &&
     isDisplayItemCardEvent(record)
   );
 }
@@ -4694,7 +4758,7 @@ function compactConvertedSessionEvent(record, outputLimit = CODEX_SESSION_OUTPUT
   }
   const compactItem = { ...item };
   delete compactItem.raw;
-  if (typeof compactItem.aggregated_output === "string") {
+  if (compactItem.aggregated_output != null) {
     compactItem.aggregated_output = truncateSessionOutput(compactItem.aggregated_output, outputLimit);
   }
   if (Array.isArray(compactItem.changes)) {
@@ -4717,7 +4781,7 @@ function compactConvertedSessionEvent(record, outputLimit = CODEX_SESSION_OUTPUT
 }
 
 function truncateSessionOutput(output, outputLimit) {
-  const text = String(output ?? "");
+  const text = textValue(output);
   if (!Number.isFinite(outputLimit) || outputLimit <= 0 || text.length <= outputLimit) {
     return text;
   }
@@ -5038,7 +5102,7 @@ function convertCodexResponseItem(payload, context) {
   if (!payload || typeof payload !== "object") {
     return null;
   }
-  if (payload.type === "function_call") {
+  if (payload.type === "function_call" || payload.type === "custom_tool_call") {
     const args = parseFunctionCallArgs(payload);
     const command = formatFunctionCall(payload, args, context);
     if (payload.call_id) {
@@ -5060,9 +5124,9 @@ function convertCodexResponseItem(payload, context) {
       },
     });
   }
-  if (payload.type === "function_call_output") {
+  if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output") {
     const call = context.functionCallsByCallId?.get(payload.call_id) ?? null;
-    if (call?.name === "exec_command") {
+    if (isExecCallName(call?.name)) {
       const sessionId = parseRunningSessionId(payload.output);
       if (sessionId && call.command) {
         context.commandsBySessionId?.set(sessionId, call.command);
@@ -5131,6 +5195,9 @@ function buildVizRecord(context, eventType, event) {
 }
 
 function parseFunctionCallArgs(payload) {
+  if (payload.type === "custom_tool_call") {
+    return typeof payload.input === "string" ? { input: payload.input } : {};
+  }
   try {
     return payload.arguments ? JSON.parse(payload.arguments) : {};
   } catch (_) {
@@ -5152,7 +5219,61 @@ function formatFunctionCall(payload, args, context) {
   if (payload.name === "apply_patch") {
     return "apply_patch";
   }
+  if (payload.name === "exec" && typeof args.input === "string") {
+    return formatCustomExecCommand(args.input);
+  }
   return `${payload.name} ${JSON.stringify(args)}`;
+}
+
+function isExecCallName(name) {
+  return name === "exec_command" || name === "exec";
+}
+
+function formatCustomExecCommand(input) {
+  const commands = extractToolExecCommands(input);
+  if (commands.length === 1) {
+    return commands[0];
+  }
+  if (commands.length > 1) {
+    return commands.map((command, index) => `command ${index + 1}: ${command}`).join("\n");
+  }
+  if (/\btools\.apply_patch\s*\(/.test(input)) {
+    return "apply_patch";
+  }
+  if (/\btools\.update_goal\s*\(/.test(input)) {
+    return "update_goal";
+  }
+  return `exec ${input}`;
+}
+
+function extractToolExecCommands(input) {
+  const commands = [];
+  const text = String(input ?? "");
+  const regex = /\bcmd\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    commands.push(decodeJsStringLiteral(match[2]));
+  }
+  return commands;
+}
+
+function decodeJsStringLiteral(value) {
+  return String(value ?? "")
+    .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\([\s\S])/g, (_, escaped) => {
+      switch (escaped) {
+      case "n": return "\n";
+      case "r": return "\r";
+      case "t": return "\t";
+      case "b": return "\b";
+      case "f": return "\f";
+      case "v": return "\v";
+      case "0": return "\0";
+      default: return escaped;
+      }
+    });
 }
 
 function formatWriteStdinCommand(args, context) {
@@ -5170,7 +5291,7 @@ function formatWriteStdinCommand(args, context) {
 }
 
 function parseRunningSessionId(output) {
-  const match = String(output ?? "").match(/Process running with session ID (\d+)/);
+  const match = textValue(output).match(/Process running with session ID (\d+)/);
   return match ? match[1] : null;
 }
 
@@ -5182,7 +5303,7 @@ function normalizeSessionId(value) {
 }
 
 function truncateMiddle(value, maxLength) {
-  const text = String(value ?? "");
+  const text = textValue(value);
   if (text.length <= maxLength) {
     return text;
   }
@@ -5191,8 +5312,34 @@ function truncateMiddle(value, maxLength) {
 }
 
 function parseFunctionOutputExitCode(output) {
-  const match = String(output ?? "").match(/Process exited with code (-?\d+)/);
+  const match = textValue(output).match(/Process exited with code (-?\d+)/);
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function textValue(value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => textValue(entry)).join("");
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") {
+      return value.text;
+    }
+    if (typeof value.output === "string") {
+      return value.output;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 function extractAssistantMessageText(payload) {
