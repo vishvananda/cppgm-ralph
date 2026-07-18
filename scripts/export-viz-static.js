@@ -820,6 +820,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error.message);
+  console.error(error?.stack ?? error?.message ?? String(error));
   process.exit(1);
 });

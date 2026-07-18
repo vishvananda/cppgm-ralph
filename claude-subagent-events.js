@@ -125,13 +125,14 @@ export async function collectClaudeSubagentEvents(events, options = {}) {
     if (!filePath) {
       continue;
     }
-    additions.push(...await readClaudeSubagentEvents(
+    const threadAdditions = await readClaudeSubagentEvents(
       filePath,
       threadId,
       resolveTurn,
       existing,
       { ...options, closedTurns },
-    ));
+    );
+    for (const event of threadAdditions) additions.push(event);
   }
   return additions.sort((left, right) =>
     String(left.recordedAt ?? "").localeCompare(String(right.recordedAt ?? "")));
@@ -240,14 +241,15 @@ async function readClaudeSubagentEvents(filePath, threadId, resolveTurn, existin
     }));
   }
   if (options.childTranscriptFallback !== false) {
-    additions.push(...await childTranscriptCompletionFallbacks(
+    const fallbacks = await childTranscriptCompletionFallbacks(
       filePath,
       threadId,
       startsById,
       completedIds,
       existing,
       options,
-    ));
+    );
+    for (const event of fallbacks) additions.push(event);
   }
   return additions;
 }
@@ -323,11 +325,18 @@ async function childTranscriptCompletionFallbacks(
 }
 
 function closedTurnNumbers(events) {
-  const turns = (events ?? [])
-    .map((record) => record?.turnNumber)
-    .filter((turn) => Number.isInteger(turn) && turn > 0);
-  const latest = turns.length ? Math.max(...turns) : null;
-  const closed = new Set(latest == null ? [] : turns.filter((turn) => turn < latest));
+  const turns = new Set();
+  let latest = null;
+  for (const record of events ?? []) {
+    const turn = record?.turnNumber;
+    if (!Number.isInteger(turn) || turn <= 0) continue;
+    turns.add(turn);
+    latest = latest == null ? turn : Math.max(latest, turn);
+  }
+  const closed = new Set();
+  for (const turn of turns) {
+    if (latest != null && turn < latest) closed.add(turn);
+  }
   for (const record of events ?? []) {
     if (record?.eventType === "turn.completed" && Number.isInteger(record.turnNumber)) {
       closed.add(record.turnNumber);
