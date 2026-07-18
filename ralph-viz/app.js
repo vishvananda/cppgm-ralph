@@ -201,7 +201,54 @@ function commandOutputText(value) {
   if (chunks.length > 0) {
     return joinTextParts(chunks.map((chunk) => chunk.output));
   }
-  return textValue(value);
+  return stripCommandOutputTransport(textValue(value));
+}
+
+function bareCommandOutputSessionId(value) {
+  if (value == null) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const sessionId = bareCommandOutputSessionId(entry);
+      if (sessionId != null) {
+        return sessionId;
+      }
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    if (value.session_id != null && value.session_id !== "") {
+      return String(value.session_id);
+    }
+    return bareCommandOutputSessionId(value.text ?? value.output ?? null);
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.session_id != null && parsed.session_id !== "") {
+      return String(parsed.session_id);
+    }
+  } catch (_) {
+    // Fall through to the transport-envelope form.
+  }
+  const match = text.match(
+    /(?:^|\n)\s*(?:\{\s*"session_id"\s*:\s*"?([A-Za-z0-9._-]+)"?\s*\}|SESSION_ID=([A-Za-z0-9._-]+))\s*$/,
+  );
+  return match ? match[1] ?? match[2] : null;
+}
+
+function stripCommandOutputTransport(value) {
+  return String(value ?? "")
+    .replace(/^Script completed\r?\nWall time [^\r\n]*\r?\nOutput:\r?\n/, "")
+    .replace(
+      /(?:^|\n)\s*(?:\{\s*"session_id"\s*:\s*"?[A-Za-z0-9._-]+"?\s*\}|SESSION_ID=[A-Za-z0-9._-]+)\s*$/m,
+      "",
+    )
+    .trim();
 }
 
 function structuredTextStringValue(value) {
@@ -332,14 +379,131 @@ function joinTextParts(parts) {
 function unwrapCommand(command) {
   const text = cleanText(command);
   const prefix = "/bin/bash -lc ";
-  if (!text.startsWith(prefix)) return text;
-  const wrapped = text.slice(prefix.length).trim();
+  const wrapped = text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
   if (wrapped.length >= 2) {
     const first = wrapped[0], last = wrapped[wrapped.length - 1];
     if ((first === "'" && last === "'") || (first === '"' && last === '"'))
       return wrapped.slice(1, -1);
   }
+  const toolCommands = extractToolExecCommandsFromSource(wrapped);
+  if (toolCommands.length === 1) {
+    return toolCommands[0];
+  }
   return wrapped;
+}
+
+function extractToolExecCommandsFromSource(source) {
+  const commands = [];
+  const regex = /(?:\bcmd\b|["']cmd["'])\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+  let match;
+  while ((match = regex.exec(String(source ?? ""))) !== null) {
+    commands.push(decodeToolString(match[2]));
+  }
+  return commands;
+}
+
+function decodeToolString(value) {
+  return String(value ?? "")
+    .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\([\s\S])/g, (_, escaped) => {
+      if (escaped === "n") return "\n";
+      if (escaped === "r") return "\r";
+      if (escaped === "t") return "\t";
+      return escaped;
+    });
+}
+
+function commandToolSource(item) {
+  return String(item?.raw?.input ?? item?.command ?? "");
+}
+
+function isWriteStdinCommandItem(item) {
+  return item?.type === "command_execution" &&
+    (/\btools\.write_stdin\s*\(/.test(commandToolSource(item)) ||
+      /^write_stdin\b/.test(String(item?.command ?? "")));
+}
+
+function commandSessionLoadKey(item) {
+  if (!isWriteStdinCommandItem(item)) {
+    return null;
+  }
+  const match = commandToolSource(item).match(/\bload\s*\(\s*(["'])([^"']+)\1\s*\)/);
+  return match ? match[2] : null;
+}
+
+function commandSessionStoreKey(item) {
+  const match = commandToolSource(item).match(
+    /\bstore\s*\(\s*(["'])([^"']+)\1\s*,\s*[^\n)]*?\.session_id\b/,
+  );
+  return match ? match[2] : null;
+}
+
+function asyncOutputIds(output) {
+  const ids = new Set();
+  for (const chunk of codexCommandOutputChunks(output)) {
+    if (chunk.session_id != null && chunk.session_id !== "") {
+      ids.add(String(chunk.session_id));
+    }
+  }
+  const bareSessionId = bareCommandOutputSessionId(output);
+  if (bareSessionId != null) {
+    ids.add(String(bareSessionId));
+  }
+  for (const match of cleanText(output).matchAll(/Script running with cell ID\s+([A-Za-z0-9._-]+)/g)) {
+    ids.add(match[1]);
+  }
+  return [...ids];
+}
+
+function asyncItemIds(item) {
+  const ids = new Set(asyncOutputIds(item?.aggregated_output));
+  if (item?.session_id != null && item.session_id !== "") {
+    ids.add(String(item.session_id));
+  }
+  return [...ids];
+}
+
+function isAsyncTransportFailure(output) {
+  return /Script error:\s*(?:\r?\n)?exec cell\s+\S+\s+not found/i.test(cleanText(output));
+}
+
+function asyncRecordMapKey(record, value) {
+  return [
+    record?.threadId ?? "",
+    displayTurnForRecord(record) ?? "",
+    String(value ?? ""),
+  ].join("\u0000");
+}
+
+function collapseMirroredCodexItems(records) {
+  const richStreams = new Set();
+  for (const record of records ?? []) {
+    if (isNativeCodexStdoutItem(record)) continue;
+    const key = mirroredCodexItemStreamKey(record);
+    if (key) richStreams.add(key);
+  }
+  if (richStreams.size === 0) return records ?? [];
+
+  return (records ?? []).filter((record) => {
+    if (!isNativeCodexStdoutItem(record)) return true;
+    const key = mirroredCodexItemStreamKey(record);
+    return !key || !richStreams.has(key);
+  });
+}
+
+function isNativeCodexStdoutItem(record) {
+  return /^item_\d+$/.test(String(record?.event?.item?.id ?? ""));
+}
+
+function mirroredCodexItemStreamKey(record) {
+  const item = record?.event?.item;
+  if (!item || !record?.eventType?.startsWith?.("item.")) return null;
+  if (!["agent_message", "command_execution", "file_change", "reasoning"].includes(item.type)) {
+    return null;
+  }
+  return [record.threadId ?? "", record.turnNumber ?? "", item.type].join("\u0000");
 }
 
 function waitCommandCellId(command) {
@@ -348,9 +512,13 @@ function waitCommandCellId(command) {
   if (continuedMatch) {
     return continuedMatch[1];
   }
-  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?\bsession_id\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
+  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?(?:\bsession_id\b|["']session_id["'])\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
   if (writeStdinMatch) {
     return writeStdinMatch[1] ?? writeStdinMatch[2] ?? writeStdinMatch[3] ?? null;
+  }
+  const normalizedWriteStdinMatch = text.match(/^write_stdin session ([^\s]+)(?:\s|$)/);
+  if (normalizedWriteStdinMatch) {
+    return normalizedWriteStdinMatch[1];
   }
   const match = text.match(/^wait\s+(\{.*\})$/s);
   if (!match) {
@@ -380,6 +548,10 @@ function asyncCellIdFromOutput(output) {
   if (chunkSessionId != null) {
     return String(chunkSessionId);
   }
+  const bareSessionId = bareCommandOutputSessionId(output);
+  if (bareSessionId != null) {
+    return bareSessionId;
+  }
   const match = cleanText(output).match(/Script running with cell ID\s+([A-Za-z0-9._-]+)/);
   return match ? match[1] : null;
 }
@@ -397,6 +569,9 @@ function asyncOutputStillRunning(output) {
   if (chunks.length > 0) {
     return chunks.some((chunk) => chunk.session_id != null && chunk.session_id !== "") &&
       !chunks.some((chunk) => Number.isFinite(chunk.exit_code));
+  }
+  if (bareCommandOutputSessionId(output) != null) {
+    return true;
   }
   return /^Script running with cell ID\b/m.test(cleanText(output));
 }
@@ -424,6 +599,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
 
   const testProgress = applyProgressBestCache(buildAgentTestProgressState(events), run);
   const normalizedShapeUsage = normalizeShapeUsage(shapeUsage);
+  const subagentEstimateModel = buildSubagentEstimateModel(events);
 
   return {
     threadId: events.at(0)?.threadId ?? "n/a",
@@ -438,6 +614,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
     latestPhaseStatus: latestPhaseStatus(events),
     testProgress,
     latestTestStatus: latestTestStatus(events),
+    subagents: buildSubagentStats(events, subagentEstimateModel),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
@@ -743,6 +920,7 @@ function renderSummary(events) {
     <div><strong>thread</strong>${truncate(s.threadId, 24)}</div>
     <div><strong>events</strong>${s.events}</div>
     <div><strong>turns</strong>${s.turns}</div>
+    <div><strong>subagents</strong>${subagentStatsText(s.subagents)}</div>
     <div><strong>started</strong>${fmt(s.first)}</div>
     <div><strong>latest</strong>${fmt(s.last)}</div>
     <div><strong>detail</strong>${detailText}</div>
@@ -918,31 +1096,118 @@ function turnUsageCost(usage, model) {
 
 // --- Display entry building (merge command start/end) ---
 
-function buildDisplayEntries(records) {
+function buildDisplayEntries(records, options = {}) {
   const entries = [];
   const cmdStarts = new Map();
+  const subagentEntries = new Map();
   const asyncEntriesByCell = new Map();
+  const asyncEntriesByStoreKey = new Map();
   const todoEntries = new Map();
   // Gemini: accumulate content chunks by traceId into messages
   const contentByTrace = new Map();
   const hideNoise = hideNoiseToggle?.checked ?? true;
 
   const registerAsyncEntry = (entry) => {
-    const output = entry.endRecord?.event?.item?.aggregated_output;
-    const cellId = asyncCellIdFromOutput(output);
-    if (!cellId || isWaitCommandItem(entry.endRecord?.event?.item)) {
+    const item = entry.endRecord?.event?.item ?? {};
+    const output = item.aggregated_output;
+    const outputIds = asyncItemIds(item);
+    if (outputIds.length === 0 || isWaitCommandItem(entry.endRecord?.event?.item)) {
       return;
     }
-    entry.asyncCellId = cellId;
+    entry.asyncCellId = outputIds.at(-1);
     entry.asyncPollRecords ??= [];
-    asyncEntriesByCell.set(cellId, entry);
+    for (const outputId of outputIds) {
+      asyncEntriesByCell.set(asyncRecordMapKey(entry.endRecord, outputId), entry);
+    }
+    const storeKey = commandSessionStoreKey(entry.startRecord?.event?.item);
+    if (storeKey) {
+      entry.asyncStoreKey = storeKey;
+      asyncEntriesByStoreKey.set(asyncRecordMapKey(entry.endRecord, storeKey), entry);
+    }
+  };
+
+  const unregisterAsyncEntry = (entry) => {
+    for (const [cellId, candidate] of asyncEntriesByCell.entries()) {
+      if (candidate === entry) {
+        asyncEntriesByCell.delete(cellId);
+      }
+    }
+    for (const [storeKey, candidate] of asyncEntriesByStoreKey.entries()) {
+      if (candidate === entry) {
+        asyncEntriesByStoreKey.delete(storeKey);
+      }
+    }
+  };
+
+  const continueAsyncEntry = (parent, record) => {
+    const item = record.event?.item ?? {};
+    const output = item.aggregated_output;
+    if (!isAsyncTransportFailure(output)) {
+      parent.asyncPollRecords ??= [];
+      parent.asyncPollRecords.push(record);
+    }
+    const nextIds = asyncItemIds(item);
+    const hasExitCode = Number.isFinite(item.exit_code);
+    if (nextIds.length > 0 && !hasExitCode && (item.session_id != null || asyncOutputStillRunning(output))) {
+      parent.asyncCellId = nextIds.at(-1);
+      for (const nextId of nextIds) {
+        asyncEntriesByCell.set(asyncRecordMapKey(record, nextId), parent);
+      }
+    } else if (hasExitCode || asyncOutputCompleted(output)) {
+      parent.asyncCompletedRecord = record;
+      unregisterAsyncEntry(parent);
+    }
+  };
+
+  const replaceWithBatchEntries = (entry) => {
+    const batchEntries = splitCommandBatchEntry(entry);
+    if (!batchEntries) {
+      return false;
+    }
+    const index = entries.indexOf(entry);
+    if (index >= 0) {
+      entries.splice(index, 1, ...batchEntries);
+    }
+    return true;
   };
 
   for (const record of records) {
     const item = record.event?.item;
+    if (
+      item?.type === "subagent" &&
+      (record.eventType === "item.started" ||
+        record.eventType === "item.updated" ||
+        record.eventType === "item.completed")
+    ) {
+      const key = subagentRecordKey(record);
+      let entry = subagentEntries.get(key);
+      if (!entry) {
+        entry = {
+          kind: "subagent",
+          startRecord: null,
+          updateRecord: null,
+          endRecord: null,
+          completionRecords: [],
+          estimateModel: options.subagentEstimateModel ?? null,
+        };
+        subagentEntries.set(key, entry);
+        entries.push(entry);
+      }
+      if (record.eventType === "item.started") {
+        entry.startRecord = record;
+      } else if (record.eventType === "item.updated") {
+        entry.updateRecord = record;
+      } else {
+        entry.endRecord = record;
+        entry.completionRecords.push(record);
+      }
+      continue;
+    }
     const isCmd = item?.type === "command_execution";
     const waitCellId = isCmd ? waitCommandCellId(item.command) : null;
-    const commandNoise = Boolean(waitCellId) || (isCmd && isApplyPatchCommand(item.command));
+    const sessionLoadKey = isCmd ? commandSessionLoadKey(item) : null;
+    const commandNoise = Boolean(waitCellId) || isWriteStdinCommandItem(item) ||
+      (isCmd && isApplyPatchCommand(item.command));
 
     if (record.eventType === "item.started" && isCmd) {
       const entry = { kind: "command", startRecord: record, endRecord: null };
@@ -952,6 +1217,13 @@ function buildDisplayEntries(records) {
       if (waitCellId) {
         entry.asyncWaitCellId = waitCellId;
       }
+      entry.asyncParent = (waitCellId
+        ? asyncEntriesByCell.get(asyncRecordMapKey(record, waitCellId))
+        : null) ??
+        (sessionLoadKey
+          ? asyncEntriesByStoreKey.get(asyncRecordMapKey(record, sessionLoadKey))
+          : null) ??
+        null;
       if (!commandNoise || !hideNoise) {
         entries.push(entry);
       }
@@ -959,15 +1231,16 @@ function buildDisplayEntries(records) {
       continue;
     }
     if (record.eventType === "item.completed" && isCmd) {
+      const startedEntry = item.id ? cmdStarts.get(item.id) ?? null : null;
+      if (startedEntry?.asyncParent) {
+        continueAsyncEntry(startedEntry.asyncParent, record);
+        cmdStarts.delete(item.id);
+        continue;
+      }
       if (waitCellId) {
-        const parent = asyncEntriesByCell.get(waitCellId) ?? null;
+        const parent = asyncEntriesByCell.get(asyncRecordMapKey(record, waitCellId)) ?? null;
         if (parent) {
-          parent.asyncPollRecords ??= [];
-          parent.asyncPollRecords.push(record);
-          if (asyncOutputCompleted(item.aggregated_output)) {
-            parent.asyncCompletedRecord = record;
-            asyncEntriesByCell.delete(waitCellId);
-          }
+          continueAsyncEntry(parent, record);
           if (item.id) {
             cmdStarts.delete(item.id);
           }
@@ -978,7 +1251,9 @@ function buildDisplayEntries(records) {
         const entry = cmdStarts.get(item.id);
         entry.endRecord = record;
         cmdStarts.delete(item.id);
-        registerAsyncEntry(entry);
+        if (!replaceWithBatchEntries(entry)) {
+          registerAsyncEntry(entry);
+        }
       } else {
         // Claude emits completed-only command events (no item.started)
         const entry = {
@@ -988,10 +1263,13 @@ function buildDisplayEntries(records) {
           noise: commandNoise,
           asyncWaitCellId: waitCellId,
         };
+        const batchEntries = splitCommandBatchEntry(entry);
         if (!commandNoise || !hideNoise) {
-          entries.push(entry);
+          entries.push(...(batchEntries ?? [entry]));
         }
-        registerAsyncEntry(entry);
+        if (!batchEntries) {
+          registerAsyncEntry(entry);
+        }
       }
       continue;
     }
@@ -1057,6 +1335,98 @@ function buildDisplayEntries(records) {
   return entries;
 }
 
+function splitCommandBatchEntry(entry) {
+  const item = entry.endRecord?.event?.item;
+  const parts = commandBatchParts(item);
+  if (!parts) {
+    return null;
+  }
+  const baseId = item.id ?? entry.startRecord?.event?.item?.id ?? "batch";
+  return parts.map((part, index) => {
+    const id = `${baseId}:batch-${index + 1}`;
+    const startRecord = entry.startRecord
+      ? commandBatchRecord(entry.startRecord, "item.started", {
+          id,
+          type: "command_execution",
+          status: "running",
+          command: part.command,
+        })
+      : null;
+    const endRecord = commandBatchRecord(entry.endRecord, "item.completed", {
+      id,
+      type: "command_execution",
+      status: "completed",
+      command: part.command,
+      exit_code: part.exit_code,
+      aggregated_output: part.output,
+    });
+    return {
+      kind: "command",
+      startRecord,
+      endRecord,
+      batchIndex: index + 1,
+      batchSize: parts.length,
+      batchDurationSeconds: part.wall_time_seconds,
+    };
+  });
+}
+
+function commandBatchRecord(record, eventType, item) {
+  return {
+    ...record,
+    eventType,
+    event: {
+      ...record.event,
+      type: eventType,
+      item,
+    },
+  };
+}
+
+function commandBatchParts(item) {
+  if (!item || item.type !== "command_execution") {
+    return null;
+  }
+  if (Array.isArray(item.batch_commands) && item.batch_commands.length > 1) {
+    return item.batch_commands.map((part) => ({
+      command: String(part.command ?? ""),
+      output: part.output ?? "",
+      exit_code: Number.isFinite(part.exit_code) ? part.exit_code : null,
+      wall_time_seconds: Number.isFinite(part.wall_time_seconds) ? part.wall_time_seconds : null,
+    }));
+  }
+  const commands = parseCommandBatchLabels(item.command) ??
+    extractToolExecCommandsFromSource(item.command);
+  const chunks = codexCommandOutputChunks(item.aggregated_output);
+  if (!commands?.length || commands.length !== chunks.length) {
+    return null;
+  }
+  return commands.map((command, index) => ({
+    command,
+    output: chunks[index].output,
+    exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
+    wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
+      ? chunks[index].wall_time_seconds
+      : null,
+  }));
+}
+
+function parseCommandBatchLabels(command) {
+  const lines = String(command ?? "").split(/\r?\n/).filter(Boolean);
+  if (lines.length <= 1) {
+    return null;
+  }
+  const commands = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^command (\d+): ([\s\S]+)$/);
+    if (!match || Number.parseInt(match[1], 10) !== index + 1) {
+      return null;
+    }
+    commands.push(match[2]);
+  }
+  return commands;
+}
+
 function todoEntryKey(record) {
   const item = record?.event?.item ?? {};
   return [
@@ -1090,11 +1460,25 @@ function renderCommandCard(entry) {
   cmdSpan.textContent = truncate(cmd, 200);
   summary.append(cmdSpan);
 
-  if (entry.asyncCellId || entry.asyncWaitCellId) {
+  if ((entry.asyncCellId || entry.asyncWaitCellId) && !(hideNoiseToggle?.checked ?? true)) {
     const cell = document.createElement("span");
     cell.className = "cmd-cell";
     cell.textContent = `cell ${entry.asyncCellId ?? entry.asyncWaitCellId}`;
     summary.append(cell);
+  }
+
+  if (entry.batchSize > 1) {
+    const batch = document.createElement("span");
+    batch.className = "cmd-cell";
+    batch.textContent = `batch ${entry.batchIndex}/${entry.batchSize}`;
+    summary.append(batch);
+  }
+
+  if (Number.isFinite(entry.batchDurationSeconds)) {
+    const duration = document.createElement("span");
+    duration.className = "cmd-cell";
+    duration.textContent = durationText({ durationMs: entry.batchDurationSeconds * 1000 });
+    summary.append(duration);
   }
 
   if (output) {
@@ -1120,7 +1504,7 @@ function renderCommandCard(entry) {
   } else if (asyncRunning || !entry.endRecord) {
     const badge = document.createElement("span");
     badge.className = "pill pill-running";
-    badge.textContent = asyncRunning ? "async" : "running";
+    badge.textContent = "running";
     summary.append(badge);
   } else if (entry.asyncCompletedRecord) {
     const badge = document.createElement("span");
@@ -1169,7 +1553,34 @@ function commandEntryExitCode(entry) {
   const chunkExitCode = codexCommandOutputChunks(item.aggregated_output)
     .map((chunk) => chunk.exit_code)
     .find((exitCode) => Number.isFinite(exitCode));
-  return Number.isFinite(chunkExitCode) ? chunkExitCode : item.exit_code;
+  if (Number.isFinite(chunkExitCode)) {
+    return chunkExitCode;
+  }
+  if (Number.isFinite(item.exit_code)) {
+    return item.exit_code;
+  }
+  const command = entry.startRecord?.event?.item?.command ?? item.command ?? "";
+  return inferDirectMakeExitCode(command, item.aggregated_output);
+}
+
+function inferDirectMakeExitCode(command, output) {
+  const text = String(command ?? "").replace(/\s+\(continued session [^)]+\)\s*$/, "");
+  if (!isDirectMakeCommandForExitInference(text)) {
+    return null;
+  }
+  const outputText = commandOutputText(output);
+  return /^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)
+    ? 2
+    : null;
+}
+
+function isDirectMakeCommandForExitInference(command) {
+  const text = String(command ?? "").trim();
+  if (!/^\s*(?:env\s+)?(?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S+)\s+)*make(?:\s|$)/.test(text)) {
+    return false;
+  }
+  const scanText = shellOperatorScanText(text);
+  return !/[\n;&|<>`]/.test(scanText) && !/\$\(/.test(scanText);
 }
 
 function commandEntryRecordedAt(entry) {
@@ -1525,6 +1936,292 @@ function renderReasoningCard(record) {
   return card;
 }
 
+function renderSubagentCard(entry) {
+  const startItem = entry.startRecord?.event?.item ?? {};
+  const updateItem = entry.updateRecord?.event?.item ?? {};
+  const endItem = entry.endRecord?.event?.item ?? {};
+  const item = { ...startItem, ...updateItem, ...endItem };
+  const completions = entry.completionRecords ?? (entry.endRecord ? [entry.endRecord] : []);
+  const failed = item.status === "failed" || item.status === "error";
+  const running = completions.length === 0;
+  const key = subagentEntryKey(entry);
+  const card = document.createElement("div");
+  card.className = `ev ev-subagent${failed ? " ev-subagent-fail" : ""}`;
+  const { header: summary, body } = createAccordion(card, { key });
+
+  const label = document.createElement("span");
+  label.className = "pill";
+  label.textContent = item.subagent_type || item.provider || "agent";
+  summary.append(label);
+
+  const title = document.createElement("span");
+  title.className = "subagent-title";
+  title.textContent = item.description || item.summary || "Subagent task";
+  summary.append(title);
+
+  const stats = buildSubagentStats([
+    entry.startRecord,
+    entry.updateRecord,
+    ...completions,
+  ].filter(Boolean), entry.estimateModel);
+  if (stats.runtimeMs > 0) {
+    const duration = document.createElement("span");
+    duration.className = "subagent-meta";
+    duration.textContent = `${stats.estimatedRuntimeCount ? "~" : ""}${durationText({ durationMs: stats.runtimeMs })}`;
+    summary.append(duration);
+  }
+  if (stats.tokens > 0) {
+    const tokens = document.createElement("span");
+    tokens.className = "subagent-meta";
+    tokens.textContent = `${stats.estimatedTokenCount ? "~" : ""}${fmtInt(stats.tokens)} tok`;
+    summary.append(tokens);
+  }
+  if (stats.toolUses > 0) {
+    const tools = document.createElement("span");
+    tools.className = "subagent-meta";
+    tools.textContent = `${fmtInt(stats.toolUses)} tools`;
+    summary.append(tools);
+  }
+  const missing = [];
+  if (stats.missingRuntimeCount) missing.push("time");
+  if (stats.missingTokenCount) missing.push("token");
+  if (missing.length) {
+    const marker = document.createElement("span");
+    marker.className = "subagent-missing";
+    marker.textContent = `${missing.join(" + ")} data missing`;
+    marker.title = "Values prefixed with ~ are estimated from completed subagent runs in this Ralph run.";
+    summary.append(marker);
+  }
+
+  const time = fmtShort(entry.endRecord?.recordedAt ?? entry.startRecord?.recordedAt);
+  if (time) {
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = time;
+    summary.append(ts);
+  }
+
+  const badge = document.createElement("span");
+  badge.className = failed ? "pill pill-bad" : running ? "pill pill-running" : "pill pill-ok";
+  badge.textContent = failed ? "error" : running ? "running" : "done";
+  summary.append(badge);
+
+  appendSubagentSection(body, "Task", startItem.prompt, `${key}:task`);
+  completions.forEach((record, index) => {
+    const result = record.event?.item?.result;
+    appendSubagentSection(
+      body,
+      completions.length > 1 ? `Result ${index + 1}` : "Result",
+      result,
+      `${key}:result-${index + 1}`,
+    );
+  });
+  return card;
+}
+
+function appendSubagentSection(container, label, value, key) {
+  const text = cleanText(value);
+  if (!text) return;
+  const heading = document.createElement("strong");
+  heading.className = "subagent-section-label";
+  heading.textContent = label;
+  container.append(heading);
+  appendExpandableText(container, text, key, "cmd-output subagent-output");
+}
+
+function subagentRecordKey(record) {
+  const item = record?.event?.item ?? {};
+  return [
+    record?.threadId ?? "thread",
+    displayTurnForRecord(record),
+    item.id ?? item.task_id ?? record?.recordedAt ?? "agent",
+  ].join(":");
+}
+
+function subagentEntryKey(entry) {
+  const record = entry.startRecord ?? entry.endRecord ?? entry.updateRecord;
+  return `subagent:${subagentRecordKey(record)}`;
+}
+
+function buildSubagentEstimateModel(records) {
+  const starts = new Map();
+  const durations = [];
+  const tokens = [];
+  const tokenRates = [];
+  const ordered = (records ?? [])
+    .filter(Boolean)
+    .map((record) => ({ record, time: Date.parse(record.recordedAt ?? "") }))
+    .filter((entry) => Number.isFinite(entry.time))
+    .sort((left, right) => left.time - right.time);
+  for (const { record, time } of ordered) {
+    const item = record.event?.item;
+    if (item?.type !== "subagent") continue;
+    const id = subagentRecordKey(record);
+    if (record.eventType === "item.started") {
+      starts.set(id, time);
+      continue;
+    }
+    if (record.eventType !== "item.completed") continue;
+    const explicitDuration = Number(item.duration_ms);
+    const durationMs = Number.isFinite(explicitDuration) && explicitDuration > 0
+      ? explicitDuration
+      : starts.has(id)
+        ? Math.max(0, time - starts.get(id))
+        : 0;
+    const tokenCount = Math.max(0, Number(item.subagent_tokens) || 0);
+    if (durationMs > 0) durations.push(durationMs);
+    if (tokenCount > 0) tokens.push(tokenCount);
+    if (durationMs > 0 && tokenCount > 0) {
+      tokenRates.push(tokenCount / durationMs);
+    }
+  }
+  return {
+    durationMs: medianNumber(durations),
+    tokens: medianNumber(tokens),
+    tokensPerMs: medianNumber(tokenRates),
+    durationSamples: durations.length,
+    tokenSamples: tokens.length,
+  };
+}
+
+function medianNumber(values) {
+  const sorted = (values ?? [])
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function buildSubagentStats(records, estimateModel = null) {
+  const starts = new Map();
+  const completedAgents = new Set();
+  const agentIds = new Set();
+  const notifications = new Set();
+  const intervals = [];
+  let runtimeMs = 0;
+  let tokens = 0;
+  let toolUses = 0;
+  let estimatedRuntimeCount = 0;
+  let estimatedTokenCount = 0;
+  let missingRuntimeCount = 0;
+  let missingTokenCount = 0;
+
+  const ordered = (records ?? [])
+    .filter(Boolean)
+    .map((record) => ({ record, time: Date.parse(record.recordedAt ?? "") }))
+    .filter((entry) => Number.isFinite(entry.time))
+    .sort((left, right) => left.time - right.time);
+  for (const { record, time } of ordered) {
+    const item = record.event?.item;
+    if (item?.type !== "subagent") continue;
+    const id = subagentRecordKey(record);
+    agentIds.add(id);
+    if (record.eventType === "item.started") {
+      starts.set(id, time);
+      continue;
+    }
+    if (record.eventType !== "item.completed") continue;
+    const notificationKey = item.notification_id ?? `${id}:${record.recordedAt ?? ""}`;
+    if (notifications.has(notificationKey)) continue;
+    notifications.add(notificationKey);
+    completedAgents.add(id);
+    const explicitDuration = Number(item.duration_ms);
+    let durationMs = Number.isFinite(explicitDuration) && explicitDuration >= 0
+      ? explicitDuration
+      : starts.has(id)
+        ? Math.max(0, time - starts.get(id))
+        : 0;
+    if (!(durationMs > 0)) {
+      missingRuntimeCount += 1;
+      if (estimateModel?.durationMs > 0) {
+        durationMs = estimateModel.durationMs;
+        estimatedRuntimeCount += 1;
+      }
+    }
+    runtimeMs += durationMs;
+    let tokenCount = Math.max(0, Number(item.subagent_tokens) || 0);
+    if (!(tokenCount > 0)) {
+      missingTokenCount += 1;
+      if (durationMs > 0 && estimateModel?.tokensPerMs > 0) {
+        tokenCount = Math.round(durationMs * estimateModel.tokensPerMs);
+      } else if (estimateModel?.tokens > 0) {
+        tokenCount = Math.round(estimateModel.tokens);
+      }
+      if (tokenCount > 0) estimatedTokenCount += 1;
+    }
+    tokens += tokenCount;
+    toolUses += Math.max(0, Number(item.tool_uses) || 0);
+    if (durationMs > 0) {
+      intervals.push({ start: time - durationMs, end: time });
+    }
+  }
+
+  const activeIds = [...starts.keys()].filter((id) => !completedAgents.has(id));
+  const now = Date.now();
+  for (const id of activeIds) {
+    const start = starts.get(id);
+    const activeDuration = Math.max(0, now - start);
+    runtimeMs += activeDuration;
+    intervals.push({ start, end: now });
+    if (activeDuration > 0 && estimateModel?.tokensPerMs > 0) {
+      tokens += Math.round(activeDuration * estimateModel.tokensPerMs);
+      estimatedTokenCount += 1;
+    }
+  }
+  intervals.sort((left, right) => left.start - right.start);
+  let wallMs = 0;
+  let current = null;
+  for (const interval of intervals) {
+    if (!current || interval.start > current.end) {
+      if (current) wallMs += current.end - current.start;
+      current = { ...interval };
+    } else {
+      current.end = Math.max(current.end, interval.end);
+    }
+  }
+  if (current) wallMs += current.end - current.start;
+  return {
+    count: agentIds.size,
+    completed: completedAgents.size,
+    active: activeIds.length,
+    runtimeMs,
+    wallMs,
+    tokens,
+    toolUses,
+    estimatedRuntimeCount,
+    estimatedTokenCount,
+    missingRuntimeCount,
+    missingTokenCount,
+  };
+}
+
+function subagentStatsText(stats) {
+  if (!stats?.count) return '<span class="muted">none</span>';
+  const parts = [
+    `${stats.count} agent run${stats.count === 1 ? "" : "s"}`,
+    `${stats.estimatedRuntimeCount ? "~" : ""}${durationText({ durationMs: stats.runtimeMs })} agent time`,
+  ];
+  if (stats.wallMs > 0 && stats.wallMs !== stats.runtimeMs) {
+    parts.push(`${durationText({ durationMs: stats.wallMs })} wall`);
+  }
+  if (stats.active) {
+    parts.push(`${stats.active} running`);
+  }
+  if (stats.tokens > 0) {
+    parts.push(`${stats.estimatedTokenCount ? "~" : ""}${fmtInt(stats.tokens)} child tok`);
+  }
+  if (stats.missingRuntimeCount || stats.missingTokenCount) {
+    const fields = [];
+    if (stats.missingRuntimeCount) fields.push(`${stats.missingRuntimeCount} time`);
+    if (stats.missingTokenCount) fields.push(`${stats.missingTokenCount} token`);
+    parts.push(`${fields.join(" + ")} estimated`);
+  }
+  return parts.join(" / ");
+}
+
 function renderMcpToolCard(record) {
   const item = record.event?.item ?? {};
   const failed = item.status === "failed" || Boolean(item.error);
@@ -1657,6 +2354,9 @@ function renderSystemCard(record) {
     div.classList.add("ev-sys-err");
   } else if (record.eventType === "ralph.turn-restart") {
     text = `ralph restart: resumed turn ${record.turnNumber ?? "?"}`;
+  } else if (record.eventType === "ralph.agent-recovery") {
+    text = `agent recovery: ${cleanText(record.event?.reason) || "unexpected exit"} ` +
+      `(attempt ${record.event?.attempt ?? "?"})`;
   } else if (isLimitWaitEvent(record)) {
     const minutes = Math.ceil((record.event?.wait_ms ?? 0) / 60000);
     const label = record.eventType === "ralph.limit_wait" ? "provider wait" : "quota wait";
@@ -1902,6 +2602,7 @@ function renderGeminiThoughtCard(record) {
 
 function renderDisplayEntry(entry) {
   if (entry.kind === "command") return renderCommandCard(entry);
+  if (entry.kind === "subagent") return renderSubagentCard(entry);
   if (entry.kind === "todo") return renderTodoCard(entry.record);
   if (entry.kind === "gemini-message") return renderGeminiMessageCard(entry);
   if (entry.kind === "gemini-tool-call") return renderGeminiToolCallCard(entry);
@@ -1940,6 +2641,7 @@ function renderDisplayEntry(entry) {
 
 function scrollKeyForEntry(entry, index = null) {
   if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "subagent") return subagentEntryKey(entry);
   if (entry.kind === "todo") return todoEntryKey(entry.record);
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
   if (entry.kind === "gemini-message") return recordScrollKey(entry.record, "gemini-message", index);
@@ -1968,6 +2670,7 @@ function recordScrollKey(record, prefix = "event", index = null) {
 
 function expandableEntryKey(entry) {
   if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "subagent") return subagentEntryKey(entry);
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
   if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "file_change") {
     return fileChangeEntryKey(entry.record);
@@ -2033,8 +2736,11 @@ function turnCardWindowText(windowInfo) {
 function shouldShow(record) {
   const hideNoise = hideNoiseToggle?.checked ?? true;
   if (hideNoise && NOISE_TYPES.has(record.eventType)) {
-    // Keep item.started only for commands (they get merged)
-    if (record.eventType === "item.started" && record.event?.item?.type === "command_execution")
+    // Keep item.started for work cards that merge with their completion.
+    if (
+      record.eventType === "item.started" &&
+      (record.event?.item?.type === "command_execution" || record.event?.item?.type === "subagent")
+    )
       return true;
     // Keep gemini content/tool_call_response — they get merged by buildDisplayEntries
     if (record.eventType === "content" || record.eventType === "tool_call_response") return true;
@@ -2123,12 +2829,12 @@ function buildTurnDurationMap(records, options = {}) {
       threadSpan.last = Math.max(threadSpan.last, time);
       threadSpan.events.push({ ...record, time });
       spansByTurnAttemptThread.set(attemptThreadKey, threadSpan);
-      if (isCommandStartEvent(record)) {
+      if (isTimedWorkStartEvent(record)) {
         openCommandsByTurnAttemptThread.set(
           attemptThreadKey,
           (openCommandsByTurnAttemptThread.get(attemptThreadKey) ?? 0) + 1,
         );
-      } else if (isCommandEndEvent(record)) {
+      } else if (isTimedWorkEndEvent(record)) {
         openCommandsByTurnAttemptThread.set(
           attemptThreadKey,
           Math.max(0, (openCommandsByTurnAttemptThread.get(attemptThreadKey) ?? 0) - 1),
@@ -2396,9 +3102,9 @@ function activeEventDurationMs(records, options = {}) {
 
   for (let i = 0; i < events.length; i += 1) {
     const record = events[i].record;
-    if (isCommandStartEvent(record)) {
+    if (isTimedWorkStartEvent(record)) {
       openCommands += 1;
-    } else if (isCommandEndEvent(record)) {
+    } else if (isTimedWorkEndEvent(record)) {
       openCommands = Math.max(0, openCommands - 1);
     }
 
@@ -2427,6 +3133,16 @@ function isCommandStartEvent(record) {
 function isCommandEndEvent(record) {
   return record.eventType === "item.completed" &&
     record.event?.item?.type === "command_execution";
+}
+
+function isTimedWorkStartEvent(record) {
+  return isCommandStartEvent(record) ||
+    (record.eventType === "item.started" && record.event?.item?.type === "subagent");
+}
+
+function isTimedWorkEndEvent(record) {
+  return isCommandEndEvent(record) ||
+    (record.eventType === "item.completed" && record.event?.item?.type === "subagent");
 }
 
 function fmtInt(n) {
@@ -3185,6 +3901,18 @@ function deriveTestStatusFromCommand(record) {
     return null;
   }
 
+  const stageSections = parseStageSections(output);
+  if (commandInfo.kind === "selected" && stageSections.length > 0) {
+    const outputStages = [...new Set(stageSections.map((stage) => stage.name))];
+    const selectedStages = commandInfo.stages ?? [commandInfo.stage];
+    if (
+      outputStages.length !== selectedStages.length ||
+      outputStages.some((stage, index) => stage !== selectedStages[index])
+    ) {
+      return null;
+    }
+  }
+
   const summary = commandInfo.kind === "selected"
     ? parseLastTestReportSummary(output)
     : parseTestReportSummary(output);
@@ -3192,7 +3920,6 @@ function deriveTestStatusFromCommand(record) {
     return null;
   }
 
-  const stageSections = parseStageSections(output);
   const stageNames = stageSections.map(stage => stage.name);
   const firstFailureLine = findFirstFailureLine(output) ?? null;
   const failingStage = inferFailureStage(firstFailureLine, stageSections);
@@ -3369,6 +4096,8 @@ function buildAgentTestProgressState(records) {
   const byTurn = new Map();
   const testReportLogCommands = new Map();
   const commandsByAsyncCell = new Map();
+  const commandsBySessionStoreKey = new Map();
+  const commandStartsById = new Map();
 
   for (const record of records) {
     seedAgentTestProgressTracker(tracker, record);
@@ -3383,18 +4112,38 @@ function buildAgentTestProgressState(records) {
     }
 
     const item = record.event?.item;
+    if (record.eventType === "item.started" && item?.type === "command_execution" && item.id) {
+      commandStartsById.set(item.id, item);
+      continue;
+    }
     if (record.eventType !== "item.completed" || item?.type !== "command_execution") {
       continue;
     }
 
-    const waitCellId = waitCommandCellId(item.command);
-    const outputCellId = asyncCellIdFromOutput(item.aggregated_output);
-    if (outputCellId && !waitCellId) {
-      commandsByAsyncCell.set(outputCellId, item.command ?? "");
+    const startItem = item.id ? commandStartsById.get(item.id) ?? null : null;
+    if (item.id) {
+      commandStartsById.delete(item.id);
     }
-    const commandForProgress = waitCellId && commandsByAsyncCell.has(waitCellId)
-      ? `${commandsByAsyncCell.get(waitCellId)} (continued session ${waitCellId})`
-      : item.command ?? "";
+    const waitCellId = waitCommandCellId(item.command);
+    const sessionLoadKey = commandSessionLoadKey(startItem ?? item);
+    const parentCommand = (waitCellId
+      ? commandsByAsyncCell.get(asyncRecordMapKey(record, waitCellId))
+      : null) ??
+      (sessionLoadKey
+        ? commandsBySessionStoreKey.get(asyncRecordMapKey(record, sessionLoadKey))
+        : null) ??
+      null;
+    const commandForProgress = parentCommand ?? unwrapCommand(item.command ?? startItem?.command ?? "");
+    for (const outputId of asyncOutputIds(item.aggregated_output)) {
+      commandsByAsyncCell.set(asyncRecordMapKey(record, outputId), commandForProgress);
+    }
+    const sessionStoreKey = commandSessionStoreKey(startItem ?? item);
+    if (sessionStoreKey) {
+      commandsBySessionStoreKey.set(
+        asyncRecordMapKey(record, sessionStoreKey),
+        commandForProgress,
+      );
+    }
 
     rememberTestReportLogCommands(testReportLogCommands, record, commandForProgress);
     const commandInfo = parseAgentTestCommand(commandForProgress) ??
@@ -4127,6 +4876,10 @@ function inferSelectedReportSummaryProgress(output, commandInfo, tracker, exitCo
   }
 
   if (stages.length === 1) {
+    const outputStages = [...new Set(parseStageSections(output).map((section) => section.name))];
+    if (outputStages.length > 0 && (outputStages.length !== 1 || outputStages[0] !== stages[0])) {
+      return null;
+    }
     const anchoredTotal = commandInfo.hasSubset ? 0 : tracker.stageTotals.get(stages[0]) ?? 0;
     const total = Math.max(summary.testsTotal, anchoredTotal);
     return {
@@ -4350,9 +5103,11 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
   const progress = new Map();
   for (const [stage, state] of stages.entries()) {
     const entries = [...state.targets.entries()];
+    const aggregateEntries = entries.filter(([target]) =>
+      isStageAggregateProgressTarget(target, stage));
     const nonAggregateEntries = entries.filter(([target]) =>
       !isStageAggregateProgressTarget(target, stage));
-    const targets = (nonAggregateEntries.length ? nonAggregateEntries : entries)
+    const targets = (aggregateEntries.length ? aggregateEntries : nonAggregateEntries)
       .map(([, target]) => target);
     const passed = targets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
     const total = targets.reduce((sum, target) => sum + (target.total ?? 0), 0);
@@ -4698,6 +5453,7 @@ function selectedRunMeta() {
 
 function turnSummaryText(items) {
   let cmds = 0, msgs = 0, files = 0, thoughts = 0;
+  const subagents = new Set();
   for (const r of items) {
     const t = r.event?.item?.type;
     const et = r.eventType;
@@ -4705,6 +5461,7 @@ function turnSummaryText(items) {
     if (t === "command_execution") cmds++;
     else if (t === "agent_message") msgs++;
     else if (t === "file_change") files++;
+    else if (t === "subagent") subagents.add(subagentRecordKey(r));
     // Gemini events
     else if (et === "tool_call_request") cmds++;
     else if (et === "thought") thoughts++;
@@ -4722,6 +5479,7 @@ function turnSummaryText(items) {
   if (cmds) parts.push(`${cmds} cmd`);
   if (msgs) parts.push(`${msgs} msg`);
   if (files) parts.push(`${files} file`);
+  if (subagents.size) parts.push(`${subagents.size} agent`);
   if (thoughts) parts.push(`${thoughts} thought`);
   return parts.join(", ") || `${items.length} events`;
 }
@@ -4751,6 +5509,7 @@ function renderTimeline(records) {
     state.currentRun,
   ).byTurn;
   const filtered = filterRecords(records);
+  const subagentEstimateModel = buildSubagentEstimateModel(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
 
   const turnMap = buildTurnMap(filtered);
@@ -4812,23 +5571,27 @@ function renderTimeline(records) {
     const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
+    const subagents = buildSubagentStats(items, subagentEstimateModel);
     const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap, {
       activeCurrentTurn: isActiveCurrentRunTurn(selectedRunMeta(), turn),
       activeStartMs: activeCurrentRunTurnStartMs(selectedRunMeta(), turn, items),
     }));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
-    const displayEntries = buildDisplayEntries(items);
+    const displayEntries = buildDisplayEntries(items, { subagentEstimateModel });
     const entryWindow = displayEntryWindow(displayEntries);
     const cardWindowText = turnCardWindowText(entryWindow);
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts, { progress })}</span>` : "";
     const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
+    const subagentHtml = subagents.count
+      ? ` <span class="turn-subagents">${escapeHtml(subagentStatsText(subagents))}</span>`
+      : "";
     const cardWindowHtml = cardWindowText ? ` <span class="turn-window">${escapeHtml(cardWindowText)}</span>` : "";
     const phaseHtml = phase
       ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
       : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
 
     entryWindow.entries.forEach((entry, offset) => {
       const el = renderDisplayEntry(entry);
@@ -5121,7 +5884,8 @@ function codexDetailQueryParams() {
 function combinedRunQueryParams() {
   const params = new URLSearchParams();
   params.set("codex", "tail");
-  params.set("tailTurns", String(COMBINED_RUN_CARD_LIMIT));
+  params.set("tailTurns", "2");
+  params.set("maxEventsPerTurn", "50");
   params.set("usage", "fast");
   return params;
 }
@@ -5222,7 +5986,7 @@ async function loadCombinedRuns(options = {}) {
       const data = state.staticMode
         ? await loadStaticRunData(run.id, combinedRunQueryParams())
         : await fetchJson(`/api/run/${encodeURIComponent(run.id)}?${query}`);
-      const events = data.events ?? [];
+      const events = collapseMirroredCodexItems(data.events ?? []);
       const shapeUsage = normalizeShapeUsage(data.shapeUsage);
       return {
         run,
@@ -5276,11 +6040,12 @@ async function loadRun(id, options = {}) {
     ? await loadStaticRunData(id, detailParams)
     : await fetchJson(`/api/run/${encodeURIComponent(id)}${detailQuery ? `?${detailQuery}` : ""}`);
 
-  state.events = data.events ?? [];
+  const rawEvents = data.events ?? [];
+  state.events = collapseMirroredCodexItems(rawEvents);
   state.combinedRuns = [];
   state.shapeUsage = normalizeShapeUsage(data.shapeUsage);
   state.codexDetail = data.codexDetail ?? null;
-  state.raw = state.events.slice();
+  state.raw = rawEvents.slice();
   let scrollSnapshot = options.scrollSnapshot
     ?? (options.stickToBottom ? captureScrollSnapshot({ forceStickToBottom: true }) : null);
   if (scrollSnapshot && scrollSnapshot.userScrollVersion !== state.userScrollVersion) {
@@ -6041,7 +6806,8 @@ function renderCombinedRun(entry) {
 
 function latestCombinedEntries(records, limit = COMBINED_RUN_CARD_LIMIT) {
   const filtered = records.filter(shouldShow);
-  return buildDisplayEntries(filtered).slice(-limit);
+  const subagentEstimateModel = buildSubagentEstimateModel(records);
+  return buildDisplayEntries(filtered, { subagentEstimateModel }).slice(-limit);
 }
 
 function combinedUsageSummary(entries) {

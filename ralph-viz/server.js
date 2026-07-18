@@ -8,10 +8,15 @@ import http from "node:http";
 import os from "node:os";
 import readline from "node:readline";
 import { createHash } from "node:crypto";
+import {
+  collectClaudeSubagentEvents,
+  DEFAULT_CLAUDE_PROJECTS_DIR,
+} from "../claude-subagent-events.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? DEFAULT_CLAUDE_PROJECTS_DIR;
 const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -27,12 +32,13 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
+const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
 const RUN_USAGE_CACHE_VERSION = 24;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 6;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 10;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 6;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 10;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -44,8 +50,15 @@ const RALPH_DEFAULT_AUTO_TEST_SUBSET_MAX_FILES = 0;
 const RALPH_DEFAULT_AUTO_TEST_SUBSET_TARGET_FILES = 0;
 const SLICE_METADATA_CACHE = new Map();
 const CODEX_USAGE_FILE_CACHE = new Map();
+const OPEN_CODEX_SESSION_CACHES = new Map();
+const OPEN_CODEX_SESSION_READS = new Map();
+const RUN_TAIL_FILE_CACHES = new Map();
+const RUN_TAIL_FILE_READS = new Map();
 let CODEX_SESSION_INDEX_CACHE = null;
 let APP_BUILD_ID_CACHE = null;
+const RUN_USAGE_REFRESHES = new Map();
+const OPEN_CODEX_SESSION_CACHE_LIMIT = 32;
+const RUN_TAIL_FILE_CACHE_LIMIT = 16;
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -206,13 +219,15 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     return responseBaseEvents;
   }
 
+  const responseEvents = await appendClaudeSubagentEvents(responseBaseEvents);
+
   if (detailOptions.mode !== "all" && selectedWindows.length === 0) {
-    return responseBaseEvents;
+    return responseEvents;
   }
 
   const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
   if (threadIds.length === 0) {
-    return withRunProgress;
+    return responseEvents;
   }
 
   const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
@@ -220,24 +235,25 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     buildSessionTurnResolver(events),
   );
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
-  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
+  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(responseEvents);
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
   const sessionEvents = sessionEventGroups.flat();
   const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
   if (!sessionEvents.length && !progressEvents.length) {
-    return responseBaseEvents;
+    return responseEvents;
   }
 
-  return mergeEventStreams(mergeEventStreams(responseBaseEvents, sessionEvents), progressEvents);
+  return mergeEventStreams(mergeEventStreams(responseEvents, sessionEvents), progressEvents);
 }
 
 async function readTailRunWithCodexSession(filePath, detailOptions) {
-  const events = await readRecentRunTailEvents(filePath, detailOptions);
+  let events = await readRecentRunTailEvents(filePath, detailOptions);
   if (!events.length) {
     return null;
   }
+  events = await appendClaudeSubagentEvents(events);
   await augmentLatestTestStatusFromLog(events, filePath);
   const runProgressEvents = progressEventsFromRunEvents(events);
   const withRunProgress = runProgressEvents.length
@@ -276,7 +292,16 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
     mergeEventStreams(responseBaseEvents, sessionEventGroups.flat()),
     progressEvents,
   );
-  return appendLatestThreadUsageEvents(merged);
+  const limited = limitSessionEventsByTurn(merged, readOptions.maxEventsPerTurn);
+  return appendLatestThreadUsageEvents(limited);
+}
+
+async function appendClaudeSubagentEvents(events) {
+  const additions = await collectClaudeSubagentEvents(events, {
+    claudeDir: CLAUDE_PROJECTS_DIR,
+    resultLimit: CODEX_SESSION_OUTPUT_LIMIT,
+  });
+  return additions.length ? mergeEventStreams(events, additions) : events;
 }
 
 async function appendLatestThreadUsageEvents(events) {
@@ -353,34 +378,107 @@ function usageDominates(candidate, existing) {
 }
 
 async function readRecentRunTailEvents(filePath, detailOptions) {
-  const stat = await fs.stat(filePath);
-  if (!stat.size) {
-    return [];
-  }
-  const bytesToRead = Math.min(stat.size, RUN_RESPONSE_TURN_MAX_BYTES);
-  const start = stat.size - bytesToRead;
-  const text = await readFileSlice(filePath, start, stat.size);
-  let lines = text.split(/\r?\n/);
-  if (start > 0) {
-    lines = lines.slice(1);
-  }
-  const events = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-    try {
-      events.push(JSON.parse(trimmed));
-    } catch (_) {
-      // The first line of a tail slice can be partial.
-    }
-  }
+  const events = await readCachedRunTailEvents(filePath);
   const wantedTurns = latestTurnNumbersFromEvents(
     events,
     detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS,
   );
   return events.filter((event) => wantedTurns.has(event.turnNumber));
+}
+
+async function readCachedRunTailEvents(filePath) {
+  const cacheKey = path.resolve(filePath);
+  const pending = RUN_TAIL_FILE_READS.get(cacheKey);
+  if (pending) {
+    return (await pending).records.map((record) => record.event);
+  }
+  const read = refreshRunTailFileCache(cacheKey, filePath);
+  RUN_TAIL_FILE_READS.set(cacheKey, read);
+  try {
+    return (await read).records.map((record) => record.event);
+  } finally {
+    if (RUN_TAIL_FILE_READS.get(cacheKey) === read) {
+      RUN_TAIL_FILE_READS.delete(cacheKey);
+    }
+  }
+}
+
+async function refreshRunTailFileCache(cacheKey, filePath) {
+  const stat = await fs.stat(filePath);
+  if (!stat.size) {
+    return { fileSize: 0, lastUsedAt: Date.now(), records: [], trailingText: "" };
+  }
+
+  let entry = RUN_TAIL_FILE_CACHES.get(cacheKey);
+  if (
+    !entry ||
+    stat.size < entry.fileSize ||
+    stat.size - entry.fileSize > RUN_RESPONSE_TURN_MAX_BYTES
+  ) {
+    const bytesToRead = Math.min(stat.size, RUN_RESPONSE_TURN_MAX_BYTES);
+    const start = stat.size - bytesToRead;
+    const text = await readFileSlice(filePath, start, stat.size);
+    const split = splitCompleteSessionLines(text, start > 0);
+    entry = {
+      fileSize: stat.size,
+      lastUsedAt: Date.now(),
+      records: parseRunTailRecords(split.lines),
+      trailingText: split.trailingText,
+    };
+    trimRunTailFileCache(entry);
+    RUN_TAIL_FILE_CACHES.set(cacheKey, entry);
+    pruneRunTailFileCaches();
+    return entry;
+  }
+
+  if (stat.size > entry.fileSize) {
+    const appended = await readFileSlice(filePath, entry.fileSize, stat.size);
+    const split = splitCompleteSessionLines(entry.trailingText + appended);
+    entry.records.push(...parseRunTailRecords(split.lines));
+    entry.fileSize = stat.size;
+    entry.trailingText = split.trailingText;
+    trimRunTailFileCache(entry);
+  }
+  entry.lastUsedAt = Date.now();
+  return entry;
+}
+
+function parseRunTailRecords(lines) {
+  const records = [];
+  for (const line of lines ?? []) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      records.push({
+        bytes: Buffer.byteLength(line) + 1,
+        event: JSON.parse(trimmed),
+      });
+    } catch (_) {
+      // The first line of a tail slice can be partial.
+    }
+  }
+  return records;
+}
+
+function trimRunTailFileCache(entry) {
+  let totalBytes = entry.records.reduce((sum, record) => sum + record.bytes, 0);
+  while (totalBytes > RUN_RESPONSE_TURN_MAX_BYTES && entry.records.length > 1) {
+    totalBytes -= entry.records.shift().bytes;
+  }
+}
+
+function pruneRunTailFileCaches() {
+  if (RUN_TAIL_FILE_CACHES.size <= RUN_TAIL_FILE_CACHE_LIMIT) {
+    return;
+  }
+  const oldest = [...RUN_TAIL_FILE_CACHES.entries()]
+    .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
+    .slice(0, RUN_TAIL_FILE_CACHES.size - RUN_TAIL_FILE_CACHE_LIMIT);
+  for (const [cacheKey] of oldest) {
+    RUN_TAIL_FILE_CACHES.delete(cacheKey);
+  }
 }
 
 function latestTurnNumbersFromEvents(events, count) {
@@ -419,7 +517,11 @@ function tailTurnWindowsFromEvents(events, count) {
     current.endTime = Math.max(current.endTime, time + 1);
     byTurn.set(event.turnNumber, current);
   }
-  return [...byTurn.values()].sort((a, b) => a.startTime - b.startTime);
+  const windows = [...byTurn.values()].sort((a, b) => a.startTime - b.startTime);
+  return windows.map((window, index) => ({
+    ...window,
+    endTime: windows[index + 1]?.startTime ?? Infinity,
+  }));
 }
 
 function selectRunEventsForResponse(events, detailOptions, selectedWindows) {
@@ -429,6 +531,9 @@ function selectRunEventsForResponse(events, detailOptions, selectedWindows) {
   }
   if (detailOptions.mode !== "all" && detailOptions.mode !== "none") {
     selected = filterEventsToWindows(events, selectedWindows);
+  }
+  if (detailOptions.mode !== "none") {
+    selected = normalizeRunAsyncCommandChains(selected);
   }
   const compacted = selected.map((event) =>
     compactConvertedSessionEvent(event, detailOptions.outputLimit ?? CODEX_SESSION_OUTPUT_LIMIT));
@@ -459,26 +564,50 @@ function filterEventsToWindows(events, selectedWindows) {
 function progressEventsFromRunEvents(events) {
   const progressEvents = [];
   const commandsByAsyncCell = new Map();
+  const commandsBySessionStoreKey = new Map();
+  const commandStartsById = new Map();
   for (const record of events) {
     const item = record?.event?.item;
-    if (record?.eventType !== "item.completed" || item?.type !== "command_execution") {
+    if (item?.type !== "command_execution") {
+      continue;
+    }
+    if (record?.eventType === "item.started" && item.id) {
+      commandStartsById.set(item.id, item);
+      continue;
+    }
+    if (record?.eventType !== "item.completed") {
       continue;
     }
     if (!Number.isInteger(record.turnNumber) || record.turnNumber <= 0) {
       continue;
     }
     const output = commandOutputText(item.aggregated_output);
+    const startItem = item.id ? commandStartsById.get(item.id) ?? null : null;
+    if (item.id) {
+      commandStartsById.delete(item.id);
+    }
+    const metadataItem = startItem ?? item;
+    const toolSource = commandToolSource(metadataItem);
+    const waitCellId = waitCommandCellId(toolSource);
+    const outputCellId = commandOutputSessionId(item.aggregated_output);
+    const sessionLoadKey = commandSessionLoadKey(startItem ?? item);
+    const command = (waitCellId
+      ? commandsByAsyncCell.get(asyncRecordMapKey(record, waitCellId))
+      : null) ??
+      (sessionLoadKey
+        ? commandsBySessionStoreKey.get(asyncRecordMapKey(record, sessionLoadKey))
+        : null) ??
+      normalizedEventCommand(item.command ?? startItem?.command ?? "");
+    if (outputCellId) {
+      commandsByAsyncCell.set(asyncRecordMapKey(record, outputCellId), command);
+    }
+    const sessionStoreKey = commandSessionStoreKey(startItem ?? item);
+    if (sessionStoreKey) {
+      commandsBySessionStoreKey.set(asyncRecordMapKey(record, sessionStoreKey), command);
+    }
     if (!output) {
       continue;
     }
-    const waitCellId = waitCommandCellId(item.command);
-    const outputCellId = commandOutputSessionId(item.aggregated_output);
-    if (outputCellId && !waitCellId) {
-      commandsByAsyncCell.set(outputCellId, String(item.command ?? ""));
-    }
-    const command = waitCellId && commandsByAsyncCell.has(waitCellId)
-      ? `${commandsByAsyncCell.get(waitCellId)} (continued session ${waitCellId})`
-      : String(item.command ?? "");
     const observation = progressObservationFromSessionOutput(
       output,
       record.recordedAt,
@@ -505,15 +634,123 @@ function progressEventsFromRunEvents(events) {
   return compactBestProgressEvents(progressEvents);
 }
 
+function normalizeRunAsyncCommandChains(events) {
+  const commandsByAsyncCell = new Map();
+  const sessionsByStoreKey = new Map();
+  const startsById = new Map();
+  const normalized = [];
+
+  for (const record of events ?? []) {
+    const item = record?.event?.item;
+    if (item?.type !== "command_execution" ||
+        (record.eventType !== "item.started" && record.eventType !== "item.completed")) {
+      normalized.push(record);
+      continue;
+    }
+
+    const startItem = record.eventType === "item.started"
+      ? item
+      : item.id
+        ? startsById.get(item.id) ?? null
+        : null;
+    const metadataItem = startItem ?? item;
+    const toolSource = commandToolSource(metadataItem);
+    const waitCellId = waitCommandCellId(toolSource);
+    const loadKey = commandSessionLoadKey(metadataItem);
+    const storedSession = loadKey
+      ? sessionsByStoreKey.get(asyncRecordMapKey(record, loadKey)) ?? null
+      : null;
+    const parentId = waitCellId ?? storedSession?.sessionId ?? null;
+    const parentCommand = (waitCellId
+      ? commandsByAsyncCell.get(asyncRecordMapKey(record, waitCellId))
+      : null) ??
+      storedSession?.command ??
+      null;
+    const baseCommand = normalizedEventCommand(
+      item.command ?? startItem?.command ?? "",
+      toolSource,
+    );
+    const command = parentCommand
+      ? `${parentCommand} (continued session ${parentId})`
+      : baseCommand;
+    const normalizedItem = command === item.command ? item : { ...item, command };
+    const normalizedRecord = normalizedItem === item
+      ? record
+      : {
+          ...record,
+          event: { ...record.event, item: normalizedItem },
+        };
+    normalized.push(normalizedRecord);
+
+    if (record.eventType === "item.started") {
+      if (item.id) {
+        startsById.set(item.id, item);
+      }
+      continue;
+    }
+    if (item.id) {
+      startsById.delete(item.id);
+    }
+    const outputSessionId = commandOutputSessionId(item.aggregated_output);
+    if (outputSessionId) {
+      commandsByAsyncCell.set(
+        asyncRecordMapKey(record, outputSessionId),
+        parentCommand ?? command,
+      );
+    }
+    const storeKey = commandSessionStoreKey(metadataItem);
+    if (storeKey && outputSessionId) {
+      sessionsByStoreKey.set(asyncRecordMapKey(record, storeKey), {
+        sessionId: outputSessionId,
+        command: parentCommand ?? command,
+      });
+    }
+  }
+  return normalized;
+}
+
+function normalizedEventCommand(command, toolSource = command) {
+  const commands = extractToolExecCommands(toolSource);
+  return commands.length === 1 ? commands[0] : String(command ?? "");
+}
+
+function asyncRecordMapKey(record, value) {
+  return [
+    record?.threadId ?? "",
+    displayTurnForRecord(record) ?? "",
+    String(value ?? ""),
+  ].join("\u0000");
+}
+
+function commandToolSource(item) {
+  return String(item?.raw?.input ?? item?.command ?? "");
+}
+
+function commandSessionLoadKey(item) {
+  const source = commandToolSource(item);
+  if (!/\btools\.write_stdin\s*\(/.test(source) && !/^write_stdin\b/.test(item?.command ?? "")) {
+    return null;
+  }
+  return extractSessionLoadKey(source);
+}
+
+function commandSessionStoreKey(item) {
+  return extractSessionStoreKey(commandToolSource(item));
+}
+
 function waitCommandCellId(command) {
   const text = String(command ?? "");
   const continuedMatch = text.match(/\(continued session ([^)]+)\)\s*$/);
   if (continuedMatch) {
     return continuedMatch[1];
   }
-  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?\bsession_id\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
+  const writeStdinMatch = text.match(/\btools\.write_stdin\s*\(\s*\{[\s\S]*?(?:\bsession_id\b|["']session_id["'])\s*:\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))/);
   if (writeStdinMatch) {
     return writeStdinMatch[1] ?? writeStdinMatch[2] ?? writeStdinMatch[3] ?? null;
+  }
+  const normalizedWriteStdinMatch = text.match(/^write_stdin session ([^\s]+)(?:\s|$)/);
+  if (normalizedWriteStdinMatch) {
+    return normalizedWriteStdinMatch[1];
   }
   const waitMatch = text.match(/^wait\s+(\{.*\})$/s);
   if (!waitMatch) {
@@ -650,25 +887,38 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
 
   if (summary) {
     if (!cacheStatMatches(cached.file, stat)) {
-      summary = await refreshStaleFastRunUsageSummary(
-        shape,
-        filePath,
-        fileBase,
-        stat,
-        cached,
-        usageMode,
-      ) ?? summary;
+      scheduleFastRunUsageRefresh(shape, filePath, fileBase, stat, cached, usageMode);
     }
 
     const threadUsageById = new Map(
       summary.threadUsages.map((entry) => [entry.threadId, entry.usage]),
     );
     const seenThreadIds = new Set(summary.threadIds);
+    let liveCodexUsageDelta = null;
+    let liveCodexCompleteUsage = null;
+    const latestTurnNumber = latestEventTurnNumber(events);
+    const latestTurnThreadIds = new Set(
+      events
+        .filter((event) => eventTurnNumber(event) === latestTurnNumber)
+        .map((event) => eventThreadId(event))
+        .filter(Boolean),
+    );
     if (usageMode !== "skip") {
       for (const threadId of selectedThreadIds) {
         seenThreadIds.add(threadId);
         const usage = await readCodexThreadUsageFast(threadId);
         if (hasTokenUsage(usage)) {
+          const previous = threadUsageById.get(threadId);
+          if (latestTurnThreadIds.has(threadId)) {
+            if (!previous || usageCounterReset(usage, previous)) {
+              liveCodexCompleteUsage = addUsage(liveCodexCompleteUsage, usage);
+            } else {
+              liveCodexUsageDelta = addUsage(
+                liveCodexUsageDelta,
+                usageDelta(usage, previous),
+              );
+            }
+          }
           threadUsageById.set(threadId, usage);
         }
       }
@@ -694,10 +944,14 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
     if (usageMode !== "skip") {
       summary.turnUsages = mergeTurnUsageEntriesMax(
         summary.turnUsages,
-        mergeTurnUsageEntriesMax(
-          turnUsageEntriesFromEvents(events),
-          await readLiveCodexTurnUsageEntries(summary, selectedThreadIds, events),
-        ),
+        turnUsageEntriesFromEvents(events.filter((event) =>
+          event.eventType !== "codex.session.token_count")),
+      );
+      summary.turnUsages = addLiveUsageDeltaToLatestTurn(
+        summary.turnUsages,
+        events,
+        liveCodexCompleteUsage,
+        liveCodexUsageDelta,
       );
     }
     await augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary);
@@ -718,6 +972,69 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
   return shapeUsageFromRunSummaries(shape, [{ fileBase, summary: rebuilt }]);
 }
 
+function addLiveUsageDeltaToLatestTurn(
+  turnUsages,
+  events,
+  completeUsage,
+  usageDeltaValue,
+) {
+  if (!hasTokenUsage(completeUsage) && !hasTokenUsage(usageDeltaValue)) {
+    return turnUsages;
+  }
+  const turnNumber = latestEventTurnNumber(events);
+  if (!turnNumber) {
+    return turnUsages;
+  }
+  const byTurn = new Map(normalizeTurnUsageEntries(turnUsages).map((entry) => [
+    entry.turnNumber,
+    { ...entry, usage: normalizeUsage(entry.usage) },
+  ]));
+  const existing = byTurn.get(turnNumber);
+  const baseUsage = hasTokenUsage(completeUsage) &&
+      usageMagnitude(completeUsage) > usageMagnitude(existing?.usage)
+    ? completeUsage
+    : existing?.usage;
+  byTurn.set(turnNumber, {
+    turnNumber,
+    usage: addUsage(baseUsage, usageDeltaValue),
+  });
+  return [...byTurn.values()].sort((left, right) => left.turnNumber - right.turnNumber);
+}
+
+function latestEventTurnNumber(events) {
+  return (events ?? []).reduce((latest, event) => {
+    const turn = eventTurnNumber(event);
+    return turn == null ? latest : Math.max(latest, turn);
+  }, 0);
+}
+
+function scheduleFastRunUsageRefresh(shape, filePath, fileBase, stat, cacheEntry, usageMode) {
+  if (usageMode === "skip") {
+    return;
+  }
+  const generatedAt = Date.parse(cacheEntry?.generatedAt ?? "");
+  if (Number.isFinite(generatedAt) && Date.now() - generatedAt < RUN_USAGE_REFRESH_INTERVAL_MS) {
+    return;
+  }
+  const key = `${shape}\0${fileBase}`;
+  if (RUN_USAGE_REFRESHES.has(key)) {
+    return;
+  }
+  const refresh = refreshStaleFastRunUsageSummary(
+    shape,
+    filePath,
+    fileBase,
+    stat,
+    cacheEntry,
+    usageMode,
+  ).catch((error) => {
+    console.warn(`failed to refresh usage cache for ${shape}/${fileBase}:`, error?.message ?? error);
+  }).finally(() => {
+    RUN_USAGE_REFRESHES.delete(key);
+  });
+  RUN_USAGE_REFRESHES.set(key, refresh);
+}
+
 async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, cacheEntry, usageMode) {
   const cachedSize = Number(cacheEntry?.file?.size);
   if (!Number.isFinite(cachedSize) || cachedSize < 0 || cachedSize > stat.size) {
@@ -726,19 +1043,14 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
 
   const summary = normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
   const deltaEvents = cachedSize < stat.size
-    ? await readRunEventsFromOffset(filePath, cachedSize)
+    ? await readRunEventsFromOffset(filePath, cachedSize, stat.size)
     : [];
 
   if (deltaEvents.length) {
-    if (deltaEventsOverlapCachedTurns(summary, deltaEvents)) {
-      const rebuilt = buildRunLogUsageSummary(fileBase, stat, await readRunFile(filePath), usageMode);
-      const latestSessionStats = usageMode === "skip"
-        ? []
-        : await codexSessionStatsForThreadIds(rebuilt.threadIds);
-      await writeRunUsageCache(shape, fileBase, stat, "fast", latestSessionStats, rebuilt);
-      return rebuilt;
-    }
     extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
+    if (usageMode !== "skip") {
+      await replaceTouchedSummaryThreadUsages(summary, deltaEvents);
+    }
   }
 
   const latestSessionStats = usageMode === "skip"
@@ -748,25 +1060,32 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
   return summary;
 }
 
-function deltaEventsOverlapCachedTurns(summary, deltaEvents) {
-  const cachedTurns = new Set(
-    normalizeTurnDurationEntries(summary?.turnDurations)
-      .map((entry) => entry.turnNumber),
-  );
-  if (!cachedTurns.size) {
-    return false;
+async function replaceTouchedSummaryThreadUsages(summary, events) {
+  const touchedThreadIds = inferThreadIdsFromRun("", events);
+  if (!touchedThreadIds.length) {
+    return;
   }
-  return deltaEvents.some((event) =>
-    Number.isInteger(event?.turnNumber) &&
-    event.turnNumber > 0 &&
-    cachedTurns.has(event.turnNumber));
+  const byThread = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
+  for (const threadId of touchedThreadIds) {
+    const usage = await readCodexThreadUsageFast(threadId);
+    if (hasTokenUsage(usage)) {
+      byThread.set(threadId, usage);
+    }
+  }
+  summary.threadUsages = [...byThread.entries()]
+    .filter(([, usage]) => hasTokenUsage(usage))
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([threadId, usage]) => ({ threadId, usage: normalizeUsage(usage) }));
 }
 
-async function readRunEventsFromOffset(filePath, offset) {
+async function readRunEventsFromOffset(filePath, offset, endOffset = null) {
   const events = [];
   const stream = createReadStream(filePath, {
     encoding: "utf8",
     start: Math.max(0, offset),
+    ...(Number.isFinite(endOffset) && endOffset > offset
+      ? { end: Math.max(0, endOffset - 1) }
+      : {}),
   });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const rawLine of lines) {
@@ -1728,9 +2047,9 @@ function activeEventDurationMs(timedEvents, options = {}) {
 
   for (let i = 0; i < events.length; i += 1) {
     const event = events[i];
-    if (isCommandStartEvent(event)) {
+    if (isTimedWorkStartEvent(event)) {
       openCommands += 1;
-    } else if (isCommandEndEvent(event)) {
+    } else if (isTimedWorkEndEvent(event)) {
       openCommands = Math.max(0, openCommands - 1);
     }
 
@@ -1890,9 +2209,9 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
     span.last = Math.max(span.last, time);
     span.events.push({ ...event, time });
     spansByAttemptThread.set(key, span);
-    if (isCommandStartEvent(event)) {
+    if (isTimedWorkStartEvent(event)) {
       openCommandsByAttemptThread.set(key, (openCommandsByAttemptThread.get(key) ?? 0) + 1);
-    } else if (isCommandEndEvent(event)) {
+    } else if (isTimedWorkEndEvent(event)) {
       openCommandsByAttemptThread.set(key, Math.max(0, (openCommandsByAttemptThread.get(key) ?? 0) - 1));
     }
   }
@@ -1977,6 +2296,16 @@ function isCommandStartEvent(event) {
 function isCommandEndEvent(event) {
   return event.eventType === "item.completed" &&
     event.event?.item?.type === "command_execution";
+}
+
+function isTimedWorkStartEvent(event) {
+  return isCommandStartEvent(event) ||
+    (event.eventType === "item.started" && event.event?.item?.type === "subagent");
+}
+
+function isTimedWorkEndEvent(event) {
+  return isCommandEndEvent(event) ||
+    (event.eventType === "item.completed" && event.event?.item?.type === "subagent");
 }
 
 async function readCodexThreadTiming(threadIds, resolveTurn) {
@@ -2154,131 +2483,6 @@ async function readCodexSessionUsageIntoTurns(filePath, resolveTurn, totalsByTur
   return previous;
 }
 
-async function readLiveCodexTurnUsageEntries(summary, threadIds, events) {
-  const windows = selectedTurnUsageWindows(summary, events);
-  if (!windows.length) {
-    return [];
-  }
-  const totalsByTurn = new Map();
-  for (const threadId of threadIds ?? []) {
-    if (!threadId) {
-      continue;
-    }
-    for (const window of windows) {
-      const usage = await readCodexThreadUsageForWindow(
-        threadId,
-        window.startMs,
-        window.endMs,
-      );
-      if (hasTokenUsage(usage)) {
-        totalsByTurn.set(window.turnNumber, addUsage(totalsByTurn.get(window.turnNumber), usage));
-      }
-    }
-  }
-  return normalizeTurnUsageEntries([...totalsByTurn.entries()].map(([turnNumber, usage]) => ({
-    turnNumber,
-    usage,
-  })));
-}
-
-function selectedTurnUsageWindows(summary, events) {
-  const selectedTurns = [...new Set(
-    (events ?? [])
-      .map((event) => eventTurnNumber(event))
-      .filter((turn) => turn != null),
-  )].sort((a, b) => a - b);
-  if (!selectedTurns.length) {
-    return [];
-  }
-  const durations = normalizeTurnDurationEntries(summary?.turnDurations);
-  const durationByTurn = new Map(durations.map((entry) => [entry.turnNumber, entry]));
-  return selectedTurns
-    .map((turnNumber) => {
-      const duration = durationByTurn.get(turnNumber);
-      let startMs = Date.parse(duration?.firstAt ?? "");
-      if (!Number.isFinite(startMs)) {
-        startMs = selectedTurnFirstEventMs(events, turnNumber);
-      }
-      if (!Number.isFinite(startMs)) {
-        return null;
-      }
-      const nextDuration = durations.find((entry) =>
-        entry.turnNumber > turnNumber && Date.parse(entry.firstAt ?? "") > startMs);
-      const endMs = nextDuration ? Date.parse(nextDuration.firstAt ?? "") : Infinity;
-      return { turnNumber, startMs, endMs };
-    })
-    .filter(Boolean);
-}
-
-function selectedTurnFirstEventMs(events, turnNumber) {
-  let first = null;
-  for (const event of events ?? []) {
-    if (eventTurnNumber(event) !== turnNumber) {
-      continue;
-    }
-    const time = Date.parse(event.recordedAt ?? "");
-    if (Number.isFinite(time)) {
-      first = first == null ? time : Math.min(first, time);
-    }
-  }
-  return first;
-}
-
-async function readCodexThreadUsageForWindow(threadId, startMs, endMs) {
-  const files = await findCodexSessionFiles(threadId);
-  let total = emptyUsage();
-  let previous = null;
-
-  for (const filePath of files.sort()) {
-    const result = await readCodexSessionUsageForWindow(filePath, startMs, endMs, previous, total);
-    previous = result.previous;
-    total = result.total;
-    if (result.done) {
-      break;
-    }
-  }
-
-  return hasTokenUsage(total) ? total : null;
-}
-
-async function readCodexSessionUsageForWindow(filePath, startMs, endMs, previousUsage, totalUsage) {
-  let previous = previousUsage;
-  let total = normalizeUsage(totalUsage) ?? emptyUsage();
-  const lines = readline.createInterface({
-    input: createReadStream(filePath, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || !line.includes('"type":"token_count"')) {
-      continue;
-    }
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch (_) {
-      continue;
-    }
-    const time = Date.parse(record.timestamp ?? "");
-    const current = record?.type === "event_msg" && record.payload?.type === "token_count"
-      ? normalizeUsage(record.payload.info?.total_token_usage)
-      : null;
-    if (!Number.isFinite(time) || !hasTokenUsage(current)) {
-      continue;
-    }
-    if (time < startMs) {
-      previous = current;
-      continue;
-    }
-    if (Number.isFinite(endMs) && time >= endMs) {
-      return { previous, total, done: true };
-    }
-    total = addUsage(total, usageDelta(current, previous));
-    previous = current;
-  }
-  return { previous, total, done: false };
-}
-
 async function readCodexThreadUsageFast(threadId) {
   const files = await findCodexSessionFiles(threadId);
   let total = emptyUsage();
@@ -2299,9 +2503,44 @@ async function readLatestCodexTokenUsage(filePath) {
     return cached.usage;
   }
 
+  if (cached && stat.size > cached.fileSize) {
+    const appended = await readFileSlice(filePath, cached.fileSize, stat.size);
+    const split = splitCompleteSessionLines((cached.trailingText ?? "") + appended);
+    const usage = latestCodexTokenUsageFromLines(split.lines) ?? cached.usage;
+    CODEX_USAGE_FILE_CACHE.set(filePath, {
+      cacheKey,
+      fileSize: stat.size,
+      trailingText: split.trailingText,
+      usage,
+    });
+    return usage;
+  }
+
   const usage = await readLatestCodexTokenUsageUncached(filePath, stat.size);
-  CODEX_USAGE_FILE_CACHE.set(filePath, { cacheKey, usage });
+  CODEX_USAGE_FILE_CACHE.set(filePath, {
+    cacheKey,
+    fileSize: stat.size,
+    trailingText: "",
+    usage,
+  });
   return usage;
+}
+
+function latestCodexTokenUsageFromLines(lines) {
+  for (let index = (lines?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.includes('"type":"token_count"')) {
+      continue;
+    }
+    try {
+      const record = JSON.parse(line);
+      const usage = normalizeUsage(record?.payload?.info?.total_token_usage);
+      if (hasTokenUsage(usage)) {
+        return usage;
+      }
+    } catch (_) {}
+  }
+  return null;
 }
 
 async function readLatestCodexTokenUsageUncached(filePath, fileSize) {
@@ -3546,7 +3785,7 @@ function eventItemCardStreamKey(record) {
   const item = record?.event?.item ?? {};
   const base = eventTurnThreadKey(record);
   if (item.type === "command_execution") {
-    return [base, item.type, item.id ?? "", item.command ?? ""].join("|");
+    return [base, item.type, item.id ?? ""].join("|");
   }
   if (item.type === "agent_message" || item.type === "reasoning") {
     return [base, item.type, item.text ?? ""].join("|");
@@ -3947,13 +4186,13 @@ async function readCodexSessionEvents(threadId, resolveTurnNumber, readOptions =
   const events = [];
   const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
   for (const filePath of files) {
-    const tailLines = shouldReadCodexSessionFromTail(readOptions)
-      ? await readCodexSessionTailLines(filePath, readOptions)
-      : null;
-    if (tailLines) {
-      for (const rawLine of tailLines) {
-        processCodexSessionLine(rawLine, readOptions, context, events);
-      }
+    if (shouldReadCodexSessionFromTail(readOptions)) {
+      events.push(...await readCachedOpenCodexSessionEvents(
+        filePath,
+        threadId,
+        resolveTurnNumber,
+        readOptions,
+      ));
       continue;
     }
 
@@ -4121,6 +4360,8 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
   const observations = [];
   const callsById = new Map();
   const commandsBySessionId = new Map();
+  const sessionIdsByStoreKey = new Map();
+  const commandContext = { commandsBySessionId, sessionIdsByStoreKey };
   const stream = createReadStream(filePath, { encoding: "utf8", start: Math.max(0, startOffset) });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const rawLine of lines) {
@@ -4149,7 +4390,7 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
         callsById.set(payload.call_id, {
           name: payload.name,
           args,
-          command: formatFunctionCall(payload, args, { commandsBySessionId }),
+          command: formatFunctionCall(payload, args, commandContext),
         });
       }
       continue;
@@ -4161,16 +4402,28 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
       continue;
     }
     const call = callsById.get(payload.call_id) ?? null;
-    if (isExecCallName(call?.name)) {
-      const sessionId = parseRunningSessionId(payload.output);
-      if (sessionId && call.command) {
-        commandsBySessionId.set(sessionId, call.command);
-      }
+    const parentSessionId = functionCallParentSessionId(call, commandContext);
+    const parentCommand = parentSessionId ? commandsBySessionId.get(parentSessionId) : null;
+    const sessionId = parseRunningSessionId(payload.output);
+    if (sessionId && (parentCommand || call?.command)) {
+      commandsBySessionId.set(sessionId, parentCommand ?? call.command);
     }
-    if (!line.includes("TEST SUMMARY") && !line.includes("ALL TESTS PASSED SUCCESSFULLY")) {
+    const sessionStoreKey = functionCallSessionStoreKey(call);
+    if (sessionId && sessionStoreKey) {
+      sessionIdsByStoreKey.set(sessionStoreKey, sessionId);
+    }
+    if (
+      !line.includes("TEST SUMMARY") &&
+      !line.includes("ALL TESTS PASSED SUCCESSFULLY") &&
+      !line.includes(" tests: PASS (") &&
+      !line.includes(" tests: FAIL (") &&
+      !line.includes(" tests: FAIL after ")
+    ) {
       continue;
     }
-    const command = call?.command ?? "";
+    const command = parentCommand
+      ? `${parentCommand} (continued session ${parentSessionId})`
+      : call?.command ?? "";
     const observation = progressObservationFromCodexOutputRecord(record, command);
     if (observation) {
       observations.push(observation);
@@ -4193,18 +4446,30 @@ function progressObservationFromCodexOutputRecord(record, command = "") {
 
 function progressObservationFromSessionOutput(output, recordedAt, command = "") {
   const commandInfo = parseSingleStageProgressCommand(command);
+  const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
+  const directProgress = stage
+    ? parseSingleStageProgressFromSessionOutput(output, stage)
+    : null;
+  if (directProgress?.total > 0) {
+    return normalizeProgressObservation({
+      recordedAt,
+      stage,
+      passed: directProgress.passed,
+      total: directProgress.total,
+      status: directProgress.status,
+      hasSubset: commandInfo?.hasSubset === true,
+    });
+  }
   const summary = commandInfo?.kind === "selected"
     ? parseLastSessionTestSummary(output)
     : parseSessionTestSummary(output);
   if (!summary) {
     return null;
   }
-  const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   if (!stage) {
     return null;
   }
-  const progress = parseSingleStageProgressFromSessionOutput(output, stage) ??
-    parseSingleStageSummaryProgressFromSessionOutput(summary, command, stage);
+  const progress = parseSingleStageSummaryProgressFromSessionOutput(summary, command, stage, output);
   if (!progress || progress.total <= 0) {
     return null;
   }
@@ -4220,11 +4485,8 @@ function progressObservationFromSessionOutput(output, recordedAt, command = "") 
 
 function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   const section = parseStageSections(String(output ?? "")).find((candidate) => candidate.name === expectedStage);
-  if (!section) {
-    return null;
-  }
   const targets = new Map();
-  for (const line of section.body.split(/\r?\n/)) {
+  for (const line of (section?.body ?? String(output ?? "")).split(/\r?\n/)) {
     let match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
     if (match) {
       targets.set(match[1], {
@@ -4245,9 +4507,14 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
     }
   }
   const entries = [...targets.entries()];
+  const aggregateEntries = entries.filter(([target]) =>
+    isStageAggregateProgressTarget(target, expectedStage));
+  if (!section && aggregateEntries.length === 0) {
+    return null;
+  }
   const nonAggregateEntries = entries.filter(([target]) =>
     !isStageAggregateProgressTarget(target, expectedStage));
-  const selectedTargets = (nonAggregateEntries.length ? nonAggregateEntries : entries)
+  const selectedTargets = (aggregateEntries.length ? aggregateEntries : nonAggregateEntries)
     .map(([, target]) => target);
   if (selectedTargets.length === 0) {
     return null;
@@ -4263,7 +4530,7 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   };
 }
 
-function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage) {
+function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage, output = "") {
   const commandInfo = parseSingleStageProgressCommand(command);
   if (!commandInfo) {
     if (!Number.isFinite(summary.testsTotal) || summary.testsTotal <= 0) {
@@ -4279,6 +4546,13 @@ function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expe
     return null;
   }
   if (commandInfo.kind !== "selected") {
+    return null;
+  }
+  const outputStages = [...new Set(parseStageSections(output).map((section) => section.name))];
+  if (
+    outputStages.length > 0 &&
+    (outputStages.length !== 1 || outputStages[0] !== expectedStage)
+  ) {
     return null;
   }
   return {
@@ -4331,6 +4605,10 @@ function parseSessionTestSummaries(output) {
 function inferSingleSessionProgressStage(output) {
   const stages = [...String(output ?? "").matchAll(/^===== (pa\d+) =====$/gm)]
     .map((match) => match[1]);
+  stages.push(
+    ...[...String(output ?? "").matchAll(/^(pa\d+) tests: (?:PASS|FAIL)(?: \(| after )/gm)]
+      .map((match) => match[1]),
+  );
   const unique = [...new Set(stages)];
   if (unique.length === 1) {
     return unique[0];
@@ -4360,6 +4638,14 @@ function parseSingleStageProgressCommand(command) {
     return {
       kind: "through",
       stage: `pa${Number.parseInt(through[1], 10)}`,
+      hasSubset: false,
+    };
+  }
+  const single = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
+  if (single) {
+    return {
+      kind: "single",
+      stage: `pa${Number.parseInt(single[1], 10)}`,
       hasSubset: false,
     };
   }
@@ -4505,6 +4791,7 @@ async function readCachedClosedCodexSessionWindow(filePath, threadId, resolveTur
     minTime: window.startTime,
     maxTime: window.endTime,
     includeTokenBaseline: true,
+    suppressedItemCardStreams: new Set(),
   };
   const events = await readCodexSessionEventsFromFile(
     filePath,
@@ -4516,22 +4803,21 @@ async function readCachedClosedCodexSessionWindow(filePath, threadId, resolveTur
   if (cachePath) {
     await writeCodexSessionWindowCache(cachePath, stat, limited);
   }
-  return limited;
+  return filterSuppressedSessionEvents(limited, readOptions);
 }
 
 async function readCodexSessionEventsFromFile(filePath, threadId, resolveTurnNumber, readOptions) {
-  const events = [];
-  const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
-  const tailLines = shouldReadCodexSessionFromTail(readOptions)
-    ? await readCodexSessionTailLines(filePath, readOptions)
-    : null;
-  if (tailLines) {
-    for (const rawLine of tailLines) {
-      processCodexSessionLine(rawLine, readOptions, context, events);
-    }
-    return events;
+  if (shouldReadCodexSessionFromTail(readOptions)) {
+    return readCachedOpenCodexSessionEvents(
+      filePath,
+      threadId,
+      resolveTurnNumber,
+      readOptions,
+    );
   }
 
+  const events = [];
+  const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
   const lines = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -4544,6 +4830,117 @@ async function readCodexSessionEventsFromFile(filePath, threadId, resolveTurnNum
   return events;
 }
 
+async function readCachedOpenCodexSessionEvents(
+  filePath,
+  threadId,
+  resolveTurnNumber,
+  readOptions,
+) {
+  const cacheKey = openCodexSessionCacheKey(filePath, threadId, readOptions);
+  const pending = OPEN_CODEX_SESSION_READS.get(cacheKey);
+  if (pending) {
+    const entry = await pending;
+    return selectCachedOpenCodexSessionEvents(entry.events, readOptions);
+  }
+
+  const read = refreshOpenCodexSessionCache(
+    cacheKey,
+    filePath,
+    threadId,
+    resolveTurnNumber,
+    readOptions,
+  );
+  OPEN_CODEX_SESSION_READS.set(cacheKey, read);
+  try {
+    const entry = await read;
+    return selectCachedOpenCodexSessionEvents(entry.events, readOptions);
+  } finally {
+    if (OPEN_CODEX_SESSION_READS.get(cacheKey) === read) {
+      OPEN_CODEX_SESSION_READS.delete(cacheKey);
+    }
+  }
+}
+
+async function refreshOpenCodexSessionCache(
+  cacheKey,
+  filePath,
+  threadId,
+  resolveTurnNumber,
+  readOptions,
+) {
+  const stat = await fs.stat(filePath);
+  let entry = OPEN_CODEX_SESSION_CACHES.get(cacheKey);
+  if (!entry || stat.size < entry.fileSize) {
+    const tail = await readCodexSessionTailData(filePath, readOptions);
+    const context = buildCodexSessionReadContext(threadId, resolveTurnNumber);
+    const events = [];
+    const parseOptions = openCodexSessionParseOptions(readOptions);
+    for (const rawLine of tail.lines) {
+      processCodexSessionLine(rawLine, parseOptions, context, events);
+    }
+    entry = {
+      context,
+      events,
+      fileSize: tail.fileSize,
+      minTime: readOptions.minTime,
+      parseOptions,
+      trailingText: tail.trailingText,
+      lastUsedAt: Date.now(),
+    };
+    OPEN_CODEX_SESSION_CACHES.set(cacheKey, entry);
+    pruneOpenCodexSessionCaches();
+    return entry;
+  }
+
+  if (stat.size > entry.fileSize) {
+    const appended = await readFileSlice(filePath, entry.fileSize, stat.size);
+    const split = splitCompleteSessionLines(entry.trailingText + appended);
+    for (const rawLine of split.lines) {
+      processCodexSessionLine(rawLine, entry.parseOptions, entry.context, entry.events);
+    }
+    entry.fileSize = stat.size;
+    entry.trailingText = split.trailingText;
+  }
+  entry.lastUsedAt = Date.now();
+  return entry;
+}
+
+function openCodexSessionCacheKey(filePath, threadId, readOptions) {
+  const window = readOptions.windows?.[0] ?? {};
+  return JSON.stringify({
+    filePath: path.resolve(filePath),
+    threadId,
+    turnNumber: window.turnNumber ?? null,
+    outputLimit: readOptions.outputLimit ?? null,
+    skipTokenCounts: readOptions.skipTokenCounts === true,
+    includeTokenBaseline: readOptions.includeTokenBaseline === true,
+  });
+}
+
+function openCodexSessionParseOptions(readOptions) {
+  return {
+    ...readOptions,
+    suppressedItemCardStreams: new Set(),
+  };
+}
+
+function selectCachedOpenCodexSessionEvents(events, readOptions) {
+  const selected = filterSuppressedSessionEvents(events, readOptions);
+  return limitSessionEventsByTurn(selected, readOptions.maxEventsPerTurn);
+}
+
+function pruneOpenCodexSessionCaches() {
+  if (OPEN_CODEX_SESSION_CACHES.size <= OPEN_CODEX_SESSION_CACHE_LIMIT) {
+    return;
+  }
+  const oldest = [...OPEN_CODEX_SESSION_CACHES.entries()]
+    .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
+    .slice(0, OPEN_CODEX_SESSION_CACHES.size - OPEN_CODEX_SESSION_CACHE_LIMIT);
+  for (const [cacheKey] of oldest) {
+    OPEN_CODEX_SESSION_CACHES.delete(cacheKey);
+  }
+}
+
 function buildCodexSessionReadContext(threadId, resolveTurnNumber) {
   return {
     threadId,
@@ -4551,6 +4948,7 @@ function buildCodexSessionReadContext(threadId, resolveTurnNumber) {
     commandsByCallId: new Map(),
     functionCallsByCallId: new Map(),
     commandsBySessionId: new Map(),
+    sessionIdsByStoreKey: new Map(),
     tokenBaseline: null,
     tokenBaselineEmitted: false,
   };
@@ -4606,7 +5004,6 @@ function codexSessionWindowCachePath(filePath, threadId, readOptions, window) {
     endTime: window.endTime,
     maxEventsPerTurn: readOptions.maxEventsPerTurn ?? null,
     outputLimit: readOptions.outputLimit ?? null,
-    suppressedItemCardStreams: [...(readOptions.suppressedItemCardStreams ?? [])].sort(),
   });
   const digest = createHash("sha256").update(key).digest("hex");
   return path.join(RALPH_DIR, CODEX_SESSION_WINDOW_CACHE_DIR, `${digest}.json`);
@@ -4742,10 +5139,10 @@ function shouldReadCodexSessionFromTail(readOptions) {
   );
 }
 
-async function readCodexSessionTailLines(filePath, readOptions) {
+async function readCodexSessionTailData(filePath, readOptions) {
   const stat = await fs.stat(filePath);
   if (!stat.size) {
-    return [];
+    return { fileSize: 0, lines: [], trailingText: "" };
   }
 
   const handle = await fs.open(filePath, "r");
@@ -4769,15 +5166,28 @@ async function readCodexSessionTailLines(filePath, readOptions) {
       const completeLines = position > 0 ? lines.slice(1) : lines;
       const earliest = earliestSessionTimestampMs(completeLines);
       if (earliest != null && earliest < readOptions.minTime) {
-        return completeLines.filter(Boolean);
+        const split = splitCompleteSessionLines(tail, position > 0);
+        return { fileSize: stat.size, ...split };
       }
     }
   } finally {
     await handle.close();
   }
-  const lines = tail.split(/\r?\n/);
-  const completeLines = position > 0 ? lines.slice(1) : lines;
-  return completeLines.filter(Boolean);
+  const split = splitCompleteSessionLines(tail, position > 0);
+  return { fileSize: stat.size, ...split };
+}
+
+function splitCompleteSessionLines(text, dropFirstPartial = false) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  if (dropFirstPartial) {
+    lines.shift();
+  }
+  const hasTrailingNewline = /(?:\r?\n)$/.test(text);
+  const trailingText = hasTrailingNewline ? "" : lines.pop() ?? "";
+  return {
+    lines: lines.filter(Boolean),
+    trailingText,
+  };
 }
 
 function earliestSessionTimestampMs(lines) {
@@ -4799,6 +5209,17 @@ function compactConvertedSessionEvent(record, outputLimit = CODEX_SESSION_OUTPUT
   const compactItem = { ...item };
   delete compactItem.raw;
   if (compactItem.aggregated_output != null) {
+    const sessionId = commandOutputSessionId(compactItem.aggregated_output);
+    const exitCode = parseFunctionOutputExitCode(
+      compactItem.aggregated_output,
+      compactItem.command ?? "",
+    );
+    if (compactItem.session_id == null && sessionId != null) {
+      compactItem.session_id = sessionId;
+    }
+    if (!Number.isFinite(compactItem.exit_code) && Number.isFinite(exitCode)) {
+      compactItem.exit_code = exitCode;
+    }
     compactItem.aggregated_output = truncateSessionOutput(compactItem.aggregated_output, outputLimit);
   }
   if (Array.isArray(compactItem.changes)) {
@@ -5080,6 +5501,7 @@ function convertCodexSessionRecord(record, context) {
     commandsByCallId: context.commandsByCallId,
     functionCallsByCallId: context.functionCallsByCallId,
     commandsBySessionId: context.commandsBySessionId,
+    sessionIdsByStoreKey: context.sessionIdsByStoreKey,
   };
 
   if (record.type === "event_msg") {
@@ -5146,11 +5568,15 @@ function convertCodexResponseItem(payload, context) {
     const args = parseFunctionCallArgs(payload);
     const command = formatFunctionCall(payload, args, context);
     if (payload.call_id) {
+      const batchCommands = payload.name === "exec" && typeof args?.input === "string"
+        ? extractToolExecCommands(args.input)
+        : [];
       context.commandsByCallId?.set(payload.call_id, command);
       context.functionCallsByCallId?.set(payload.call_id, {
         name: payload.name,
         args,
         command,
+        batchCommands,
       });
     }
     return buildVizRecord(context, "item.started", {
@@ -5166,27 +5592,37 @@ function convertCodexResponseItem(payload, context) {
   }
   if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output") {
     const call = context.functionCallsByCallId?.get(payload.call_id) ?? null;
-    if (isExecCallName(call?.name)) {
-      const sessionId = parseRunningSessionId(payload.output);
-      if (sessionId && call.command) {
-        context.commandsBySessionId?.set(sessionId, call.command);
-      }
+    const parentSessionId = functionCallParentSessionId(call, context);
+    const parentCommand = parentSessionId
+      ? context.commandsBySessionId?.get(parentSessionId)
+      : null;
+    const sessionId = parseRunningSessionId(payload.output);
+    if (sessionId && (parentCommand || call?.command)) {
+      context.commandsBySessionId?.set(sessionId, parentCommand ?? call.command);
+    }
+    const sessionStoreKey = functionCallSessionStoreKey(call);
+    if (sessionId && sessionStoreKey) {
+      context.sessionIdsByStoreKey?.set(sessionStoreKey, sessionId);
     }
     const command =
       call?.name === "write_stdin"
         ? formatWriteStdinCommand(call.args, context)
-        : context.commandsByCallId?.get(payload.call_id) ?? "";
+        : parentCommand
+          ? `${parentCommand} (continued session ${parentSessionId})`
+          : context.commandsByCallId?.get(payload.call_id) ?? "";
+    const batchCommands = buildCommandBatch(call?.batchCommands, payload.output);
     return buildVizRecord(context, "item.completed", {
       type: "item.completed",
       item: {
         id: payload.call_id,
         type: "command_execution",
         status: "completed",
-        exit_code: parseFunctionOutputExitCode(payload.output),
+        exit_code: parseFunctionOutputExitCode(payload.output, command),
         command,
         session_id: call?.args?.session_id ?? null,
         stdin: call?.name === "write_stdin" ? call.args?.chars ?? "" : null,
         aggregated_output: payload.output ?? "",
+        ...(batchCommands ? { batch_commands: batchCommands } : {}),
         raw: payload,
       },
     });
@@ -5222,6 +5658,23 @@ function convertCodexResponseItem(payload, context) {
     });
   }
   return null;
+}
+
+function buildCommandBatch(commands, output) {
+  const chunks = codexCommandOutputChunks(output);
+  if (!Array.isArray(commands) || commands.length <= 1 || chunks.length !== commands.length) {
+    return null;
+  }
+  return commands.map((command, index) => ({
+    command,
+    output: chunks[index].output,
+    exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
+    wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
+      ? chunks[index].wall_time_seconds
+      : null,
+    session_id: chunks[index].session_id ?? null,
+    chunk_id: chunks[index].chunk_id ?? null,
+  }));
 }
 
 function buildVizRecord(context, eventType, event) {
@@ -5269,6 +5722,35 @@ function isExecCallName(name) {
   return name === "exec_command" || name === "exec";
 }
 
+function functionCallParentSessionId(call, context = null) {
+  if (call?.name === "wait") {
+    return normalizeSessionId(call.args?.cell_id);
+  }
+  if (call?.name === "write_stdin") {
+    return resolveStoredSessionId(call.args, context);
+  }
+  if (call?.name === "exec" && typeof call.args?.input === "string") {
+    return resolveStoredSessionId(extractToolWriteStdinArgs(call.args.input), context);
+  }
+  return null;
+}
+
+function functionCallSessionStoreKey(call) {
+  return call?.name === "exec" && typeof call.args?.input === "string"
+    ? extractSessionStoreKey(call.args.input)
+    : null;
+}
+
+function resolveStoredSessionId(args, context) {
+  const sessionId = normalizeSessionId(args?.session_id);
+  if (sessionId) {
+    return sessionId;
+  }
+  return args?.session_store_key
+    ? normalizeSessionId(context?.sessionIdsByStoreKey?.get(args.session_store_key))
+    : null;
+}
+
 function formatCustomExecCommand(input, context = null) {
   const writeStdinArgs = extractToolWriteStdinArgs(input);
   if (writeStdinArgs) {
@@ -5298,12 +5780,27 @@ function extractToolWriteStdinArgs(input) {
   }
   return {
     session_id: jsObjectPropertyValue(match[1], "session_id"),
+    session_store_key: extractSessionLoadKey(text),
     chars: jsObjectPropertyValue(match[1], "chars") ?? "",
   };
 }
 
+function extractSessionLoadKey(input) {
+  const match = String(input ?? "").match(/\bload\s*\(\s*(["'])([^"']+)\1\s*\)/);
+  return match ? match[2] : null;
+}
+
+function extractSessionStoreKey(input) {
+  const match = String(input ?? "").match(
+    /\bstore\s*\(\s*(["'])([^"']+)\1\s*,\s*[^\n)]*?\.session_id\b/,
+  );
+  return match ? match[2] : null;
+}
+
 function jsObjectPropertyValue(text, propertyName) {
-  const pattern = new RegExp(`\\b${propertyName}\\s*:\\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))`);
+  const pattern = new RegExp(
+    `(?:\\b${propertyName}\\b|["']${propertyName}["'])\\s*:\\s*(?:"([^"]*)"|'([^']*)'|([0-9]+))`,
+  );
   const match = String(text ?? "").match(pattern);
   return match ? match[1] ?? match[2] ?? match[3] ?? null : null;
 }
@@ -5311,7 +5808,7 @@ function jsObjectPropertyValue(text, propertyName) {
 function extractToolExecCommands(input) {
   const commands = [];
   const text = String(input ?? "");
-  const regex = /\bcmd\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+  const regex = /(?:\bcmd\b|["']cmd["'])\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
     commands.push(decodeJsStringLiteral(match[2]));
@@ -5339,10 +5836,14 @@ function decodeJsStringLiteral(value) {
 }
 
 function formatWriteStdinCommand(args, context) {
-  const sessionId = normalizeSessionId(args?.session_id);
+  const sessionId = resolveStoredSessionId(args, context);
   const originalCommand = sessionId ? context.commandsBySessionId?.get(sessionId) : null;
   const stdin = typeof args?.chars === "string" ? args.chars : "";
-  const suffix = sessionId ? `session ${sessionId}` : "unknown session";
+  const suffix = sessionId
+    ? `session ${sessionId}`
+    : args?.session_store_key
+      ? `stored session ${args.session_store_key}`
+      : "unknown session";
   const base = originalCommand
     ? `${originalCommand} (continued ${suffix})`
     : `write_stdin ${suffix}`;
@@ -5359,7 +5860,13 @@ function parseRunningSessionId(output) {
   if (chunkSessionId != null) {
     return String(chunkSessionId);
   }
-  const match = textValue(output).match(/Process running with session ID (\d+)/);
+  const bareSessionId = bareCommandOutputSessionId(output);
+  if (bareSessionId != null) {
+    return bareSessionId;
+  }
+  const match = textValue(output).match(
+    /(?:Process running with session ID|Script running with cell ID)\s+([A-Za-z0-9._-]+)/,
+  );
   return match ? match[1] : null;
 }
 
@@ -5379,7 +5886,7 @@ function truncateMiddle(value, maxLength) {
   return `${text.slice(0, keep)}...${text.slice(-keep)}`;
 }
 
-function parseFunctionOutputExitCode(output) {
+function parseFunctionOutputExitCode(output, command = "") {
   const chunkExitCode = codexCommandOutputChunks(output)
     .map((chunk) => chunk.exit_code)
     .find((exitCode) => Number.isFinite(exitCode));
@@ -5387,7 +5894,33 @@ function parseFunctionOutputExitCode(output) {
     return chunkExitCode;
   }
   const match = textValue(output).match(/Process exited with code (-?\d+)/);
-  return match ? Number.parseInt(match[1], 10) : null;
+  if (match) {
+    return Number.parseInt(match[1], 10);
+  }
+  if (commandOutputSessionId(output) != null) {
+    return null;
+  }
+  return inferDirectMakeExitCode(command, output);
+}
+
+function inferDirectMakeExitCode(command, output) {
+  const text = String(command ?? "").replace(/\s+\(continued session [^)]+\)\s*$/, "");
+  if (!isDirectMakeCommandForExitInference(text)) {
+    return null;
+  }
+  const outputText = commandOutputText(output);
+  return /^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)
+    ? 2
+    : null;
+}
+
+function isDirectMakeCommandForExitInference(command) {
+  const text = String(command ?? "").trim();
+  if (!/^\s*(?:env\s+)?(?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S+)\s+)*make(?:\s|$)/.test(text)) {
+    return false;
+  }
+  const scanText = shellOperatorScanText(text);
+  return !/[\n;&|<>`]/.test(scanText) && !/\$\(/.test(scanText);
 }
 
 function textValue(value) {
@@ -5424,14 +5957,61 @@ function commandOutputText(value) {
   if (chunks.length > 0) {
     return joinTextParts(chunks.map((chunk) => chunk.output));
   }
-  return textValue(value);
+  return stripCommandOutputTransport(textValue(value));
 }
 
 function commandOutputSessionId(value) {
   const sessionId = codexCommandOutputChunks(value)
     .map((chunk) => chunk.session_id)
     .find((candidate) => candidate != null && candidate !== "");
-  return sessionId == null ? null : String(sessionId);
+  return sessionId == null ? parseRunningSessionId(value) : String(sessionId);
+}
+
+function bareCommandOutputSessionId(value) {
+  if (value == null) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const sessionId = bareCommandOutputSessionId(entry);
+      if (sessionId != null) {
+        return sessionId;
+      }
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    if (value.session_id != null && value.session_id !== "") {
+      return String(value.session_id);
+    }
+    return bareCommandOutputSessionId(value.text ?? value.output ?? null);
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.session_id != null && parsed.session_id !== "") {
+      return String(parsed.session_id);
+    }
+  } catch (_) {
+    // Fall through to the transport-envelope form.
+  }
+  const match = text.match(
+    /(?:^|\n)\s*(?:\{\s*"session_id"\s*:\s*"?([A-Za-z0-9._-]+)"?\s*\}|SESSION_ID=([A-Za-z0-9._-]+))\s*$/,
+  );
+  return match ? match[1] ?? match[2] : null;
+}
+
+function stripCommandOutputTransport(value) {
+  return String(value ?? "")
+    .replace(/^Script completed\r?\nWall time [^\r\n]*\r?\nOutput:\r?\n/, "")
+    .replace(
+      /(?:^|\n)\s*(?:\{\s*"session_id"\s*:\s*"?[A-Za-z0-9._-]+"?\s*\}|SESSION_ID=[A-Za-z0-9._-]+)\s*$/m,
+      "",
+    )
+    .trim();
 }
 
 function structuredTextStringValue(value) {

@@ -813,6 +813,64 @@ button:hover { background: #252525; }
 /* Command */
 .ev-cmd-fail .cmd-inline { color: var(--bad); }
 
+.ev-subagent-fail .subagent-title { color: var(--bad); }
+
+.ev-subagent > .accordion-header {
+  cursor: pointer;
+  padding: 0.15rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ev-subagent > .accordion-header::before {
+  content: ">";
+  color: #7fa6d8;
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+
+.subagent-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #b9cbe2;
+}
+
+.subagent-meta,
+.turn-subagents {
+  color: #7893b4;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.subagent-missing {
+  border: 1px solid #7a6334;
+  border-radius: 3px;
+  color: #c8a65c;
+  font-size: 0.65rem;
+  line-height: 1.25;
+  padding: 0.05rem 0.25rem;
+  white-space: nowrap;
+}
+
+.subagent-section-label {
+  display: block;
+  margin: 0.4rem 0 0.15rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.subagent-output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .ev-cmd > .accordion-header {
   cursor: pointer;
   padding: 0.15rem 0;

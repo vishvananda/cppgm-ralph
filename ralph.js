@@ -13,6 +13,13 @@ import {
   codexEventKey,
   createCodexSessionTailer,
 } from "./codex-session-events.js";
+import {
+  claudeSubagentResultItem,
+  claudeResumedSubagentStartItem,
+  claudeSubagentStartItem,
+  isClaudeAsyncSubagentLaunch,
+  parseClaudeTaskNotification,
+} from "./claude-subagent-events.js";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -24,6 +31,9 @@ const EVENT_LOG_TURN_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_RESUME_STDOUT_SILENCE_MS = 5000;
 const CODEX_RESUME_SESSION_FALLBACK_POLL_MS = 1000;
 const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
+const CODEX_INCOMPLETE_TASK_RETRY_MAX = Number(
+  process.env.RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX ?? 20,
+);
 const CLAUDE_LIMIT_RETRY_MAX = 20;
 const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET_BUFFER_MS ?? 90_000);
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
@@ -52,6 +62,9 @@ const PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR = Number(
 );
 // How many turns in a row may be lost to OOM kills before the loop gives up.
 const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
+// A provider can terminate itself with an over-broad kill command. Retry the
+// interrupted Ralph turn, but cap attempts so a persistent crash cannot loop.
+const SIGTERM_RECOVERY_MAX = Number(process.env.RALPH_SIGTERM_RECOVERY_MAX ?? 3);
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -616,6 +629,8 @@ async function main() {
     log(`Ralph prompt: ${previewText(turnPrompt)}`);
     let turn;
     let transientRetryAttempts = 0;
+    let sigtermRecoveryAttempts = 0;
+    let codexIncompleteTaskRetryAttempts = 0;
     while (true) {
       try {
         const { events } = await thread.runStreamed(turnPrompt, {
@@ -643,6 +658,44 @@ async function main() {
         });
         break;
       } catch (error) {
+        if (isRecoverableCodexIncompleteTask(error) && !shutdownInProgress) {
+          codexIncompleteTaskRetryAttempts += 1;
+          const retryMax = codexIncompleteTaskRetryMax();
+          if (codexIncompleteTaskRetryAttempts > retryMax) {
+            throw new Error(
+              `Codex ended an incomplete task more than ${retryMax} times during ` +
+                `turn ${turnNumber + 1}; aborting. Last error: ${formatErrorMessage(error)}`,
+            );
+          }
+
+          const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
+          if (!retryThreadId) {
+            throw new Error(
+              `Codex ended an incomplete task during turn ${turnNumber + 1}, but no thread id ` +
+                `was available to resume: ${formatErrorMessage(error)}`,
+            );
+          }
+          log(
+            `Codex task ended before the Ralph turn completed: ${formatErrorMessage(error)}. ` +
+              `Resuming thread ${retryThreadId} without consuming the turn ` +
+              `(recovery ${codexIncompleteTaskRetryAttempts}/${retryMax}).`,
+          );
+          await appendRalphEventRecord(buildRalphAgentRecoveryEventRecord({
+            provider: CONFIG.provider,
+            threadId: retryThreadId,
+            turnNumber: turnNumber + 1,
+            attempt: codexIncompleteTaskRetryAttempts,
+            reason: "codex_incomplete_task",
+            message: formatErrorMessage(error),
+          }));
+          activeThreadId = retryThreadId;
+          thread = null;
+          backend = createAgentBackend();
+          thread = backend.resumeThread(activeThreadId, threadOptions);
+          turnPrompt = buildCodexIncompleteTaskContinuationPrompt();
+          continue;
+        }
+
         if (shouldRetryTransientProviderError(error) && !shutdownInProgress) {
           transientRetryAttempts += 1;
           const retryMax = transientProviderRetryMax();
@@ -683,6 +736,44 @@ async function main() {
           } else {
             log(`Retrying with a new ${providerLabel} thread`);
           }
+          continue;
+        }
+
+        // An agent can accidentally terminate its own provider process with a
+        // broad command such as `pkill -f`. Ralph's own SIGTERM handler sets
+        // shutdownInProgress, so only an unexpected child SIGTERM reaches this
+        // recovery path. Resume the provider session without consuming a turn.
+        if (isRecoverableAgentSigterm(error) && !shutdownInProgress) {
+          sigtermRecoveryAttempts += 1;
+          if (sigtermRecoveryAttempts > sigtermRecoveryMax()) {
+            throw new Error(
+              `Agent exited from SIGTERM more than ${sigtermRecoveryMax()} times during ` +
+                `turn ${turnNumber + 1}; aborting. Last error: ${formatErrorMessage(error)}`,
+            );
+          }
+
+          const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
+          log(
+            `Agent process exited from SIGTERM during turn ${turnNumber + 1}: ` +
+              `${formatErrorMessage(error)}. ` +
+              `${retryThreadId ? `Resuming ${providerLabel} thread ${retryThreadId}` : `Starting a fresh ${providerLabel} thread`} ` +
+              `without consuming the turn (recovery ${sigtermRecoveryAttempts}/${sigtermRecoveryMax()}).`,
+          );
+          await appendRalphEventRecord(buildRalphAgentRecoveryEventRecord({
+            provider: CONFIG.provider,
+            threadId: retryThreadId,
+            turnNumber: turnNumber + 1,
+            attempt: sigtermRecoveryAttempts,
+            reason: "unexpected_sigterm",
+            message: formatErrorMessage(error),
+          }));
+          activeThreadId = retryThreadId;
+          thread = null;
+          backend = createAgentBackend();
+          thread = activeThreadId
+            ? backend.resumeThread(activeThreadId, threadOptions)
+            : backend.startThread(threadOptions);
+          turnPrompt = `${buildSigtermRecoveryNote()}\n\n${turnPrompt}`;
           continue;
         }
 
@@ -781,6 +872,46 @@ function buildOomRecoveryNote() {
     "whole, avoid dumping huge outputs into the conversation), make focused incremental",
     "progress, and commit early so work is not lost if a turn is killed again.",
   ].join(" ");
+}
+
+function buildSigtermRecoveryNote() {
+  return [
+    "IMPORTANT: The previous attempt ended because the agent process received SIGTERM.",
+    "This can happen when a broad process-matching command terminates the provider along with",
+    "the intended child process. Continue the same Ralph turn from the current repository state.",
+    "When stopping work you started, retain and signal the exact child PID or process group.",
+    "Before using pkill, killall, or a pattern-based kill, verify the matches and ensure the",
+    "pattern cannot match this agent, its provider command line, or Ralph's turn instructions.",
+  ].join(" ");
+}
+
+function buildCodexIncompleteTaskContinuationPrompt() {
+  return [
+    "Ralph detected that the previous Codex task ended without completing this Ralph turn.",
+    "Continue the active loop goal from the current repository and conversation state.",
+    "Preserve the existing edits, use the latest plan and test evidence, and finish the selected",
+    "checkpoint, required validation, commit, and clean-worktree handoff before returning.",
+  ].join(" ");
+}
+
+function isRecoverableCodexIncompleteTask(error) {
+  return CONFIG.provider === "codex" && error?.codexIncompleteTask === true;
+}
+
+function codexIncompleteTaskRetryMax() {
+  return Number.isInteger(CODEX_INCOMPLETE_TASK_RETRY_MAX) && CODEX_INCOMPLETE_TASK_RETRY_MAX >= 0
+    ? CODEX_INCOMPLETE_TASK_RETRY_MAX
+    : 20;
+}
+
+function isRecoverableAgentSigterm(error) {
+  return error?.killedBySignal === "SIGTERM" || error?.exitCode === 143;
+}
+
+function sigtermRecoveryMax() {
+  return Number.isInteger(SIGTERM_RECOVERY_MAX) && SIGTERM_RECOVERY_MAX >= 0
+    ? SIGTERM_RECOVERY_MAX
+    : 3;
 }
 
 function shouldRetryTransientProviderError(error) {
@@ -4545,6 +4676,8 @@ class CodexExec {
             codexSessionFailure = new Error(
               result.reason ?? "Codex task ended before the loop goal completed.",
             );
+            codexSessionFailure.codexIncompleteTask = true;
+            codexSessionFailure.threadId = args.threadId;
           }
           terminateChildProcess(child, "SIGTERM");
         })
@@ -4609,7 +4742,18 @@ class CodexExec {
         !fallbackStdoutItemNoticeLogged
       ) {
         fallbackStdoutItemNoticeLogged = true;
-        log("Codex resume stdout emitted item events while session backfill is active; keeping both streams with dedupe.");
+        log(
+          "Codex resume stdout emitted item events while session backfill is active; " +
+            "using the richer session-log item stream.",
+        );
+      }
+      if (fallbackActivated && event.type?.startsWith?.("item.")) {
+        // Recent Codex clients stream resumed item events on stdout while also
+        // recording richer custom-tool and patch events in the session log.
+        // Their provider IDs differ, so identity-key dedupe cannot recognize
+        // them as the same command or file change. Keep lifecycle and error
+        // events from stdout, but let the session tailer own display items.
+        return;
       }
 
       const key = codexEventKey(event);
@@ -5017,6 +5161,20 @@ function* translateClaudeEvent(event, shared) {
     return;
   }
 
+  const notification = parseClaudeTaskNotification(event);
+  if (notification) {
+    const pending = pendingToolUses.get(notification.id);
+    pendingToolUses.delete(notification.id);
+    yield {
+      type: "item.completed",
+      item: {
+        ...(pending ? claudeSubagentStartItem({ id: notification.id, input: pending.input }) : {}),
+        ...notification,
+      },
+    };
+    return;
+  }
+
   if (event.type === "assistant" && Array.isArray(event.message?.content)) {
     for (const block of event.message.content) {
       if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
@@ -5030,13 +5188,22 @@ function* translateClaudeEvent(event, shared) {
           item: { id: event.uuid ?? event.message?.id ?? "claude-message", type: "agent_message", text: block.text },
         };
       } else if (block.type === "tool_use") {
-        pendingToolUses.set(block.id, { name: block.name, input: block.input });
+        pendingToolUses.set(block.id, {
+          name: block.name,
+          input: block.input,
+          startedAt: event.timestamp,
+        });
         if (block.name === "Bash" && typeof block.input?.command === "string") {
           // Mirror Codex's item.started so the viz can show a running command
           // card until the matching tool_result completes it.
           yield {
             type: "item.started",
             item: { id: block.id, type: "command_execution", command: block.input.command, status: "in_progress" },
+          };
+        } else if (block.name === "Agent") {
+          yield {
+            type: "item.started",
+            item: claudeSubagentStartItem(block),
           };
         }
       }
@@ -5055,10 +5222,47 @@ function* translateClaudeEvent(event, shared) {
       if (block.type === "tool_result") {
         const pending = pendingToolUses.get(block.tool_use_id);
         if (pending) {
+          const output = claudeToolResultText(block, event.tool_use_result);
+          if (pending.name === "SendMessage") {
+            const resumed = claudeResumedSubagentStartItem(
+              block.tool_use_id,
+              pending,
+              event.tool_use_result,
+              output,
+            );
+            if (resumed) {
+              pendingToolUses.set(block.tool_use_id, {
+                name: "Agent",
+                input: {
+                  description: resumed.description,
+                  subagent_type: resumed.subagent_type,
+                  prompt: resumed.prompt,
+                },
+                startedAt: pending.startedAt,
+              });
+              yield { type: "item.started", item: resumed };
+              continue;
+            }
+          }
+          if (pending.name === "Agent" && isClaudeAsyncSubagentLaunch(output)) {
+            yield {
+              type: "item.updated",
+              item: {
+                ...claudeSubagentStartItem({ id: block.tool_use_id, input: pending.input }),
+                launch_result: output,
+              },
+            };
+            continue;
+          }
           pendingToolUses.delete(block.tool_use_id);
           yield {
             type: "item.completed",
-            item: buildClaudeToolItem(block.tool_use_id, pending, block, event.tool_use_result),
+            item: pending.name === "Agent"
+              ? claudeSubagentResultItem(block.tool_use_id, pending, output, {
+                  completedAt: event.timestamp,
+                  failed: block.is_error === true,
+                })
+              : buildClaudeToolItem(block.tool_use_id, pending, block, event.tool_use_result),
           };
         }
       } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
@@ -5691,7 +5895,11 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
   }
   const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
   const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
-  const latestGoalStatus = latestGoalEvent?.status ?? "";
+  // Ralph installs an active goal immediately before this exec begins. For
+  // very large sessions that initial event can fall outside the bounded tail
+  // read, so absence of a newer goal event means the known initial state is
+  // still active rather than unknown.
+  const latestGoalStatus = latestGoalEvent?.status ?? (CONFIG.loopGoalsEnabled ? "active" : "");
   if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
     if (latestGoalStatus === "active" && hasFinalMessage) {
       return { status: "complete" };
@@ -5706,7 +5914,7 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
       status: "incomplete",
       reason:
         `Codex task ended while loop goal status was ${latestGoalStatus}; ` +
-        "leaving the Ralph turn incomplete so it can be restarted.",
+        "requesting same-turn continuation.",
     };
   }
   if (!hasFinalMessage && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
@@ -5714,7 +5922,7 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
       status: "incomplete",
       reason:
         "Codex task_complete did not include a final agent message; " +
-        "leaving the Ralph turn incomplete so it can be restarted.",
+        "requesting same-turn continuation.",
     };
   }
   return { status: "complete" };
@@ -6538,6 +6746,9 @@ function summarizeEvent(event) {
   if (event.type === "ralph.limit_wait") {
     return `limit_wait ${formatDurationForLog(event.wait_ms ?? 0)} ${previewText(event.message ?? "")}`;
   }
+  if (event.type === "ralph.agent_recovery") {
+    return `agent_recovery ${event.reason ?? "unknown"} attempt=${event.attempt ?? "?"}`;
+  }
   if (!event.item) {
     return event.type;
   }
@@ -6579,6 +6790,23 @@ function buildRalphLimitWaitEventRecord({ provider, threadId, turnNumber, waitMs
       reason,
       attempt,
       wait_ms: waitMs,
+      message,
+    },
+  };
+}
+
+function buildRalphAgentRecoveryEventRecord({ provider, threadId, turnNumber, message, attempt, reason }) {
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.agent-recovery",
+    event: {
+      type: "ralph.agent_recovery",
+      sender: "ralph",
+      provider,
+      reason,
+      attempt,
       message,
     },
   };

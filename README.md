@@ -383,6 +383,10 @@ under `stateBaseDir`.
   Override `sessionIsolation.privateTmp`
 - `RALPH_SESSION_ISOLATION_BWRAP_PATH`
   Override the Bubblewrap executable path
+- `RALPH_SIGTERM_RECOVERY_MAX`
+  Maximum same-turn recovery attempts after an unexpected provider `SIGTERM`
+  or exit `143` (default `3`). Signals received by Ralph itself still stop the
+  loop normally. Set to `0` to disable recovery.
 
 ## Default Prompt
 

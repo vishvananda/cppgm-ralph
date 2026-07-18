@@ -8,6 +8,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
+import {
+  collectClaudeSubagentEvents,
+  DEFAULT_CLAUDE_PROJECTS_DIR,
+} from "../claude-subagent-events.js";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +42,7 @@ Options:
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
+  --claude-dir <dir>    Claude projects dir (default: ~/.claude/projects)
   --work-dir <dir>      Run prompt/config dir (default: ~/work)
   --no-clean            Do not remove output dir before exporting
   --no-compare          Skip comparison generation
@@ -50,6 +55,7 @@ function parseArgs(argv) {
     outDir: path.join(REPO_ROOT, "ralph-viz-static"),
     ralphDir: path.join(os.homedir(), "work", ".ralph"),
     codexDir: path.join(os.homedir(), ".codex", "sessions"),
+    claudeDir: DEFAULT_CLAUDE_PROJECTS_DIR,
     workDir: path.join(os.homedir(), "work"),
     through: "pa39",
     runs: [],
@@ -80,6 +86,8 @@ function parseArgs(argv) {
       options.ralphDir = expandHome(next());
     } else if (arg === "--codex-dir") {
       options.codexDir = expandHome(next());
+    } else if (arg === "--claude-dir") {
+      options.claudeDir = expandHome(next());
     } else if (arg === "--work-dir") {
       options.workDir = expandHome(next());
     } else if (arg === "--no-clean") {
@@ -504,7 +512,13 @@ async function exportRun(run, options, comparison) {
   await fs.mkdir(turnsDir, { recursive: true });
   const runEvents = await readJsonl(run.filePath);
   const codexUsageEvents = await collectCodexUsageEvents(runEvents, options);
-  const events = mergeEventsByTime(runEvents, codexUsageEvents);
+  const claudeSubagentEvents = await collectClaudeSubagentEvents(runEvents, {
+    claudeDir: options.claudeDir,
+  });
+  const events = mergeEventsByTime(
+    mergeEventsByTime(runEvents, codexUsageEvents),
+    claudeSubagentEvents,
+  );
   const grouped = groupEventsByTurn(events);
   const turns = [];
   for (const [turnKey, turnEvents] of grouped) {
@@ -564,6 +578,7 @@ async function exportRun(run, options, comparison) {
     eventMtime: run.eventMtime,
     eventCount: events.length,
     syntheticUsageEventCount: codexUsageEvents.length,
+    syntheticSubagentEventCount: claudeSubagentEvents.length,
     turnCount: turns.length,
     first: bounds.first,
     last: bounds.last,
@@ -579,6 +594,7 @@ async function exportRun(run, options, comparison) {
     docs,
     eventCount: events.length,
     syntheticUsageEventCount: codexUsageEvents.length,
+    syntheticSubagentEventCount: claudeSubagentEvents.length,
     ...bounds,
   });
   return runMeta;
@@ -793,6 +809,7 @@ async function main() {
     source: {
       ralphDir: options.ralphDir,
       codexDir: options.codexDir,
+      claudeDir: options.claudeDir,
       workDir: options.workDir,
       through: options.through,
     },
