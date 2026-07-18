@@ -244,10 +244,12 @@ function bareCommandOutputSessionId(value) {
 function stripCommandOutputTransport(value) {
   return String(value ?? "")
     .replace(/^Script completed\r?\nWall time [^\r\n]*\r?\nOutput:\r?\n/, "")
+    .replace(/^Script running with cell ID\s+[^\r\n]+\r?\n?/, "")
     .replace(
       /(?:^|\n)\s*(?:\{\s*"session_id"\s*:\s*"?[A-Za-z0-9._-]+"?\s*\}|SESSION_ID=[A-Za-z0-9._-]+)\s*$/m,
       "",
     )
+    .replace(/(?:^|\n)\s*EXIT_CODE=(?:undefined|null)\s*$/m, "")
     .trim();
 }
 
@@ -1536,7 +1538,11 @@ function commandEntryOutput(entry) {
     if (!text) {
       continue;
     }
-    if (asyncOutputStillRunning(rawOutput) && codexCommandOutputChunks(rawOutput).length === 0) {
+    if (
+      asyncOutputStillRunning(rawOutput) &&
+      codexCommandOutputChunks(rawOutput).length === 0 &&
+      !text
+    ) {
       continue;
     }
     usefulOutputs.push(text);
@@ -1558,6 +1564,11 @@ function commandEntryExitCode(entry) {
   }
   if (Number.isFinite(item.exit_code)) {
     return item.exit_code;
+  }
+  const explicitExitCode = commandOutputText(item.aggregated_output)
+    .match(/(?:^|\n)\s*EXIT_CODE=(-?\d+)\s*(?:$|\n)/);
+  if (explicitExitCode) {
+    return Number.parseInt(explicitExitCode[1], 10);
   }
   const command = entry.startRecord?.event?.item?.command ?? item.command ?? "";
   return inferDirectMakeExitCode(command, item.aggregated_output);
