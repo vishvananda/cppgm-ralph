@@ -1456,7 +1456,7 @@ function renderCommandCard(entry) {
   });
 
   const cmdSpan = document.createElement("code");
-  cmdSpan.className = "cmd-inline";
+  cmdSpan.className = `cmd-inline${/[\r\n]/.test(cmd) ? " cmd-inline-multiline" : ""}`;
   cmdSpan.textContent = truncate(cmd, 200);
   summary.append(cmdSpan);
 
