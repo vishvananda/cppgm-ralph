@@ -33,7 +33,7 @@ const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 24;
+const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 10;
@@ -1041,13 +1041,20 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
     return null;
   }
 
-  const summary = normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
+  let summary = normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
   const deltaEvents = cachedSize < stat.size
     ? await readRunEventsFromOffset(filePath, cachedSize, stat.size)
     : [];
 
   if (deltaEvents.length) {
-    extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
+    if (deltaEvents.some(isTurnAttemptBoundaryEvent)) {
+      // Finalize completed turns from the complete Ralph log. Incremental
+      // fragments cannot safely bridge a long reasoning interval or distinguish
+      // it from a recorded restart/quota wait without the preceding boundary.
+      summary = buildRunLogUsageSummary(fileBase, stat, await readRunFile(filePath), usageMode);
+    } else {
+      extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
+    }
     if (usageMode !== "skip") {
       await replaceTouchedSummaryThreadUsages(summary, deltaEvents);
     }
@@ -2142,6 +2149,9 @@ function turnExecutionDurationEntries(events, sessionTiming = new Map(), options
 function turnTimeBounds(events) {
   const bounds = new Map();
   for (const event of events) {
+    if (!isTurnTimingActivityEvent(event)) {
+      continue;
+    }
     const turnNumber = event?.turnNumber;
     if (!Number.isInteger(turnNumber) || turnNumber <= 0) {
       continue;
@@ -2167,11 +2177,11 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   const includeOpenCommandTail = options.includeOpenCommandTail === true;
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const attempts = buildRawTurnAttemptWindows(events);
-  const spansByAttemptThread = new Map();
+  const spansByAttempt = new Map();
   const limitWaitsByAttempt = new Map();
-  const openCommandsByAttemptThread = new Map();
+  const openCommandsByAttempt = new Map();
   let latestEventTime = -Infinity;
-  const latestAttemptThreadKeys = new Set();
+  const latestAttemptKeys = new Set();
   for (const event of events) {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
@@ -2191,36 +2201,37 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
         limitWaitsByAttempt.set(attemptKey, waits);
       }
     }
-    const key = `${attemptKey}\0${eventThreadId(event) ?? ""}`;
+    if (!isTurnTimingActivityEvent(event)) {
+      continue;
+    }
+    const key = attemptKey;
     if (time > latestEventTime) {
       latestEventTime = time;
-      latestAttemptThreadKeys.clear();
-      latestAttemptThreadKeys.add(key);
+      latestAttemptKeys.clear();
+      latestAttemptKeys.add(key);
     } else if (time === latestEventTime) {
-      latestAttemptThreadKeys.add(key);
+      latestAttemptKeys.add(key);
     }
-    const span = spansByAttemptThread.get(key) ?? {
+    const span = spansByAttempt.get(key) ?? {
       attemptKey,
       first: time,
       last: time,
-      events: [],
     };
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
-    span.events.push({ ...event, time });
-    spansByAttemptThread.set(key, span);
+    spansByAttempt.set(key, span);
     if (isTimedWorkStartEvent(event)) {
-      openCommandsByAttemptThread.set(key, (openCommandsByAttemptThread.get(key) ?? 0) + 1);
+      openCommandsByAttempt.set(key, (openCommandsByAttempt.get(key) ?? 0) + 1);
     } else if (isTimedWorkEndEvent(event)) {
-      openCommandsByAttemptThread.set(key, Math.max(0, (openCommandsByAttemptThread.get(key) ?? 0) - 1));
+      openCommandsByAttempt.set(key, Math.max(0, (openCommandsByAttempt.get(key) ?? 0) - 1));
     }
   }
   if (includeOpenCommandTail) {
-    for (const [key, openCommands] of openCommandsByAttemptThread.entries()) {
-      if (openCommands <= 0 || !latestAttemptThreadKeys.has(key)) {
+    for (const [key, openCommands] of openCommandsByAttempt.entries()) {
+      if (openCommands <= 0 || !latestAttemptKeys.has(key)) {
         continue;
       }
-      const span = spansByAttemptThread.get(key);
+      const span = spansByAttempt.get(key);
       if (span) {
         span.last = Math.max(span.last, nowMs);
       }
@@ -2228,14 +2239,26 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   }
 
   const durations = new Map();
-  for (const [key, span] of spansByAttemptThread.entries()) {
-    const durationMs = activeEventDurationMs(span.events, {
-      includeOpenCommandTail: includeOpenCommandTail && latestAttemptThreadKeys.has(key),
-      nowMs,
-    });
+  for (const span of spansByAttempt.values()) {
+    const durationMs = subtractLimitWaitOverlap(
+      Math.max(0, span.last - span.first),
+      span.first,
+      span.last,
+      limitWaitsByAttempt.get(span.attemptKey),
+    );
     durations.set(span.attemptKey, (durations.get(span.attemptKey) ?? 0) + durationMs);
   }
   return durations;
+}
+
+function isTurnTimingActivityEvent(event) {
+  const type = String(event?.eventType ?? "");
+  return type === "ralph.prompt" ||
+    type === "thread.started" ||
+    type === "codex.session.token_count" ||
+    type === "codex.task_complete" ||
+    type.startsWith("item.") ||
+    type.startsWith("turn.");
 }
 
 function limitWaitsByRawTurnAttempt(events) {
