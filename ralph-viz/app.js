@@ -585,6 +585,10 @@ function truncate(text, max = 120) {
   return text.slice(0, max) + "...";
 }
 
+function inlineSummary(text, max = 120) {
+  return truncate(String(text ?? "").replace(/\s+/g, " ").trim(), max);
+}
+
 function buildSummary(events, shapeUsage = null, run = null) {
   const turnSet = new Set();
   for (const r of events) {
@@ -1460,8 +1464,8 @@ function renderCommandCard(entry) {
   });
 
   const cmdSpan = document.createElement("code");
-  cmdSpan.className = `cmd-inline${/[\r\n]/.test(cmd) ? " cmd-inline-multiline" : ""}`;
-  cmdSpan.textContent = truncate(cmd, 200);
+  cmdSpan.className = "cmd-inline";
+  cmdSpan.textContent = inlineSummary(cmd, 200);
   summary.append(cmdSpan);
 
   if ((entry.asyncCellId || entry.asyncWaitCellId) && !(hideNoiseToggle?.checked ?? true)) {
@@ -2533,7 +2537,7 @@ function renderGeminiToolCallCard(entry) {
   if (cmd) {
     const cmdSpan = document.createElement("code");
     cmdSpan.className = "cmd-inline";
-    cmdSpan.textContent = truncate(cmd, 200);
+    cmdSpan.textContent = inlineSummary(cmd, 200);
     summary.append(document.createTextNode(" "), cmdSpan);
   } else if (description) {
     const descSpan = document.createElement("span");
