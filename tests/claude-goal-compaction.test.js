@@ -196,13 +196,11 @@ emit({
 
 if (!fs.existsSync(paths.compactMarker)) {
   emit({
-    type: "attachment",
+    type: "user",
     session_id: sessionId,
-    attachment: {
-      type: "goal_status",
-      met: false,
-      sentinel: true,
-      reason: "Required checks still fail",
+    message: {
+      role: "user",
+      content: "Stop hook feedback:\\n[Fake Ralph goal]: Required checks still fail",
     },
   });
   setTimeout(() => {

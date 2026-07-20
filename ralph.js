@@ -5204,6 +5204,17 @@ class ClaudeThread {
         yield { type: "thread.started", thread_id: sessionId };
         yield { type: "turn.started", thread_id: sessionId };
       }
+      const stopHookFeedback = claudeStopHookFeedback(event);
+      if (stopHookFeedback) {
+        // Claude 2.1.206 writes the authoritative goal_status attachment only
+        // to the session transcript. Its live stream carries this injected
+        // user event instead, so treat it as the same incomplete verdict.
+        shared.latestGoalStatus = {
+          status: "incomplete",
+          reason: stopHookFeedback.reason,
+          condition: "",
+        };
+      }
       if (
         event.type === "result" &&
         !event.is_error &&
@@ -5218,9 +5229,11 @@ class ClaudeThread {
         Boolean(turnOptions.goal?.objective) &&
         this._id &&
         sawModelActivity &&
-        event.type === "attachment" &&
-        event.attachment?.type === "goal_status" &&
-        event.attachment.met === false;
+        (Boolean(stopHookFeedback) || (
+          event.type === "attachment" &&
+          event.attachment?.type === "goal_status" &&
+          event.attachment.met === false
+        ));
       yield* translateClaudeEvent(event, shared);
       if (shouldCompactIncompleteGoal) {
         // Installing `/goal` emits an initial incomplete sentinel before the
@@ -5242,6 +5255,29 @@ class ClaudeThread {
     this._turnAccruedUsage = emptyCodexUsage();
     this._countedUsageRequests.clear();
   }
+}
+
+function claudeStopHookFeedback(event) {
+  if (event?.type !== "user") {
+    return null;
+  }
+  const content = event.message?.content;
+  const texts = typeof content === "string"
+    ? [content]
+    : Array.isArray(content)
+      ? content.filter((block) => block?.type === "text").map((block) => block.text)
+      : [];
+  const text = texts.find((value) =>
+    typeof value === "string" && value.trimStart().startsWith("Stop hook feedback:"));
+  if (!text) {
+    return null;
+  }
+  const separator = text.lastIndexOf("]: ");
+  return {
+    reason: separator >= 0
+      ? text.slice(separator + 3).trim()
+      : "Claude Stop hook rejected the turn because the loop goal is incomplete.",
+  };
 }
 
 function claudeUsageLimitMessage(event) {
