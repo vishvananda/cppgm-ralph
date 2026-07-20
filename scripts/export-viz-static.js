@@ -19,8 +19,8 @@ const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const DEFAULT_RUNS = [
   "trusted-gpt-5.5-xhigh",
   "opus-opus-xhigh",
-  "fable-claude-fable-5-xhigh",
   "mini-gpt-5.6-sol-xhigh",
+  "fable-claude-fable-5-xhigh",
   "luna-gpt-5.6-luna-ultra",
 ];
 const FORMAT_VERSION = 1;
@@ -28,7 +28,7 @@ const CURRENT_ASSIGNMENT_LAYOUT = {
   id: "current",
   shortLabel: "current",
   label: "current assignment layout",
-  description: "Current assignment layout used by trusted, opus, fable, mini, and luna. It includes abimangle at pa30 and tops out at pa39 Inception.",
+  description: "Current assignment layout used by trusted, opus, mini, fable, and luna. It includes abimangle at pa30 and tops out at pa39 Inception.",
 };
 
 function usage() {
@@ -38,7 +38,7 @@ Export Ralph run viewer data as static files.
 
 Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
-  --run <spec>          Run to export; repeatable. Defaults to trusted/opus/fable/mini/luna
+  --run <spec>          Run to export; repeatable. Defaults to trusted/opus/mini/fable/luna
   --runs <a,b,c>        Comma-separated run specs
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
