@@ -18,16 +18,17 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const DEFAULT_RUNS = [
   "trusted-gpt-5.5-xhigh",
-  "fable-claude-fable-5-xhigh",
   "opus-opus-xhigh",
+  "fable-claude-fable-5-xhigh",
   "mini-gpt-5.6-sol-xhigh",
+  "luna-gpt-5.6-luna-ultra",
 ];
 const FORMAT_VERSION = 1;
 const CURRENT_ASSIGNMENT_LAYOUT = {
   id: "current",
   shortLabel: "current",
   label: "current assignment layout",
-  description: "Current assignment layout used by trusted, fable, opus, and mini. It includes abimangle at pa30 and tops out at pa39 Inception.",
+  description: "Current assignment layout used by trusted, opus, fable, mini, and luna. It includes abimangle at pa30 and tops out at pa39 Inception.",
 };
 
 function usage() {
@@ -37,7 +38,7 @@ Export Ralph run viewer data as static files.
 
 Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
-  --run <spec>          Run to export; repeatable. Defaults to trusted/fable/opus/mini
+  --run <spec>          Run to export; repeatable. Defaults to trusted/opus/fable/mini/luna
   --runs <a,b,c>        Comma-separated run specs
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
@@ -360,7 +361,7 @@ async function collectDocs(run, options, outRunDir) {
 }
 
 function inferDocPrefix(shape) {
-  for (const prefix of ["trusted", "fable", "opus", "mini"]) {
+  for (const prefix of ["trusted", "opus", "fable", "mini", "luna"]) {
     if (shape.startsWith(prefix)) return prefix;
   }
   return shape.split("-")[0] || shape;
@@ -444,15 +445,18 @@ function annotateComparison(comparison, runMetas) {
     return comparison;
   }
   const metaBySpec = new Map(runMetas.map((run) => [run.label, run]));
-  for (const run of comparison.runs) {
+  for (const [index, run] of comparison.runs.entries()) {
     const meta =
       metaBySpec.get(run.spec) ??
       metaBySpec.get(run.label) ??
       runMetas.find((candidate) => path.resolve(candidate.filePath ?? "") === path.resolve(run.filePath ?? ""));
-    if (!meta) continue;
-    run.layout = meta.assignmentLayout;
-    run.assignmentTitles = meta.assignmentTitles;
-    run.dataPath = meta.dataPath;
+    if (meta) {
+      run.layout = meta.assignmentLayout;
+      run.assignmentTitles = meta.assignmentTitles;
+      run.dataPath = meta.dataPath;
+    }
+    run.ordinal = index + 1;
+    run.label = `${run.ordinal}-${run.label ?? run.spec ?? `run-${run.ordinal}`}`;
   }
   comparison.assignmentLayouts = { current: CURRENT_ASSIGNMENT_LAYOUT };
   comparison.series = comparisonSeries(comparison);

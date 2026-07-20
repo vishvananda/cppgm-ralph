@@ -6694,7 +6694,7 @@ function runDocGroupHtml(group, selectedDoc) {
 
 function shortDocName(name) {
   return String(name ?? "")
-    .replace(/^(trusted|fable|opus|mini)\./, "")
+    .replace(/^(trusted|opus|fable|mini|luna)\./, "")
     .replace(/\.md$/i, "")
     .replace(/\.json$/i, "");
 }
