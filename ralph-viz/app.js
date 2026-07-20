@@ -2370,6 +2370,16 @@ function renderSystemCard(record) {
   } else if (record.eventType === "ralph.agent-recovery") {
     text = `agent recovery: ${cleanText(record.event?.reason) || "unexpected exit"} ` +
       `(attempt ${record.event?.attempt ?? "?"})`;
+  } else if (record.eventType === "claude.compaction_started") {
+    text = `Claude compacting after incomplete goal ` +
+      `(attempt ${record.event?.attempt ?? "?"})`;
+  } else if (record.eventType === "claude.compaction_completed") {
+    text = `Claude compaction complete ` +
+      `(boundary ${record.event?.boundary_observed ? "observed" : "missing"})`;
+  } else if (record.eventType === "claude.compaction_failed") {
+    text = `Claude compaction failed: ` +
+      `${cleanText(record.event?.error?.message) || "unknown error"}`;
+    div.classList.add("ev-sys-err");
   } else if (isLimitWaitEvent(record)) {
     const minutes = Math.ceil((record.event?.wait_ms ?? 0) / 60000);
     const label = record.eventType === "ralph.limit_wait" ? "provider wait" : "quota wait";

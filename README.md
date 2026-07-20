@@ -44,10 +44,17 @@ stop hook keeps the agent working until the loop goal is judged complete. The
 `/goal` condition is limited to 4000 characters and the grader judges only the
 objective, so goal sidecar templates should be self-contained (include the
 required exit criteria); oversized objectives are tail-truncated as a last
-resort. If Claude reports a usage/session limit mid-turn, Ralph waits for the
-limit window to reset (using the reset time from the stream when available, 15
-minutes otherwise) and resumes the same session so the turn continues with its
-context intact. After an interrupted run, `node ralph.js --continue` resumes
+resort. By default, when the grader rejects a real Stop-hook attempt, Ralph
+stops that Claude process, clears the active goal, runs `/compact`, and
+reinstalls the same goal in the same Ralph turn. Ralph only records
+`claude.compaction_completed` after Claude emits a `compact_boundary`; the
+initial incomplete sentinel emitted while installing `/goal` is ignored. Set
+`claudeCompactOnIncompleteGoal` to `false` to retain Claude's native immediate
+continuation behavior. If Claude reports a usage/session limit mid-turn, Ralph
+waits for the limit window to reset (using the reset time from the stream when
+available, 15 minutes otherwise) and resumes the same session so the turn
+continues with its context intact. After an interrupted run,
+`node ralph.js --continue` resumes
 the most recent provider thread for the next turn only (subsequent turns
 follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
 still active, Ralph skips re-sending the goal and instead sends a short
@@ -188,9 +195,9 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 
 - `model`
   Default: `gpt-5.3-codex` for `codex`, `gemini-3.5-flash` for
-  `antigravity`.
+  `antigravity`, and `claude-fable-5` for `claude`.
 - `provider`
-  Default: `codex`. Supported values: `codex`, `antigravity`.
+  Default: `codex`. Supported values: `codex`, `antigravity`, `claude`.
 - `reasoningEffort`
   Default: `high`
 - `name`
@@ -259,6 +266,13 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Default: `false`
 - `codexPath`
   Default: `codex`
+- `claudePath`
+  Default: `claude`
+- `claudeCompactOnIncompleteGoal`
+  Default: `true`. After a real Claude `/goal` Stop-hook verdict reports that
+  the goal is incomplete, compact the persisted Claude session and resume the
+  same goal and Ralph turn. A compact command must emit `compact_boundary` to
+  be accepted.
 - `antigravityPython`
   Default: `python3`
 - `antigravityScriptPath`
@@ -283,8 +297,8 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Default: `0`. Sleeps before the initial Antigravity request and after each
   Antigravity tool call, useful for conservative free-tier quota tests.
 - `loopGoalsEnabled`
-  Default: `true`. Uses native Codex goals for `codex` and portable Ralph goals
-  for `antigravity`.
+  Default: `true`. Uses native goals for `codex` and `claude`, and portable
+  Ralph goals for `antigravity`.
 - `goalTokenBudget`
   Default: `null`
 - `workdir`
@@ -345,6 +359,11 @@ under `stateBaseDir`.
   Optional colon-delimited list passed through to the thread options
 - `RALPH_CODEX_PATH`
   Override the Codex executable used by both app-server goal setup and the SDK
+- `RALPH_CLAUDE_PATH`
+  Override the Claude executable
+- `RALPH_CLAUDE_COMPACT_ON_INCOMPLETE_GOAL`
+  Set to `0`, `false`, `no`, or `off` to disable same-turn compaction after an
+  incomplete Claude Stop-hook verdict
 - `RALPH_ANTIGRAVITY_PYTHON`
   Override `antigravityPython`
 - `RALPH_ANTIGRAVITY_SCRIPT_PATH`

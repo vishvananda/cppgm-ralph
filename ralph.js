@@ -40,6 +40,9 @@ const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
 const CLAUDE_INCOMPLETE_GOAL_RETRY_MAX = Number(process.env.RALPH_CLAUDE_INCOMPLETE_GOAL_RETRY_MAX ?? 20);
+const CLAUDE_SYSTEM_PROMPT_FD = 3;
+const CLAUDE_SYSTEM_PROMPT_FD_PATH = `/dev/fd/${CLAUDE_SYSTEM_PROMPT_FD}`;
+const CLAUDE_SYSTEM_PROMPT_ISOLATED_PATH = "/tmp/ralph-claude-system-prompt";
 const PROVIDER_TRANSIENT_RETRY_MAX = Number(
   process.env.RALPH_PROVIDER_TRANSIENT_RETRY_MAX ??
   process.env.RALPH_CODEX_TRANSIENT_RETRY_MAX ??
@@ -116,6 +119,7 @@ const DEFAULT_CONFIG = {
   codexPath: "codex",
   claudePath: "claude",
   claudeDefaultModel: "claude-fable-5",
+  claudeCompactOnIncompleteGoal: true,
   antigravityPython: "python3",
   antigravityScriptPath: path.join(RALPH_DIR, "scripts", "antigravity-turn.py"),
   antigravitySdkPath: null,
@@ -227,6 +231,7 @@ async function main() {
       `autoTestSubsetThreshold=${CONFIG.autoTestSubsetThreshold} ` +
       `autoTestSubsetTargetFiles=${CONFIG.autoTestSubsetTargetFiles} ` +
       `loopGoals=${CONFIG.loopGoalsEnabled ? "on" : "off"} ` +
+      `claudeGoalCompaction=${CONFIG.claudeCompactOnIncompleteGoal ? "on" : "off"} ` +
       `freshThreadPerTurn=${CONFIG.freshThreadPerTurn ? "on" : "off"} ` +
       `autoCommitOnPassingChecks=${CONFIG.autoCommitOnPassingChecks ? "on" : "off"} ` +
       `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
@@ -253,6 +258,7 @@ async function main() {
     ...(CONFIG.additionalDirectories.length > 0
       ? { additionalDirectories: CONFIG.additionalDirectories }
       : {}),
+    claudeCompactOnIncompleteGoal: CONFIG.claudeCompactOnIncompleteGoal,
   };
 
   const configuredThreadId = process.env.RALPH_THREAD_ID ?? null;
@@ -2324,7 +2330,13 @@ function installProcessSignalHandlers() {
 }
 
 function spawnTracked(command, args, options = {}) {
-  const { isolateSession, isolationWritableDirs, limitResources, ...spawnOptions } = options;
+  const {
+    isolateSession,
+    isolationWritableDirs,
+    isolationFdFiles,
+    limitResources,
+    ...spawnOptions
+  } = options;
   let spawnCommand = command;
   let spawnArgs = args;
   if (isolateSession && sessionIsolationEnabled()) {
@@ -2333,6 +2345,7 @@ function spawnTracked(command, args, options = {}) {
       args,
       spawnOptions,
       isolationWritableDirs,
+      isolationFdFiles,
     );
     spawnCommand = wrapped.command;
     spawnArgs = wrapped.args;
@@ -2362,7 +2375,7 @@ function sessionIsolationEnabled() {
     CONFIG?.sessionIsolation?.enabled === true;
 }
 
-function buildSessionIsolationSpawn(command, args, options, writableDirs = []) {
+function buildSessionIsolationSpawn(command, args, options, writableDirs = [], fdFiles = []) {
   const isolation = CONFIG?.sessionIsolation ?? DEFAULT_CONFIG.sessionIsolation;
   if (isolation.backend !== "bwrap") {
     throw new Error(`Unsupported session isolation backend: ${isolation.backend}`);
@@ -2382,6 +2395,12 @@ function buildSessionIsolationSpawn(command, args, options, writableDirs = []) {
   if (isolation.privateTmp) {
     bwrapArgs.push("--tmpfs", "/tmp");
     bwrapArgs.push("--tmpfs", "/var/tmp");
+  }
+  for (const { fd, destination } of fdFiles ?? []) {
+    if (!Number.isInteger(fd) || fd < 3 || !path.isAbsolute(destination)) {
+      throw new Error("Isolation fd files require an fd >= 3 and an absolute destination");
+    }
+    bwrapArgs.push("--ro-bind-data", String(fd), destination);
   }
   for (const directory of sessionIsolationWritableDirs(writableDirs)) {
     bwrapArgs.push("--bind-try", directory, directory);
@@ -4893,6 +4912,7 @@ class ClaudeThread {
     const { prompt } = normalizeCodexInput(input);
     const goal = turnOptions.goal ?? null;
     let message = prompt;
+    let goalCommand = null;
     let appendSystemPrompt = null;
     if (goal?.objective) {
       // `/goal <condition>` installs a graded stop hook that keeps the agent
@@ -4901,7 +4921,8 @@ class ClaudeThread {
       // goes there; the detailed turn instructions ride along as appended
       // system instructions (the goal objective must therefore be
       // self-contained enough for the grader, e.g. include the exit criteria).
-      message = `/goal ${truncateClaudeGoalCondition(goal.objective)}`;
+      goalCommand = `/goal ${truncateClaudeGoalCondition(goal.objective)}`;
+      message = goalCommand;
       appendSystemPrompt = [
         "Ralph is the outer automation loop. The active /goal is Ralph's loop",
         "goal for this turn, and the turn instructions below are mandatory",
@@ -4944,6 +4965,87 @@ class ClaudeThread {
     let incompleteGoalRetries = 0;
     while (true) {
       const attempt = yield* this.runAttempt(attemptInput, attemptSystemPrompt, turnOptions, shared);
+      if (attempt.goalCompactionRequested) {
+        incompleteGoalRetries += 1;
+        if (incompleteGoalRetries > CLAUDE_INCOMPLETE_GOAL_RETRY_MAX) {
+          yield {
+            type: "turn.failed",
+            error: {
+              message:
+                `Claude requested incomplete-goal compaction more than ` +
+                `${CLAUDE_INCOMPLETE_GOAL_RETRY_MAX} times.`,
+            },
+          };
+          return;
+        }
+
+        const compactArgs = {
+          threadId: this._id,
+          model: this.threadOptions.model,
+          modelReasoningEffort: this.threadOptions.modelReasoningEffort,
+          webSearchEnabled: this.threadOptions.webSearchEnabled,
+          workingDirectory: this.threadOptions.workingDirectory,
+          additionalDirectories: this.threadOptions.additionalDirectories,
+          signal: turnOptions.signal,
+        };
+        const reason = attempt.goalStatus?.reason ?? "";
+        log(
+          `Claude stop hook found the loop goal incomplete; compacting session ${this._id} ` +
+            `before continuing (attempt ${incompleteGoalRetries}/${CLAUDE_INCOMPLETE_GOAL_RETRY_MAX})`,
+        );
+        yield {
+          type: "claude.compaction_started",
+          thread_id: this._id,
+          trigger: "incomplete_goal",
+          attempt: incompleteGoalRetries,
+          reason,
+        };
+
+        this.settleAccruedUsage();
+        try {
+          await this.exec.clearGoal(compactArgs, { required: true });
+          const compactResult = await this.exec.compact(compactArgs);
+          const compactUsage = claudeUsageToCodexShape(
+            compactResult.usage,
+            compactResult.totalCostUsd,
+          );
+          this._usageBase = addCodexUsage(this._usageBase, compactUsage);
+          this._countedUsageRequests.clear();
+          yield {
+            type: "codex.session.token_count",
+            thread_id: this._id,
+            usage: { ...this._usageBase },
+          };
+          yield {
+            type: "claude.compaction_completed",
+            thread_id: this._id,
+            trigger: "incomplete_goal",
+            attempt: incompleteGoalRetries,
+            boundary_observed: true,
+            compact_metadata: compactResult.compactMetadata,
+            usage: compactUsage,
+          };
+        } catch (error) {
+          const errorMessage = formatErrorMessage(error);
+          yield {
+            type: "claude.compaction_failed",
+            thread_id: this._id,
+            trigger: "incomplete_goal",
+            attempt: incompleteGoalRetries,
+            error: { message: errorMessage },
+          };
+          yield {
+            type: "turn.failed",
+            error: { message: `Claude incomplete-goal compaction failed: ${errorMessage}` },
+          };
+          return;
+        }
+
+        shared.latestGoalStatus = null;
+        attemptInput = goalCommand;
+        attemptSystemPrompt = appendSystemPrompt;
+        continue;
+      }
       if (attempt.goalIncomplete) {
         incompleteGoalRetries += 1;
         if (incompleteGoalRetries > CLAUDE_INCOMPLETE_GOAL_RETRY_MAX) {
@@ -5033,6 +5135,7 @@ class ClaudeThread {
 
     let lastThinkingLogAt = 0;
     let rateLimitInfo = null;
+    let sawModelActivity = false;
     for await (const line of lines) {
       let event;
       try {
@@ -5059,6 +5162,9 @@ class ClaudeThread {
         // Returning early skips the exec exit-code check; the caller waits for
         // the limit window to pass and resumes the same session.
         return { limitMessage, rateLimitInfo };
+      }
+      if (event.type === "assistant" && event.message?.model !== "<synthetic>") {
+        sawModelActivity = true;
       }
       const requestUsage = event.type === "assistant" ? event.message?.usage : null;
       if (requestUsage) {
@@ -5107,9 +5213,34 @@ class ClaudeThread {
       ) {
         return { limitMessage: null, rateLimitInfo, goalIncomplete: true, goalStatus: shared.latestGoalStatus };
       }
+      const shouldCompactIncompleteGoal =
+        this.threadOptions.claudeCompactOnIncompleteGoal &&
+        Boolean(turnOptions.goal?.objective) &&
+        this._id &&
+        sawModelActivity &&
+        event.type === "attachment" &&
+        event.attachment?.type === "goal_status" &&
+        event.attachment.met === false;
       yield* translateClaudeEvent(event, shared);
+      if (shouldCompactIncompleteGoal) {
+        // Installing `/goal` emits an initial incomplete sentinel before the
+        // model runs. Only a later verdict after real model activity is a
+        // rejected Stop-hook attempt that should trigger compaction.
+        return {
+          limitMessage: null,
+          rateLimitInfo,
+          goalCompactionRequested: true,
+          goalStatus: shared.latestGoalStatus,
+        };
+      }
     }
     return { limitMessage: null, rateLimitInfo, goalIncomplete: false };
+  }
+
+  settleAccruedUsage() {
+    this._usageBase = addCodexUsage(this._usageBase, this._turnAccruedUsage);
+    this._turnAccruedUsage = emptyCodexUsage();
+    this._countedUsageRequests.clear();
   }
 }
 
@@ -5483,13 +5614,69 @@ class ClaudeExec {
     return commandArgs;
   }
 
-  async clearGoal(args) {
+  async clearGoal(args, options = {}) {
     const commandArgs = [...this.buildCommonArgs(args), "--output-format", "json"];
     try {
-      await this.runToCompletion(commandArgs, "/goal clear", args);
+      const stdout = await this.runToCompletion(commandArgs, "/goal clear", args);
+      const result = JSON.parse(stdout);
+      if (result?.is_error) {
+        throw new Error(String(result.result || "Claude reported an error while clearing the goal"));
+      }
+      return true;
     } catch (error) {
+      if (options.required) {
+        throw error;
+      }
       log(`Failed to clear Claude loop goal: ${formatErrorMessage(error)}`);
+      return false;
     }
+  }
+
+  async compact(args) {
+    let compactBoundary = null;
+    let result = null;
+    const lines = this.run({
+      ...args,
+      input: "/compact",
+      appendSystemPrompt: null,
+    });
+    for await (const line of lines) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Failed to parse Claude compact JSON event: ${line}`, { cause: error });
+      }
+      if (event.type === "system" && event.subtype === "compact_boundary") {
+        compactBoundary = event;
+      }
+      if (event.type === "result") {
+        result = event;
+      }
+    }
+
+    if (!result) {
+      throw new Error("Claude compact command ended without a result event");
+    }
+    const resultText = typeof result.result === "string" ? result.result.trim() : "";
+    if (
+      result.is_error ||
+      result.subtype !== "success" ||
+      /(?:error during compaction|compaction failed)/i.test(resultText)
+    ) {
+      throw new Error(resultText || "Claude reported an error during compaction");
+    }
+    if (!compactBoundary) {
+      throw new Error(
+        `Claude compact command completed without a compact_boundary event` +
+          `${resultText ? `: ${resultText}` : ""}`,
+      );
+    }
+    return {
+      compactMetadata: compactBoundary.compact_metadata ?? compactBoundary.compactMetadata ?? null,
+      usage: result?.usage ?? null,
+      totalCostUsd: Number.isFinite(result?.total_cost_usd) ? result.total_cost_usd : null,
+    };
   }
 
   async goalIsActive(args) {
@@ -5546,11 +5733,27 @@ class ClaudeExec {
       "stream-json",
       "--verbose",
     ];
+    let appendSystemPromptTempPath = null;
+    const appendSystemPromptViaFd = Boolean(args.appendSystemPrompt) && process.platform !== "win32";
     if (args.modelReasoningEffort) {
       commandArgs.push("--effort", args.modelReasoningEffort);
     }
     if (args.appendSystemPrompt) {
-      commandArgs.push("--append-system-prompt", args.appendSystemPrompt);
+      if (appendSystemPromptViaFd) {
+        commandArgs.push(
+          "--append-system-prompt-file",
+          sessionIsolationEnabled()
+            ? CLAUDE_SYSTEM_PROMPT_ISOLATED_PATH
+            : CLAUDE_SYSTEM_PROMPT_FD_PATH,
+        );
+      } else {
+        appendSystemPromptTempPath = path.join(
+          os.tmpdir(),
+          `ralph-claude-system-prompt-${randomUUID()}.txt`,
+        );
+        await fs.writeFile(appendSystemPromptTempPath, args.appendSystemPrompt, { mode: 0o600 });
+        commandArgs.push("--append-system-prompt-file", appendSystemPromptTempPath);
+      }
     }
     if (args.webSearchEnabled === false) {
       commandArgs.push("--disallowed-tools", "WebSearch");
@@ -5564,8 +5767,16 @@ class ClaudeExec {
         args.workingDirectory,
         ...(args.additionalDirectories ?? []),
       ],
+      isolationFdFiles: appendSystemPromptViaFd && sessionIsolationEnabled()
+        ? [{
+            fd: CLAUDE_SYSTEM_PROMPT_FD,
+            destination: CLAUDE_SYSTEM_PROMPT_ISOLATED_PATH,
+          }]
+        : [],
       signal: args.signal,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: appendSystemPromptViaFd
+        ? ["pipe", "pipe", "pipe", "pipe"]
+        : ["pipe", "pipe", "pipe"],
     });
     let spawnError = null;
     child.once("error", (error) => {
@@ -5573,7 +5784,22 @@ class ClaudeExec {
     });
     if (!child.stdin || !child.stdout) {
       terminateChildProcess(child);
+      if (appendSystemPromptTempPath) {
+        await fs.unlink(appendSystemPromptTempPath).catch(() => {});
+      }
       throw new Error("Claude exec did not expose stdio pipes");
+    }
+
+    if (appendSystemPromptViaFd) {
+      const systemPromptInput = child.stdio[CLAUDE_SYSTEM_PROMPT_FD];
+      if (!systemPromptInput?.writable) {
+        terminateChildProcess(child);
+        throw new Error("Claude exec did not expose the system-prompt pipe");
+      }
+      // Claude opens /dev/fd/3 as --append-system-prompt-file while stdin
+      // remains available for the /goal command or continuation message.
+      systemPromptInput.on("error", () => {});
+      systemPromptInput.end(args.appendSystemPrompt);
     }
 
     const stderrChunks = [];
@@ -5615,6 +5841,9 @@ class ClaudeExec {
       rl.close();
       child.removeAllListeners();
       terminateChildProcess(child);
+      if (appendSystemPromptTempPath) {
+        await fs.unlink(appendSystemPromptTempPath).catch(() => {});
+      }
     }
   }
 }
@@ -6354,6 +6583,11 @@ async function loadConfig() {
     ),
     codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
     claudePath: process.env.RALPH_CLAUDE_PATH ?? fileConfig.claudePath ?? DEFAULT_CONFIG.claudePath,
+    claudeCompactOnIncompleteGoal: parseBoolean(
+      process.env.RALPH_CLAUDE_COMPACT_ON_INCOMPLETE_GOAL ??
+        fileConfig.claudeCompactOnIncompleteGoal,
+      DEFAULT_CONFIG.claudeCompactOnIncompleteGoal,
+    ),
     antigravityPython:
       process.env.RALPH_ANTIGRAVITY_PYTHON ??
       fileConfig.antigravityPython ??
@@ -6742,6 +6976,17 @@ function summarizeEvent(event) {
   }
   if (event.type === "claude.goal_continue") {
     return `goal_continue attempt=${event.attempt ?? "?"} ${previewText(event.reason ?? "")}`;
+  }
+  if (event.type === "claude.compaction_started") {
+    return `compaction_started trigger=${event.trigger ?? "unknown"} attempt=${event.attempt ?? "?"}`;
+  }
+  if (event.type === "claude.compaction_completed") {
+    return `compaction_completed trigger=${event.trigger ?? "unknown"} ` +
+      `attempt=${event.attempt ?? "?"} boundary=${event.boundary_observed ? "observed" : "missing"}`;
+  }
+  if (event.type === "claude.compaction_failed") {
+    return `compaction_failed trigger=${event.trigger ?? "unknown"} ` +
+      `${previewText(event.error?.message ?? "")}`;
   }
   if (event.type === "ralph.limit_wait") {
     return `limit_wait ${formatDurationForLog(event.wait_ms ?? 0)} ${previewText(event.message ?? "")}`;
