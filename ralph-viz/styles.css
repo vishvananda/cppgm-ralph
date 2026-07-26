@@ -175,6 +175,9 @@ button:hover { background: #252525; }
 }
 
 .run-repository-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.22rem;
   color: #8aa7c7;
   font-size: 0.72rem;
   font-weight: 500;
@@ -185,6 +188,15 @@ button:hover { background: #252525; }
 .run-repository-link:hover {
   color: #b6d6f7;
   text-decoration: underline;
+}
+
+.external-link-arrow {
+  font-size: 0.88em;
+  line-height: 1;
+}
+
+body.is-static-viz .combined-view-toggle {
+  display: none;
 }
 
 .combined-run-details {

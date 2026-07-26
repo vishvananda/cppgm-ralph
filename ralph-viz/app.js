@@ -6748,7 +6748,7 @@ function runRepositoryLinkHtml(run, label = "GitHub") {
   if (!run?.repositoryUrl) {
     return label === "GitHub" ? "" : escapeHtml(label);
   }
-  return `<a class="run-repository-link" href="${escapeHtml(run.repositoryUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+  return `<a class="run-repository-link" href="${escapeHtml(run.repositoryUrl)}" target="_blank" rel="noopener noreferrer" title="Open GitHub repository in a new tab">${escapeHtml(label)}<span class="external-link-arrow" aria-hidden="true">&#8599;</span></a>`;
 }
 
 function prettyDocContent(content, doc) {
