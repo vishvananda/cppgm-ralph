@@ -655,7 +655,7 @@ async function main() {
             buildRalphTestStatusEventRecord({
               testStatus,
               threadId: thread.id ?? activeThreadId,
-              turnNumber,
+              turnNumber: turnNumber + 1,
             }),
             loopGoalEventRecord,
           ],

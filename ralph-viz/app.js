@@ -978,7 +978,7 @@ function runDetailHtml(summary, run, options = {}) {
   const usage = preferredUsageSummary(summary);
   const latest = summary?.last ? fmtShort(summary.last) : "";
   const nameHtml = options.includeName
-    ? `<strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>`
+    ? `<strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>${runRepositoryLinkHtml(run)}`
     : "";
   const phaseHtml = phaseStatus
     ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
@@ -4117,6 +4117,7 @@ function buildAgentTestProgressState(records) {
   const tracker = {
     stageTotals: new Map(stageTotalAnchors),
     stageBest: new Map(),
+    stageCurrent: new Map(),
     turnTargets: buildAgentProgressTargets(records, stageTotalAnchors),
     latest: null,
   };
@@ -4398,6 +4399,7 @@ function deriveRalphTestProgress(record, tracker) {
       status: "running",
       passed: Math.max(0, Math.min(progress.passed, configured.total)),
       total: configured.total,
+      isTurnStartBaseline: true,
     };
   }
   return {
@@ -5002,13 +5004,22 @@ function applyAgentTestProgressObservation(tracker, observation) {
     (observation.hasSubset
       ? observation.total
       : Math.max(observation.total, tracker.stageTotals.get(observation.stage) ?? 0));
-  const current = {
+  const observedCurrent = {
     passed: Math.min(observation.passed, knownTotal || observation.passed),
     total: knownTotal,
   };
   const bestKey = target
     ? progressTargetKey(observation.turn, observation.stage)
     : observation.stage;
+  const previousCurrent = tracker.stageCurrent.get(bestKey);
+  const current =
+    observation.isTurnStartBaseline && previousCurrent
+      ? {
+          passed: previousCurrent.passed,
+          total: Math.max(previousCurrent.total ?? 0, knownTotal),
+        }
+      : observedCurrent;
+  tracker.stageCurrent.set(bestKey, current);
   const previousBest = tracker.stageBest.get(bestKey);
   const best =
     !previousBest || current.passed >= previousBest.passed
@@ -5025,8 +5036,27 @@ function applyAgentTestProgressObservation(tracker, observation) {
     current,
     best: normalizedBest,
   };
-  tracker.latest = progress;
+  if (shouldReplaceLatestAgentTestProgress(tracker.latest, progress)) {
+    tracker.latest = progress;
+  }
   return progress;
+}
+
+function shouldReplaceLatestAgentTestProgress(previous, candidate) {
+  if (!previous) {
+    return true;
+  }
+  const previousTurn = Number.isInteger(previous.turn) ? previous.turn : -1;
+  const candidateTurn = Number.isInteger(candidate.turn) ? candidate.turn : -1;
+  if (candidateTurn !== previousTurn) {
+    return candidateTurn > previousTurn;
+  }
+  const previousTime = Date.parse(previous.recordedAt ?? "");
+  const candidateTime = Date.parse(candidate.recordedAt ?? "");
+  if (Number.isFinite(previousTime) && Number.isFinite(candidateTime)) {
+    return candidateTime >= previousTime;
+  }
+  return true;
 }
 
 function turnHasConfiguredProgressTarget(tracker, turn) {
@@ -6154,7 +6184,7 @@ async function renderComparisonView() {
   header.innerHTML = `
     <tr>
       <th>PA</th>
-      ${orderedRuns.map((run) => `<th>${escapeHtml(run.label)}</th>`).join("")}
+      ${orderedRuns.map((run) => `<th>${runRepositoryLinkHtml(run, run.label)}</th>`).join("")}
     </tr>
   `;
   table.append(header);
@@ -6627,6 +6657,7 @@ async function renderRunDocsPanel(run, summary) {
   runDocsEl.innerHTML = `
     <div class="run-docs-meta">
       <span>${escapeHtml(run.label ?? run.id)}</span>
+      ${runRepositoryLinkHtml(run)}
       ${layout ? `<span>${escapeHtml(layout.label ?? layout.id)}</span>` : ""}
       <span>${fmtInt(docs.length)} docs</span>
     </div>
@@ -6713,6 +6744,13 @@ function shortDocName(name) {
     .replace(/\.json$/i, "");
 }
 
+function runRepositoryLinkHtml(run, label = "GitHub") {
+  if (!run?.repositoryUrl) {
+    return label === "GitHub" ? "" : escapeHtml(label);
+  }
+  return `<a class="run-repository-link" href="${escapeHtml(run.repositoryUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+}
+
 function prettyDocContent(content, doc) {
   if (doc?.kind === "json" || /\.json$/i.test(doc?.name ?? "")) {
     try {
@@ -6791,11 +6829,23 @@ function renderCombinedRun(entry) {
 
   const header = document.createElement("div");
   header.className = "combined-run-header";
+  const titleRow = document.createElement("div");
+  titleRow.className = "combined-run-title-row";
   const title = document.createElement("a");
   title.className = "combined-run-title";
   title.href = fullRunHref(entry.run.id);
   title.textContent = entry.run.label ?? entry.run.id;
-  header.append(title);
+  titleRow.append(title);
+  if (entry.run.repositoryUrl) {
+    const repository = document.createElement("a");
+    repository.className = "run-repository-link";
+    repository.href = entry.run.repositoryUrl;
+    repository.target = "_blank";
+    repository.rel = "noopener noreferrer";
+    repository.textContent = "GitHub";
+    titleRow.append(repository);
+  }
+  header.append(titleRow);
 
   const details = document.createElement("div");
   details.className = "combined-run-details";

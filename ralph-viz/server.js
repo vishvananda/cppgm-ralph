@@ -36,6 +36,7 @@ const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
 const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
+const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 10;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 10;
@@ -54,6 +55,7 @@ const OPEN_CODEX_SESSION_CACHES = new Map();
 const OPEN_CODEX_SESSION_READS = new Map();
 const RUN_TAIL_FILE_CACHES = new Map();
 const RUN_TAIL_FILE_READS = new Map();
+const RUN_STRUCTURE_FILE_READS = new Map();
 let CODEX_SESSION_INDEX_CACHE = null;
 let APP_BUILD_ID_CACHE = null;
 const RUN_USAGE_REFRESHES = new Map();
@@ -378,12 +380,128 @@ function usageDominates(candidate, existing) {
 }
 
 async function readRecentRunTailEvents(filePath, detailOptions) {
-  const events = await readCachedRunTailEvents(filePath);
+  const [tailEvents, structuralEvents] = await Promise.all([
+    readCachedRunTailEvents(filePath),
+    readRunStructuralEvents(filePath),
+  ]);
+  const events = mergeEventStreams(structuralEvents, tailEvents);
   const wantedTurns = latestTurnNumbersFromEvents(
     events,
     detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS,
   );
   return events.filter((event) => wantedTurns.has(event.turnNumber));
+}
+
+async function readRunStructuralEvents(filePath) {
+  const cacheKey = path.resolve(filePath);
+  const pending = RUN_STRUCTURE_FILE_READS.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+  const read = refreshRunStructureCache(filePath);
+  RUN_STRUCTURE_FILE_READS.set(cacheKey, read);
+  try {
+    return await read;
+  } finally {
+    if (RUN_STRUCTURE_FILE_READS.get(cacheKey) === read) {
+      RUN_STRUCTURE_FILE_READS.delete(cacheKey);
+    }
+  }
+}
+
+async function refreshRunStructureCache(filePath) {
+  const stat = await fs.stat(filePath);
+  const cachePath = runStructureCachePath(filePath);
+  let cache = null;
+  try {
+    cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      cache = null;
+    }
+  }
+
+  if (
+    cache?.version !== RUN_STRUCTURE_CACHE_VERSION ||
+    !Number.isFinite(cache?.fileSize) ||
+    cache.fileSize < 0 ||
+    cache.fileSize > stat.size ||
+    !Array.isArray(cache?.events)
+  ) {
+    cache = {
+      version: RUN_STRUCTURE_CACHE_VERSION,
+      fileSize: 0,
+      trailingText: "",
+      events: [],
+    };
+  }
+
+  if (cache.fileSize < stat.size) {
+    const delta = await scanRunStructuralEventDelta(
+      filePath,
+      cache.fileSize,
+      stat.size,
+      cache.trailingText,
+    );
+    cache.fileSize = stat.size;
+    cache.trailingText = delta.trailingText;
+    cache.events.push(...delta.events);
+    await writeJsonAtomically(cachePath, cache);
+  }
+  return cache.events;
+}
+
+async function scanRunStructuralEventDelta(filePath, start, end, leadingText = "") {
+  const events = [];
+  let buffered = String(leadingText ?? "");
+  if (end <= start) {
+    return { events, trailingText: buffered };
+  }
+  const stream = createReadStream(filePath, {
+    encoding: "utf8",
+    start: Math.max(0, start),
+    end: Math.max(0, end - 1),
+  });
+  for await (const chunk of stream) {
+    buffered += chunk;
+    let newline;
+    while ((newline = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      if (!line) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(line);
+        if (event && typeof event === "object" && isAlwaysKeptSessionEvent(event)) {
+          events.push(event);
+        }
+      } catch (_) {
+        // A partial final line is retained and completed by the next refresh.
+      }
+    }
+  }
+  return { events, trailingText: buffered };
+}
+
+function runStructureCachePath(filePath) {
+  const fileBase = path.basename(filePath, ".jsonl");
+  const runDir = path.dirname(path.dirname(filePath));
+  return path.join(runDir, RUN_USAGE_CACHE_DIR, `${fileBase}.structure.json`);
+}
+
+async function writeJsonAtomically(filePath, value) {
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(tmpPath, JSON.stringify(value), "utf8");
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    try {
+      await fs.unlink(tmpPath);
+    } catch (_) {}
+    throw error;
+  }
 }
 
 async function readCachedRunTailEvents(filePath) {

@@ -23,6 +23,13 @@ const DEFAULT_RUNS = [
   "fable-claude-fable-5-xhigh",
   "luna-gpt-5.6-luna-ultra",
 ];
+const RUN_REPOSITORIES = new Map([
+  ["trusted", "https://github.com/vishvananda/cppgm-run-trusted"],
+  ["opus", "https://github.com/vishvananda/cppgm-run-opus"],
+  ["mini", "https://github.com/vishvananda/cppgm-run-mini"],
+  ["fable", "https://github.com/vishvananda/cppgm-run-fable"],
+  ["luna", "https://github.com/vishvananda/cppgm-run-luna"],
+]);
 const FORMAT_VERSION = 1;
 const CURRENT_ASSIGNMENT_LAYOUT = {
   id: "current",
@@ -454,6 +461,7 @@ function annotateComparison(comparison, runMetas) {
       run.layout = meta.assignmentLayout;
       run.assignmentTitles = meta.assignmentTitles;
       run.dataPath = meta.dataPath;
+      run.repositoryUrl = meta.repositoryUrl;
     }
     run.ordinal = index + 1;
     run.label = `${run.ordinal}-${run.label ?? run.spec ?? `run-${run.ordinal}`}`;
@@ -570,6 +578,7 @@ async function exportRun(run, options, comparison) {
   const runMeta = {
     id: run.id,
     label: run.label,
+    repositoryUrl: RUN_REPOSITORIES.get(inferDocPrefix(run.shape)) ?? null,
     fileBase: run.fileBase,
     filePath: run.filePath,
     dataPath: `runs/${run.safeId}/summary.json`,
