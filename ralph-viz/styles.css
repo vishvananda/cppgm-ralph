@@ -259,6 +259,20 @@ body.is-static-viz .combined-view-toggle {
   font-size: 0.72rem;
 }
 
+.run-comparison-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem 0.55rem;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.run-comparison-controls .compact-number {
+  width: 3.5rem;
+}
+
 .run-comparison {
   margin-top: 0.65rem;
   min-width: 0;

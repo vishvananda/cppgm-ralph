@@ -13,6 +13,7 @@ const runDocsEl = document.getElementById("runDocs");
 const runComparisonCard = document.getElementById("runComparisonCard");
 const runComparisonEl = document.getElementById("runComparison");
 const runComparisonMeta = document.getElementById("runComparisonMeta");
+const runComparisonThrough = document.getElementById("runComparisonThrough");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
@@ -69,6 +70,7 @@ const state = {
   staticRunDocs: new Map(),
   staticComparison: null,
   runComparisons: new Map(),
+  runComparisonThrough: new Map(),
   runComparisonRequestId: 0,
   compareThrough: null,
   selectedDocName: null,
@@ -6655,6 +6657,9 @@ function hideRunComparisonPanel() {
   if (runComparisonMeta) {
     runComparisonMeta.textContent = "";
   }
+  if (runComparisonThrough) {
+    runComparisonThrough.disabled = true;
+  }
 }
 
 function comparisonForStaticRun(comparison, run) {
@@ -6688,6 +6693,7 @@ function scheduleRunComparisonPanel(run) {
     runComparisonCard.hidden = false;
     runComparisonEl.innerHTML = '<div class="run-comparison-status muted">Loading published comparison...</div>';
     runComparisonMeta.textContent = "";
+    runComparisonThrough.disabled = true;
   }
   if (cached?.promise) {
     return;
@@ -6719,14 +6725,44 @@ function scheduleRunComparisonPanel(run) {
       if (state.selectedRun === run.id && requestId === state.runComparisonRequestId) {
         runComparisonCard.hidden = false;
         runComparisonEl.innerHTML = `<div class="run-comparison-status muted">Comparison unavailable: ${escapeHtml(error.message)}</div>`;
+        runComparisonThrough.disabled = true;
       }
       return null;
     });
   state.runComparisons.set(run.id, { ...(cached ?? {}), promise, loadedAt: cached?.loadedAt ?? 0 });
 }
 
+function highlightedComparisonRunIndex(comparison) {
+  const explicit = Number(comparison?.localRunIndex);
+  if (Number.isInteger(explicit) && explicit >= 0) {
+    return explicit;
+  }
+  return (comparison?.runs ?? []).findIndex((run) => run?.highlighted === true);
+}
+
+function defaultRunComparisonThrough(comparison) {
+  const rows = comparison?.rows ?? [];
+  const runIndex = highlightedComparisonRunIndex(comparison);
+  let currentPa = 0;
+  if (runIndex >= 0) {
+    for (const row of rows) {
+      if (comparisonSummaryStarted(row?.runs?.[runIndex])) {
+        currentPa = Number.parseInt(String(row.pa ?? "").replace(/^pa/, ""), 10) || currentPa;
+      }
+    }
+  }
+  return Math.max(1, Math.min(rows.length, currentPa + 1));
+}
+
 async function renderRunComparisonPanel(run, comparison, loadedAt) {
-  const renderKey = `${run.id}:${loadedAt}`;
+  const allRows = comparison?.rows ?? [];
+  const runs = comparison?.runs ?? [];
+  const requestedThrough = Number.parseInt(state.runComparisonThrough.get(run.id), 10);
+  const through = Math.max(1, Math.min(
+    allRows.length,
+    Number.isFinite(requestedThrough) ? requestedThrough : defaultRunComparisonThrough(comparison),
+  ));
+  const renderKey = `${run.id}:${loadedAt}:${through}`;
   if (runComparisonCard.dataset.renderKey === renderKey) {
     return;
   }
@@ -6734,11 +6770,10 @@ async function renderRunComparisonPanel(run, comparison, loadedAt) {
   if (state.selectedRun !== run.id || !isRunsPage() || isCombinedView()) {
     return;
   }
-  const rows = comparison?.rows ?? [];
-  const runs = comparison?.runs ?? [];
-  if (!rows.length || !runs.length) {
+  if (!allRows.length || !runs.length) {
     throw new Error("Comparison contains no chart data");
   }
+  const rows = allRows.slice(0, through);
   const runOrder = comparisonRunOrder(runs);
   const charts = renderComparisonCharts(rows, runOrder, runs);
   disposeComparisonCharts(runComparisonEl);
@@ -6750,6 +6785,10 @@ async function renderRunComparisonPanel(run, comparison, loadedAt) {
     localName,
     publishedAt ? `baseline ${fmtShort(publishedAt)}` : "",
   ].filter(Boolean).join(" / ");
+  runComparisonThrough.min = "1";
+  runComparisonThrough.max = String(allRows.length);
+  runComparisonThrough.value = String(through);
+  runComparisonThrough.disabled = false;
   runComparisonCard.dataset.runId = run.id;
   runComparisonCard.dataset.renderKey = renderKey;
   runComparisonCard.hidden = false;
@@ -7650,6 +7689,27 @@ if (combinedViewToggle) {
 }
 if (fullViewToggle) {
   fullViewToggle.addEventListener("change", rerenderCurrentViewPreservingScroll);
+}
+if (runComparisonThrough) {
+  runComparisonThrough.addEventListener("change", () => {
+    const runId = state.selectedRun;
+    const cached = state.runComparisons.get(runId);
+    if (!runId || !cached?.data) {
+      return;
+    }
+    const maxPa = cached.data.rows?.length ?? 1;
+    const through = Math.max(1, Math.min(
+      maxPa,
+      Number.parseInt(runComparisonThrough.value, 10) || defaultRunComparisonThrough(cached.data),
+    ));
+    state.runComparisonThrough.set(runId, through);
+    delete runComparisonCard.dataset.renderKey;
+    renderRunComparisonPanel(
+      state.runs.find((run) => run.id === runId) ?? { id: runId, label: runId },
+      cached.data,
+      cached.loadedAt,
+    ).catch((error) => console.error("run comparison render failed", error));
+  });
 }
 window.addEventListener("scroll", handleObservedScroll, { passive: true });
 window.addEventListener("resize", scheduleProgressDockSpaceUpdate, { passive: true });

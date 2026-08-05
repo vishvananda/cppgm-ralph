@@ -58,7 +58,11 @@
       <section id="runComparisonCard" class="card run-comparison-card" hidden>
         <div class="run-comparison-heading">
           <h2>Published Run Comparison</h2>
-          <span id="runComparisonMeta" class="muted"></span>
+          <div class="run-comparison-controls">
+            <label for="runComparisonThrough">through PA</label>
+            <input id="runComparisonThrough" class="compact-number" type="number" min="1" disabled />
+            <span id="runComparisonMeta" class="muted"></span>
+          </div>
         </div>
         <div id="runComparison" class="run-comparison"></div>
       </section>
@@ -90,6 +94,6 @@
     <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/diff-highlight/prism-diff-highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
     <script src="model-pricing.js?v=20260804-shared-pricing"></script>
-    <script src="app.js?v=20260805-local-comparison"></script>
+    <script src="app.js?v=20260805-local-comparison2"></script>
   </body>
 </html>
