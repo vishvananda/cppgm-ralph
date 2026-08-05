@@ -8,6 +8,8 @@ import http from "node:http";
 import os from "node:os";
 import readline from "node:readline";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -20,6 +22,8 @@ const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? DEFAULT_CLAUDE_PR
 const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_DIR = path.dirname(SPA_DIR);
+const execFileAsync = promisify(execFile);
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SCROLL_DEBUG_LOG_PATH = path.join(RALPH_DIR, "viz-scroll-debug.jsonl");
@@ -61,6 +65,16 @@ let APP_BUILD_ID_CACHE = null;
 const RUN_USAGE_REFRESHES = new Map();
 const OPEN_CODEX_SESSION_CACHE_LIMIT = 32;
 const RUN_TAIL_FILE_CACHE_LIMIT = 16;
+const PUBLISHED_COMPARISON_URL = process.env.RALPH_VIZ_PUBLISHED_COMPARISON_URL ??
+  "https://storage.googleapis.com/ralph-run-viewer-zippy-960/data/comparisons/pa-costs.json";
+const PUBLISHED_COMPARISON_CACHE_MS = 5 * 60 * 1000;
+const LOCAL_COMPARISON_CACHE_MS = 60 * 1000;
+const PUBLISHED_COMPARISON_FETCH_TIMEOUT_MS = 15 * 1000;
+const LOCAL_COMPARISON_TIMEOUT_MS = 5 * 60 * 1000;
+let PUBLISHED_COMPARISON_CACHE = null;
+let PUBLISHED_COMPARISON_READ = null;
+const LOCAL_COMPARISON_CACHE = new Map();
+const LOCAL_COMPARISON_READS = new Map();
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -3135,6 +3149,9 @@ async function readRalphConfigDescriptor(configPath) {
     configPath,
     namePart,
     runName,
+    provider,
+    model,
+    reasoningEffort,
     workdir,
     driverMode: String(fileConfig.driverMode ?? "standard").trim().toLowerCase(),
     testSubsets: sliceNormalizeTestSubsets(fileConfig.testSubsets),
@@ -6394,6 +6411,171 @@ async function appendScrollDebugEvent(event) {
   );
 }
 
+function comparisonSummaryForChart(summary, pa) {
+  if (!summary || summary.status === "not started") {
+    return {
+      pa,
+      turns: [],
+      durationMs: 0,
+      cost: 0,
+      status: "not started",
+    };
+  }
+  return {
+    pa,
+    turns: Array.isArray(summary.turns) && summary.turns.length ? [String(summary.turns.length)] : [],
+    durationMs: Math.max(0, Number(summary.durationMs) || 0),
+    cost: Math.max(0, Number(summary.cost) || 0),
+    status: summary.status === "partial" ? "partial" : "complete",
+  };
+}
+
+function comparisonRunForChart(run, highlighted = false) {
+  return {
+    label: String(run?.label ?? run?.spec ?? "run"),
+    spec: run?.spec ?? null,
+    model: run?.model ?? null,
+    repositoryUrl: run?.repositoryUrl ?? null,
+    highlighted,
+  };
+}
+
+function mergePublishedAndLocalComparison(published, local, runRef, localMtime) {
+  const publishedRuns = Array.isArray(published?.runs) ? published.runs : [];
+  const localRun = local?.runs?.[0] ?? null;
+  if (!localRun) {
+    throw new Error("Local comparison did not contain a run");
+  }
+  const publishedRows = new Map((published?.rows ?? []).map((row) => [row.pa, row]));
+  const localRows = new Map((local?.rows ?? []).map((row) => [row.pa, row]));
+  const through = Math.max(
+    Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0,
+    Number.parseInt(String(local?.through ?? "").replace(/^pa/, ""), 10) || 0,
+  );
+  const runs = [
+    ...publishedRuns.map((run) => comparisonRunForChart(run)),
+    comparisonRunForChart({
+      ...localRun,
+      label: `${runRef.shape} (local)`,
+    }, true),
+  ];
+  const rows = [];
+  for (let number = 1; number <= through; number += 1) {
+    const pa = `pa${number}`;
+    const publishedRow = publishedRows.get(pa);
+    const localRow = localRows.get(pa);
+    rows.push({
+      pa,
+      runs: [
+        ...publishedRuns.map((_, index) => comparisonSummaryForChart(publishedRow?.runs?.[index], pa)),
+        comparisonSummaryForChart(localRow?.runs?.[0], pa),
+      ],
+    });
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    publishedGeneratedAt: published?.generatedAt ?? null,
+    localUpdatedAt: localMtime?.toISOString?.() ?? null,
+    through: `pa${through}`,
+    localRunIndex: runs.length - 1,
+    runs,
+    rows,
+  };
+}
+
+async function configuredModelForShape(shape) {
+  const descriptors = await discoverRalphConfigDescriptors();
+  return descriptors.find((descriptor) => descriptor.runName === shape)?.model ?? null;
+}
+
+async function readPublishedComparison(force = false) {
+  const now = Date.now();
+  if (!force && PUBLISHED_COMPARISON_CACHE && now - PUBLISHED_COMPARISON_CACHE.loadedAt < PUBLISHED_COMPARISON_CACHE_MS) {
+    return PUBLISHED_COMPARISON_CACHE.value;
+  }
+  if (PUBLISHED_COMPARISON_READ) {
+    return PUBLISHED_COMPARISON_READ;
+  }
+  PUBLISHED_COMPARISON_READ = (async () => {
+    try {
+      const response = await fetch(PUBLISHED_COMPARISON_URL, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(PUBLISHED_COMPARISON_FETCH_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new Error(`published comparison returned ${response.status}`);
+      }
+      const value = await response.json();
+      PUBLISHED_COMPARISON_CACHE = { loadedAt: Date.now(), value };
+      return value;
+    } catch (error) {
+      if (PUBLISHED_COMPARISON_CACHE?.value) {
+        console.warn(`published comparison refresh failed; using cached data: ${error.message}`);
+        return PUBLISHED_COMPARISON_CACHE.value;
+      }
+      throw error;
+    } finally {
+      PUBLISHED_COMPARISON_READ = null;
+    }
+  })();
+  return PUBLISHED_COMPARISON_READ;
+}
+
+async function buildLocalRunComparison(rawId, through) {
+  const codexSessionsDir = path.basename(CODEX_DIR) === "sessions"
+    ? CODEX_DIR
+    : path.join(CODEX_DIR, "sessions");
+  const scriptPath = path.join(REPO_DIR, "scripts", "compare-pa-costs.js");
+  const { stdout, stderr } = await execFileAsync(process.execPath, [
+    scriptPath,
+    "--format", "json",
+    "--through", through,
+    "--ralph-dir", RALPH_DIR,
+    "--codex-dir", codexSessionsDir,
+    rawId,
+  ], {
+    cwd: REPO_DIR,
+    maxBuffer: 128 * 1024 * 1024,
+    timeout: LOCAL_COMPARISON_TIMEOUT_MS,
+  });
+  if (stderr.trim()) {
+    console.warn(`local comparison for ${rawId}: ${stderr.trim()}`);
+  }
+  return JSON.parse(stdout);
+}
+
+async function readRunComparison(rawId, runRef, force = false) {
+  const now = Date.now();
+  const cached = LOCAL_COMPARISON_CACHE.get(rawId);
+  if (!force && cached && now - cached.loadedAt < LOCAL_COMPARISON_CACHE_MS) {
+    return cached.value;
+  }
+  if (LOCAL_COMPARISON_READS.has(rawId)) {
+    return LOCAL_COMPARISON_READS.get(rawId);
+  }
+  const read = (async () => {
+    try {
+      const published = await readPublishedComparison(force);
+      const through = published?.through ?? "pa39";
+      const [local, stat, configuredModel] = await Promise.all([
+        buildLocalRunComparison(rawId, through),
+        fs.stat(runRef.filePath),
+        configuredModelForShape(runRef.shape),
+      ]);
+      if (configuredModel && local?.runs?.[0]) {
+        local.runs[0].model = configuredModel;
+      }
+      const value = mergePublishedAndLocalComparison(published, local, runRef, stat.mtime);
+      LOCAL_COMPARISON_CACHE.set(rawId, { loadedAt: Date.now(), value });
+      return value;
+    } finally {
+      LOCAL_COMPARISON_READS.delete(rawId);
+    }
+  })();
+  LOCAL_COMPARISON_READS.set(rawId, read);
+  return read;
+}
+
 async function appBuildId() {
   const files = ["index.html", "app.js", "model-pricing.js", "styles.css"];
   const stats = await Promise.all(files.map(async (file) => {
@@ -6486,6 +6668,28 @@ async function requestHandler(req, res) {
       state: entry.state,
     }));
     return sendJson(res, { runs });
+  }
+
+  if (pathname.startsWith("/api/run-comparison/")) {
+    const rawId = decodeURIComponent(pathname.slice("/api/run-comparison/".length));
+    const runRef = safeRunRef(rawId);
+    if (!runRef) {
+      return sendJson(res, { error: "Invalid run id" }, 400);
+    }
+    try {
+      const comparison = await readRunComparison(
+        rawId,
+        runRef,
+        url.searchParams.get("refresh") === "1",
+      );
+      return sendJson(res, comparison);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return sendJson(res, { error: "Run not found" }, 404);
+      }
+      console.warn(`run comparison failed for ${rawId}:`, error?.message ?? error);
+      return sendJson(res, { error: error?.message ?? "Comparison unavailable" }, 502);
+    }
   }
 
   if (pathname.startsWith("/api/run/")) {

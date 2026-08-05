@@ -113,11 +113,18 @@ http://127.0.0.1:4173
 `ralph-viz` reads `.ralph/<run-name>/events/<thread>.jsonl` and shows:
 
 - a run summary
+- accumulated cost and runtime charts comparing a selected local run with the
+  published run baseline
 - turn-level rollup view
 - active phase and configured check status when the event log contains
   `ralph.phase-status` or a phase-aware Ralph prompt
 - event-level drill-down with full JSON payload
 - event-type filtering
+
+The live viewer proxies the published comparison through its local server and
+refreshes local comparison accounting once per minute. Override the baseline
+artifact with `RALPH_VIZ_PUBLISHED_COMPARISON_URL`; by default it uses the
+public `ralph-run-viewer-zippy-960` export.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;

@@ -10,6 +10,9 @@ const timelineEl = document.getElementById("timeline");
 const progressDock = document.getElementById("progressDock");
 const runDocsCard = document.getElementById("runDocsCard");
 const runDocsEl = document.getElementById("runDocs");
+const runComparisonCard = document.getElementById("runComparisonCard");
+const runComparisonEl = document.getElementById("runComparison");
+const runComparisonMeta = document.getElementById("runComparisonMeta");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
@@ -34,6 +37,7 @@ const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v2";
 const PROGRESS_BEST_CACHE_LIMIT = 600;
 const STATIC_DATA_ROOT = staticDataRootFromUrl();
 const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+const RUN_COMPARISON_REFRESH_MS = 60 * 1000;
 let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
@@ -64,6 +68,8 @@ const state = {
   staticRunSummaries: new Map(),
   staticRunDocs: new Map(),
   staticComparison: null,
+  runComparisons: new Map(),
+  runComparisonRequestId: 0,
   compareThrough: null,
   selectedDocName: null,
   autoRefreshTimer: null,
@@ -6029,6 +6035,7 @@ async function loadRuns(options = {}) {
 async function loadCombinedRuns(options = {}) {
   setCombinedModeActive(true);
   hideRunDocsPanel();
+  hideRunComparisonPanel();
   setViewTitles("Active Runs", "Recent Cards");
   state.selectedRun = runSelect.value || state.selectedRun;
   const activeRuns = state.staticMode ? staticCombinedRuns() : state.runs.filter(isActiveRunMeta);
@@ -6110,6 +6117,7 @@ async function loadRun(id, options = {}) {
     });
   }
   renderSummary(state.events);
+  scheduleRunComparisonPanel(state.runs.find((run) => run.id === id) ?? null, data.staticSummary ?? null);
   await renderRunDocsPanel(state.runs.find((run) => run.id === id) ?? null, data.staticSummary ?? null);
   scrollDebug("load-run-before-render", {
     id,
@@ -6129,6 +6137,7 @@ function staticCombinedRuns() {
 async function renderComparisonView() {
   setCombinedModeActive(false);
   hideRunDocsPanel();
+  hideRunComparisonPanel();
   setViewTitles("Comparison", "PA Costs");
   state.events = [];
   state.combinedRuns = [];
@@ -6324,13 +6333,15 @@ function hydrateComparisonCharts(container, rows, runOrder, orderedRuns) {
 }
 
 function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
+  window.echarts.getInstanceByDom?.(el)?.dispose?.();
   const chart = window.echarts.init(el, null, { renderer: "canvas" });
   const labels = rows.map((row) => row.pa);
   const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
   const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
-  const colorBySeries = new Map(series.map((run, index) => [run.label, palette[index % palette.length]]));
+  const colors = series.map((run, index) => run.highlighted ? "#ff9e64" : palette[index % palette.length]);
+  const colorBySeries = new Map(series.map((run, index) => [run.label, colors[index]]));
   chart.setOption({
-    color: palette,
+    color: colors,
     backgroundColor: "transparent",
     animationDuration: 550,
     tooltip: {
@@ -6376,7 +6387,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
       },
     },
     series: series.map((run, runIndex) => {
-      const color = palette[runIndex % palette.length];
+      const color = colors[runIndex];
       const finalPoint = run.points.at(-1) ?? null;
       return {
         name: run.label,
@@ -6385,8 +6396,9 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         connectNulls: false,
         symbol: "none",
         showSymbol: true,
-        lineStyle: { width: 2.4 },
-        areaStyle: { opacity: 0.16 },
+        lineStyle: { width: run.highlighted ? 4 : 2.1, opacity: run.highlighted ? 1 : 0.72 },
+        areaStyle: { opacity: run.highlighted ? 0.26 : 0.1 },
+        z: run.highlighted ? 10 : 2,
         emphasis: { focus: "series" },
         data: rows.map((_, index) => {
           const point = run.points.find((candidate) => candidate.index === index);
@@ -6416,6 +6428,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(resize);
     observer.observe(el);
+    el._ralphResizeObserver = observer;
   } else {
     window.addEventListener("resize", resize, { passive: true });
   }
@@ -6462,20 +6475,20 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
     if (!run.points.length) {
       return "";
     }
-    const color = palette[runIndex % palette.length];
+    const color = run.highlighted ? "#ff9e64" : palette[runIndex % palette.length];
     const line = run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.value).toFixed(1)}`).join(" ");
     const firstPoint = run.points[0];
     const finalPoint = run.points.at(-1);
     const complete = finalPoint.status === "complete";
     const area = `${line} L ${xFor(finalPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(firstPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} Z`;
     return `
-      <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color}" />
-      <path class="comparison-area-line" d="${line}" stroke="${color}" />
+      <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color};fill-opacity:${run.highlighted ? "0.25" : "0.1"}" />
+      <path class="comparison-area-line" d="${line}" stroke="${color}" style="stroke-width:${run.highlighted ? "4" : "2.1"};opacity:${run.highlighted ? "1" : "0.72"}" />
       <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : "#111"}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
     `;
   }).join("");
   const latest = series.map((run, runIndex) => {
-    const color = palette[runIndex % palette.length];
+    const color = run.highlighted ? "#ff9e64" : palette[runIndex % palette.length];
     const value = run.points.at(-1)?.value ?? 0;
     return `<span><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}</span>`;
   }).join("");
@@ -6514,6 +6527,7 @@ function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field) {
     let value = 0;
     return {
       label: orderedRuns[position]?.label ?? `run ${position + 1}`,
+      highlighted: orderedRuns[position]?.highlighted === true,
       points: rows.flatMap((row, index) => {
         const summary = row.runs?.[runIndex] ?? null;
         if (!comparisonSummaryStarted(summary)) {
@@ -6614,6 +6628,131 @@ function formatUsd(value) {
     return "n/a";
   }
   return `$${amount.toFixed(2)}`;
+}
+
+function disposeComparisonCharts(container) {
+  if (!container) {
+    return;
+  }
+  for (const element of container.querySelectorAll?.(".comparison-echart") ?? []) {
+    element._ralphResizeObserver?.disconnect?.();
+    element._ralphResizeObserver = null;
+    window.echarts?.getInstanceByDom?.(element)?.dispose?.();
+  }
+}
+
+function hideRunComparisonPanel() {
+  state.runComparisonRequestId += 1;
+  disposeComparisonCharts(runComparisonEl);
+  if (runComparisonCard) {
+    runComparisonCard.hidden = true;
+    delete runComparisonCard.dataset.runId;
+    delete runComparisonCard.dataset.renderKey;
+  }
+  if (runComparisonEl) {
+    runComparisonEl.innerHTML = "";
+  }
+  if (runComparisonMeta) {
+    runComparisonMeta.textContent = "";
+  }
+}
+
+function comparisonForStaticRun(comparison, run) {
+  const shape = String(run?.id ?? "").split("/")[0];
+  const runs = (comparison?.runs ?? []).map((candidate) => ({
+    ...candidate,
+    highlighted: candidate.spec === shape || candidate.dataPath === run?.dataPath,
+  }));
+  if (!runs.some((candidate) => candidate.highlighted)) {
+    return null;
+  }
+  return { ...comparison, runs };
+}
+
+function scheduleRunComparisonPanel(run) {
+  if (!runComparisonCard || !runComparisonEl || !run) {
+    hideRunComparisonPanel();
+    return;
+  }
+  const now = Date.now();
+  const cached = state.runComparisons.get(run.id);
+  if (cached?.data) {
+    renderRunComparisonPanel(run, cached.data, cached.loadedAt)
+      .catch((error) => console.error("run comparison render failed", error));
+    if (now - cached.loadedAt < RUN_COMPARISON_REFRESH_MS || cached.promise || state.staticMode) {
+      return;
+    }
+  } else if (runComparisonCard.dataset.runId !== run.id) {
+    disposeComparisonCharts(runComparisonEl);
+    runComparisonCard.dataset.runId = run.id;
+    runComparisonCard.hidden = false;
+    runComparisonEl.innerHTML = '<div class="run-comparison-status muted">Loading published comparison...</div>';
+    runComparisonMeta.textContent = "";
+  }
+  if (cached?.promise) {
+    return;
+  }
+
+  const requestId = ++state.runComparisonRequestId;
+  const promise = (state.staticMode
+    ? loadStaticComparison().then((comparison) => comparisonForStaticRun(comparison, run))
+    : fetchJson(`/api/run-comparison/${encodeURIComponent(run.id)}`))
+    .then((data) => {
+      if (!data) {
+        throw new Error("Selected run is not present in the published comparison");
+      }
+      const entry = { data, loadedAt: Date.now(), promise: null };
+      state.runComparisons.set(run.id, entry);
+      if (state.selectedRun === run.id && requestId === state.runComparisonRequestId) {
+        renderRunComparisonPanel(run, data, entry.loadedAt)
+          .catch((error) => console.error("run comparison render failed", error));
+      }
+      return data;
+    })
+    .catch((error) => {
+      const previous = state.runComparisons.get(run.id);
+      if (previous?.data) {
+        state.runComparisons.set(run.id, { ...previous, promise: null });
+        return previous.data;
+      }
+      state.runComparisons.delete(run.id);
+      if (state.selectedRun === run.id && requestId === state.runComparisonRequestId) {
+        runComparisonCard.hidden = false;
+        runComparisonEl.innerHTML = `<div class="run-comparison-status muted">Comparison unavailable: ${escapeHtml(error.message)}</div>`;
+      }
+      return null;
+    });
+  state.runComparisons.set(run.id, { ...(cached ?? {}), promise, loadedAt: cached?.loadedAt ?? 0 });
+}
+
+async function renderRunComparisonPanel(run, comparison, loadedAt) {
+  const renderKey = `${run.id}:${loadedAt}`;
+  if (runComparisonCard.dataset.renderKey === renderKey) {
+    return;
+  }
+  await ensureEChartsLoaded();
+  if (state.selectedRun !== run.id || !isRunsPage() || isCombinedView()) {
+    return;
+  }
+  const rows = comparison?.rows ?? [];
+  const runs = comparison?.runs ?? [];
+  if (!rows.length || !runs.length) {
+    throw new Error("Comparison contains no chart data");
+  }
+  const runOrder = comparisonRunOrder(runs);
+  const charts = renderComparisonCharts(rows, runOrder, runs);
+  disposeComparisonCharts(runComparisonEl);
+  runComparisonEl.replaceChildren(charts);
+  hydrateComparisonCharts(charts, rows, runOrder, runs);
+  const publishedAt = comparison.publishedGeneratedAt ?? comparison.generatedAt;
+  const localName = runs.find((candidate) => candidate.highlighted)?.label ?? run.label ?? run.id;
+  runComparisonMeta.textContent = [
+    localName,
+    publishedAt ? `baseline ${fmtShort(publishedAt)}` : "",
+  ].filter(Boolean).join(" / ");
+  runComparisonCard.dataset.runId = run.id;
+  runComparisonCard.dataset.renderKey = renderKey;
+  runComparisonCard.hidden = false;
 }
 
 function hideRunDocsPanel() {

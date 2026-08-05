@@ -239,6 +239,36 @@ body.is-static-viz .combined-view-toggle {
   min-width: 0;
 }
 
+.run-comparison-card {
+  overflow: hidden;
+}
+
+.run-comparison-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+}
+
+.run-comparison-heading h2 {
+  margin: 0;
+}
+
+.run-comparison-heading .muted {
+  font-size: 0.72rem;
+}
+
+.run-comparison {
+  margin-top: 0.65rem;
+  min-width: 0;
+}
+
+.run-comparison-status {
+  padding: 0.5rem 0;
+  font-size: 0.8rem;
+}
+
 .comparison-charts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
