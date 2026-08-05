@@ -6395,7 +6395,7 @@ async function appendScrollDebugEvent(event) {
 }
 
 async function appBuildId() {
-  const files = ["index.html", "app.js", "styles.css"];
+  const files = ["index.html", "app.js", "model-pricing.js", "styles.css"];
   const stats = await Promise.all(files.map(async (file) => {
     const stat = await fs.stat(path.join(SPA_DIR, file));
     return `${file}:${stat.size}:${stat.mtimeMs}`;
@@ -6437,6 +6437,10 @@ async function requestHandler(req, res) {
 
   if (pathname === "/app.js") {
     return sendStaticFile(res, path.join(SPA_DIR, "app.js"), "application/javascript; charset=utf-8");
+  }
+
+  if (pathname === "/model-pricing.js") {
+    return sendStaticFile(res, path.join(SPA_DIR, "model-pricing.js"), "application/javascript; charset=utf-8");
   }
 
   if (pathname === "/styles.css") {

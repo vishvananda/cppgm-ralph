@@ -36,17 +36,7 @@ const STATIC_DATA_ROOT = staticDataRootFromUrl();
 const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
 let echartsLoadPromise = null;
 
-const API_PRICE_RATES = new Map([
-  ["gpt-5.6-sol", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
-  ["gpt-5.6-terra", { input: 2.00, cachedInput: 0.25, output: 12.00 }],
-  ["gpt-5.6-luna", { input: 0.20, cachedInput: 0.02, output: 1.20 }],
-  ["gpt-5.5", { input: 5.00, cachedInput: 0.50, output: 30.00 }],
-  ["gpt-5.4-mini", { input: 0.75, cachedInput: 0.075, output: 4.50 }],
-  ["gpt-5.4", { input: 2.50, cachedInput: 0.25, output: 15.00 }],
-  ["claude-fable-5", { input: 10.00, cachedInput: 1.00, output: 50.00 }],
-  ["claude-opus-4-8", { input: 5.00, cachedInput: 0.50, output: 25.00 }],
-  ["claude-haiku-4-5", { input: 1.00, cachedInput: 0.10, output: 5.00 }],
-]);
+const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -5830,6 +5820,9 @@ async function loadRunCatalog() {
   state.staticRunDocs.clear();
   state.staticComparison = null;
   document.body.classList.toggle("is-static-viz", true);
+  if (combinedViewToggle) {
+    combinedViewToggle.checked = false;
+  }
   if (autoRefreshToggle) {
     autoRefreshToggle.checked = false;
   }
@@ -5971,7 +5964,9 @@ function isRunsPage() {
 }
 
 function isCombinedView() {
-  return isRunsPage() && (combinedViewToggle?.checked ?? requestedCombinedViewFromUrl());
+  return !state.staticMode &&
+    isRunsPage() &&
+    (combinedViewToggle?.checked ?? requestedCombinedViewFromUrl());
 }
 
 async function loadRuns(options = {}) {

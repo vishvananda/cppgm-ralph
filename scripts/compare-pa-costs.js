@@ -4,18 +4,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import readline from "readline";
+import "../ralph-viz/model-pricing.js";
 
-const DEFAULT_RATES = {
-  "gpt-5.6-sol": { input: 5.0, cachedInput: 0.5, output: 30.0 },
-  "gpt-5.6-terra": { input: 2.5, cachedInput: 0.25, output: 15.0 },
-  "gpt-5.6-luna": { input: 1.0, cachedInput: 0.1, output: 6.0 },
-  "gpt-5.5": { input: 5.0, cachedInput: 0.5, output: 30.0 },
-  "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15.0 },
-  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
-  "claude-fable-5": { input: 10.0, cachedInput: 1.0, output: 50.0 },
-  "claude-opus-4-8": { input: 5.0, cachedInput: 0.5, output: 25.0 },
-  "claude-haiku-4-5": { input: 1.0, cachedInput: 0.1, output: 5.0 },
-};
+const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
 
 const MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],

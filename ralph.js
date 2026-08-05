@@ -20,6 +20,12 @@ import {
   isClaudeAsyncSubagentLaunch,
   parseClaudeTaskNotification,
 } from "./claude-subagent-events.js";
+import {
+  evaluatePendingCheckpointProgress,
+  normalizePendingCheckpoint,
+  pendingCheckpointForTarget,
+  updatePendingCheckpoint,
+} from "./checkpoint-progress.js";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -312,6 +318,24 @@ async function main() {
     reuseLastChecksForNextTurn = false;
     phaseCheckReuse = null;
     const testStatus = phaseStatus.testStatus;
+    const previousPendingCheckpoint = state.pendingCheckpoint;
+    const pendingCheckpoint = updatePendingCheckpoint({
+      pendingCheckpoint: previousPendingCheckpoint,
+      phase: phase.name,
+      stage: phaseStatus.stage,
+      subset: phaseStatus.subset,
+      checkpointEnabled: phase.checkpointOnRequiredChecks,
+      phaseAttempted: state.phaseAttempted === true,
+      primaryPassed: phasePrimaryCheckPassed(phaseStatus),
+      baselineTestStatus: state.lastTestStatus,
+      currentTestStatus: testStatus,
+      turnNumber,
+    });
+    if (pendingCheckpointStateChanged(previousPendingCheckpoint, pendingCheckpoint)) {
+      logPendingCheckpointChange(previousPendingCheckpoint, pendingCheckpoint);
+    }
+    state.pendingCheckpoint = pendingCheckpoint;
+    phaseStatus.pendingCheckpoint = pendingCheckpoint;
     if (phaseStatus.checksReusedFrom) {
       await appendRalphEventRecord(
         buildRalphPhaseStatusEventRecord({
@@ -396,6 +420,7 @@ async function main() {
             activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
             activePhase: checkpointPhase.name,
             phaseAttempted: false,
+            pendingCheckpoint: null,
             updatedAt: new Date().toISOString(),
           });
           state.threadId = threadId;
@@ -405,6 +430,7 @@ async function main() {
           state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
           state.activePhase = checkpointPhase.name;
           state.phaseAttempted = false;
+          state.pendingCheckpoint = null;
           log(
             `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
               `advancing to checkpoint phase ${checkpointPhase.name}.`,
@@ -421,6 +447,7 @@ async function main() {
           activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           activePhase: phase.name,
           phaseAttempted: false,
+          pendingCheckpoint: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
@@ -430,6 +457,7 @@ async function main() {
         state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
         state.activePhase = phase.name;
         state.phaseAttempted = false;
+        state.pendingCheckpoint = null;
         log(
           `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
             "full primary check is still incomplete, so the next turn will continue the same target.",
@@ -448,6 +476,7 @@ async function main() {
           activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           activePhase: returnPhase.name,
           phaseAttempted: false,
+          pendingCheckpoint: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
@@ -457,6 +486,7 @@ async function main() {
         state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
         state.activePhase = returnPhase.name;
         state.phaseAttempted = false;
+        state.pendingCheckpoint = null;
         log(
           `Phase ${phase.name} completed for partial ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
             `returning to phase ${returnPhase.name}.`,
@@ -476,6 +506,7 @@ async function main() {
           activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           activePhase: nextPhase.name,
           phaseAttempted: false,
+          pendingCheckpoint: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
@@ -485,6 +516,7 @@ async function main() {
         state.activeSubset = getStateActiveSubsetAfterTest(testStatus, state);
         state.activePhase = nextPhase.name;
         state.phaseAttempted = false;
+        state.pendingCheckpoint = null;
         log(`Phase ${phase.name} completed. Advancing to phase ${nextPhase.name}.`);
         continue;
       }
@@ -502,6 +534,7 @@ async function main() {
           activeSubset: nextTarget.subset,
           activePhase: firstPhase.name,
           phaseAttempted: false,
+          pendingCheckpoint: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
@@ -511,6 +544,7 @@ async function main() {
         state.activeSubset = nextTarget.subset;
         state.activePhase = firstPhase.name;
         state.phaseAttempted = false;
+        state.pendingCheckpoint = null;
         log(
           `Phase ${phase.name} completed for ${formatTargetLabel(testStatus.targetStage, testStatus.targetSubset)}. ` +
             `Advancing to ${formatTargetLabel(nextTarget.stage, nextTarget.subset)}.`,
@@ -528,6 +562,7 @@ async function main() {
         activeSubset: null,
         activePhase: null,
         phaseAttempted: false,
+        pendingCheckpoint: null,
         updatedAt: new Date().toISOString(),
       });
       state.threadId = threadId;
@@ -537,6 +572,7 @@ async function main() {
       state.activeSubset = null;
       state.activePhase = null;
       state.phaseAttempted = false;
+      state.pendingCheckpoint = null;
       state.turnsCompleted = turnNumber;
       log(`All required checks passed for final phase ${phase.name}. Exiting.`);
       return;
@@ -601,6 +637,7 @@ async function main() {
       activeSubset: activeSubsetForTurn,
       activePhase: phase.name,
       phaseAttempted: state.phaseAttempted === true,
+      pendingCheckpoint: state.pendingCheckpoint,
       activeTurn: resumedTurnContext ?? {
         turnNumber: turnNumber + 1,
         phase: phase.name,
@@ -829,6 +866,7 @@ async function main() {
       activeSubset: activeSubsetForTurn,
       activePhase: phase.name,
       phaseAttempted: phaseAttemptedAfterTurn,
+      pendingCheckpoint: state.pendingCheckpoint,
       updatedAt: new Date().toISOString(),
     });
     state.threadId = activeThreadId;
@@ -838,6 +876,7 @@ async function main() {
     state.activeSubset = activeSubsetForTurn;
     state.activePhase = phase.name;
     state.phaseAttempted = phaseAttemptedAfterTurn;
+    state.pendingCheckpoint = normalizePendingCheckpoint(state.pendingCheckpoint);
     state.activeTurn = null;
     turnNumber += 1;
     state.turnsCompleted = turnNumber;
@@ -1297,6 +1336,9 @@ function buildBriefStateLines({ testStatus, gitStatus, phase = null, phaseStatus
     const failedChecks = phaseStatus.failedRequiredChecks.map((check) => check.name).join(", ");
     lines.push(`- failing required checks: ${failedChecks}`);
   }
+  if (phaseStatus?.pendingCheckpoint) {
+    lines.push(`- pending checkpoint: ${formatPendingCheckpoint(phaseStatus.pendingCheckpoint)}`);
+  }
   return lines;
 }
 
@@ -1360,6 +1402,9 @@ function buildCurrentStateLines({
   }
   if (phaseStatus?.checks?.length) {
     lines.push(...buildCheckResultLines(phaseStatus));
+  }
+  if (phaseStatus?.pendingCheckpoint) {
+    lines.push(`Pending checkpoint: ${formatPendingCheckpoint(phaseStatus.pendingCheckpoint)}.`);
   }
   const firstBlockerLine = formatFirstBlockerLine(testStatus);
   if (firstBlockerLine) {
@@ -2010,6 +2055,14 @@ function buildCheckResultLines(phaseStatus) {
   return lines;
 }
 
+function formatPendingCheckpoint(value) {
+  const pending = normalizePendingCheckpoint(value);
+  return pending
+    ? `${pending.achievedPassed}/${pending.total} passing from baseline ` +
+      `${pending.baselinePassed}/${pending.total}; preserve this result while clearing recovery blockers`
+    : "none";
+}
+
 function buildModelValidationLines({ testStatus, phaseStatus = null }) {
   const requiredChecks = phaseStatus?.checks?.filter((check) => check.required) ?? [];
   if (requiredChecks.length > 0) {
@@ -2604,6 +2657,11 @@ async function runPhaseChecks(state, phase, reuse = null) {
   const results = [];
   let primaryTestStatus = null;
   const baselineTestStatus = state.lastTestStatus;
+  const pendingCheckpoint = pendingCheckpointForTarget(state.pendingCheckpoint, {
+    phase: phase.name,
+    stage,
+    subset,
+  });
   let previousTestStatus = baselineTestStatus;
   const resultsByName = new Map();
 
@@ -2666,6 +2724,8 @@ async function runPhaseChecks(state, phase, reuse = null) {
       context,
       previousTestStatus,
       baselineTestStatus,
+      pendingCheckpoint,
+      targetSubset: subset,
       resultsByName,
     });
     const outputPath = await writeCheckLog(check.name, run.output);
@@ -2723,6 +2783,7 @@ async function runPhaseChecks(state, phase, reuse = null) {
     testStatus: primaryTestStatus ?? buildGenericTestStatus(primaryCheck, stage, subset),
     allRequiredPassed: failedRequired.length === 0,
     failedRequiredChecks: failedRequired,
+    pendingCheckpoint,
   };
 }
 
@@ -3056,11 +3117,19 @@ async function runCheckWithTimeoutRetries({
   context,
   previousTestStatus,
   baselineTestStatus,
+  pendingCheckpoint,
+  targetSubset,
   resultsByName,
 }) {
   let retryAttempts = 0;
   await removeDevBuildLockBeforeTestCheck(check);
-  let run = await runCheckCommand(context, { baselineTestStatus, resultsByName });
+  let run = await runCheckCommand(context, {
+    baselineTestStatus,
+    pendingCheckpoint,
+    phaseName: phase.name,
+    targetSubset,
+    resultsByName,
+  });
   let testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
 
   while (shouldRetryTimeoutOnlyCheck({ check, run, testStatus, retryAttempts })) {
@@ -3070,7 +3139,13 @@ async function runCheckWithTimeoutRetries({
         `(${retryAttempts}/${CONFIG.testTimeoutRetries}): ${formatTestStatusSummary(testStatus)}`,
     );
     await removeDevBuildLockBeforeTestCheck(check);
-    run = await runCheckCommand(context, { baselineTestStatus, resultsByName });
+    run = await runCheckCommand(context, {
+      baselineTestStatus,
+      pendingCheckpoint,
+      phaseName: phase.name,
+      targetSubset,
+      resultsByName,
+    });
     testStatus = analyzeCheckTestStatus(check, context, run, previousTestStatus);
   }
 
@@ -3793,6 +3868,14 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
   const stageComplete = currentStage?.status === "pass" &&
     currentTotal != null &&
     currentPassed >= currentTotal;
+  const pendingProgress = evaluatePendingCheckpointProgress({
+    pendingCheckpoint: checkState.pendingCheckpoint,
+    phase: checkState.phaseName,
+    stage,
+    subset: checkState.targetSubset,
+    currentPassed,
+    currentTotal,
+  });
 
   const lines = [
     `Ralph current-stage progress check for ${stage ?? "unknown stage"}.`,
@@ -3802,6 +3885,17 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     `Current ${stage ?? "stage"}: ${formatCountPair(currentPassed, currentTotal)}.`,
     `Earlier stages: ${earlierStagesPass ? "pass" : "fail or unknown"}.`,
   ];
+  if (pendingProgress) {
+    lines.push(
+      `Pending checkpoint: ${formatCountPair(
+        pendingProgress.pending.achievedPassed,
+        pendingProgress.pending.total,
+      )} achieved from baseline ${formatCountPair(
+        pendingProgress.pending.baselinePassed,
+        pendingProgress.pending.total,
+      )}.`,
+    );
+  }
 
   if (!stage) {
     lines.push("FAIL: no active PA stage is available.");
@@ -3823,6 +3917,29 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     lines.push(`PASS: ${stage} is complete.`);
     lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
     return { exitCode: 0, output: lines.join("\n") };
+  }
+  if (pendingProgress) {
+    if (!pendingProgress.totalMatches) {
+      lines.push("FAIL: current PA total differs from the pending checkpoint total.");
+      return { exitCode: 1, output: lines.join("\n") };
+    }
+    if (pendingProgress.passed) {
+      lines.push(
+        `PASS: pending checkpoint ${formatCountPair(
+          pendingProgress.pending.achievedPassed,
+          pendingProgress.pending.total,
+        )} was preserved while recovery blockers were addressed.`,
+      );
+      lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
+      return { exitCode: 0, output: lines.join("\n") };
+    }
+    lines.push(
+      `FAIL: current PA passing tests dropped below pending checkpoint ${formatCountPair(
+        pendingProgress.pending.achievedPassed,
+        pendingProgress.pending.total,
+      )}.`,
+    );
+    return { exitCode: 1, output: lines.join("\n") };
   }
   if (!baselineStage) {
     lines.push(`FAIL: no turn-start baseline for ${stage}; run a provider turn before accepting this gate.`);
@@ -4095,6 +4212,28 @@ function shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state }) {
 function phasePrimaryCheckPassed(phaseStatus) {
   const primary = phaseStatus?.primaryCheck;
   return primary ? primary.passed === true : phaseStatus?.allRequiredPassed === true;
+}
+
+function pendingCheckpointStateChanged(previous, current) {
+  return JSON.stringify(normalizePendingCheckpoint(previous)) !==
+    JSON.stringify(normalizePendingCheckpoint(current));
+}
+
+function logPendingCheckpointChange(previousValue, currentValue) {
+  const previous = normalizePendingCheckpoint(previousValue);
+  const current = normalizePendingCheckpoint(currentValue);
+  if (!current) {
+    if (previous) {
+      log(`Cleared pending checkpoint for ${formatTargetLabel(previous.stage, previous.subset)}.`);
+    }
+    return;
+  }
+  const action = previous ? "Advanced" : "Recorded";
+  log(
+    `${action} pending checkpoint for ${formatTargetLabel(current.stage, current.subset)}: ` +
+      `${current.achievedPassed}/${current.total} passing from baseline ` +
+      `${current.baselinePassed}/${current.total}.`,
+  );
 }
 
 function getNextStageAfterPassingCommand(testStatus, gitStatus) {
@@ -7579,6 +7718,7 @@ async function loadState() {
       activeSubset: normalizeTestSubset(parsed.activeSubset),
       activePhase: typeof parsed.activePhase === "string" ? parsed.activePhase : null,
       phaseAttempted: parsed.phaseAttempted === true,
+      pendingCheckpoint: normalizePendingCheckpoint(parsed.pendingCheckpoint),
       activeTurn: normalizeActiveTurnState(parsed.activeTurn),
     };
   } catch (error) {
@@ -7593,6 +7733,7 @@ async function loadState() {
         activeSubset: CONFIG.initialSubset,
         activePhase: null,
         phaseAttempted: false,
+        pendingCheckpoint: null,
         activeTurn: null,
       };
     }
