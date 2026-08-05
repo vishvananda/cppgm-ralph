@@ -42,6 +42,7 @@ const RUN_COMPARISON_REFRESH_MS = 60 * 1000;
 let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
+const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -6163,11 +6164,15 @@ async function renderComparisonView() {
     eventCountEl.textContent = "";
     return;
   }
-  const maxPa = comparison.rows?.length ?? 0;
+  const displayLayout = ASSIGNMENT_LAYOUT.normalizeLayoutId(comparison.displayLayout, "v3");
+  const comparisonThrough = Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10);
+  const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, displayLayout)
+    .slice(0, Number.isFinite(comparisonThrough) ? comparisonThrough : undefined);
+  const maxPa = displayRows.length;
   const requested = Number.parseInt(state.compareThrough ?? maxPa, 10);
   const through = Math.max(1, Math.min(maxPa, Number.isFinite(requested) ? requested : maxPa));
   state.compareThrough = through;
-  const rows = comparison.rows.slice(0, through);
+  const rows = displayRows.slice(0, through);
   const runOrder = comparisonRunOrder(comparison.runs);
   const orderedRuns = runOrder.map((index) => comparison.runs[index]);
   const totals = runOrder.map((index) => comparisonTotalForRows(rows, index));
@@ -6175,6 +6180,7 @@ async function renderComparisonView() {
   summaryEl.innerHTML = `
     <div><strong>through</strong><input id="compareThrough" class="compact-number" type="number" min="1" max="${maxPa}" value="${through}" /></div>
     <div><strong>runs</strong>${fmtInt(comparison.runs.length)}</div>
+    <div><strong>order</strong>${escapeHtml(ASSIGNMENT_LAYOUT.descriptor(displayLayout).shortLabel)}</div>
     <div><strong>generated</strong>${fmt(comparison.generatedAt)}</div>
     <div class="summary-wide"><strong>pricing</strong>${escapeHtml(comparison.runs.map((run) => `${run.label}=${run.model ?? "provider"}`).join(", "))}</div>
   `;
@@ -6667,11 +6673,17 @@ function comparisonForStaticRun(comparison, run) {
   const runs = (comparison?.runs ?? []).map((candidate) => ({
     ...candidate,
     highlighted: candidate.spec === shape || candidate.dataPath === run?.dataPath,
+    layout: candidate.layout ?? (
+      candidate.spec === shape || candidate.dataPath === run?.dataPath
+        ? run.assignmentLayout
+        : null
+    ),
   }));
-  if (!runs.some((candidate) => candidate.highlighted)) {
+  const localRunIndex = runs.findIndex((candidate) => candidate.highlighted);
+  if (localRunIndex < 0) {
     return null;
   }
-  return { ...comparison, runs };
+  return { ...comparison, localRunIndex, runs };
 }
 
 function scheduleRunComparisonPanel(run) {
@@ -6755,8 +6767,15 @@ function defaultRunComparisonThrough(comparison) {
 }
 
 async function renderRunComparisonPanel(run, comparison, loadedAt) {
-  const allRows = comparison?.rows ?? [];
   const runs = comparison?.runs ?? [];
+  const highlightedRun = runs[highlightedComparisonRunIndex(comparison)] ?? null;
+  const displayLayout = ASSIGNMENT_LAYOUT.normalizeLayoutId(
+    highlightedRun?.layout ?? run?.assignmentLayout,
+    "v2",
+  );
+  const comparisonThrough = Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10);
+  const allRows = ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, displayLayout)
+    .slice(0, Number.isFinite(comparisonThrough) ? comparisonThrough : undefined);
   const requestedThrough = Number.parseInt(state.runComparisonThrough.get(run.id), 10);
   const through = Math.max(1, Math.min(
     allRows.length,
@@ -6783,6 +6802,7 @@ async function renderRunComparisonPanel(run, comparison, loadedAt) {
   const localName = runs.find((candidate) => candidate.highlighted)?.label ?? run.label ?? run.id;
   runComparisonMeta.textContent = [
     localName,
+    `${ASSIGNMENT_LAYOUT.descriptor(displayLayout).shortLabel} order`,
     publishedAt ? `baseline ${fmtShort(publishedAt)}` : "",
   ].filter(Boolean).join(" / ");
   runComparisonThrough.min = "1";

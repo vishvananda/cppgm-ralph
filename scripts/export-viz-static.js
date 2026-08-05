@@ -8,12 +8,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
+import "../ralph-viz/assignment-layouts.js";
 import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../claude-subagent-events.js";
 
 const execFileAsync = promisify(execFile);
+const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const DEFAULT_RUNS = [
@@ -29,14 +31,10 @@ const RUN_REPOSITORIES = new Map([
   ["mini", "https://github.com/vishvananda/cppgm-run-mini"],
   ["fable", "https://github.com/vishvananda/cppgm-run-fable"],
   ["luna", "https://github.com/vishvananda/cppgm-run-luna"],
+  ["v3opus", "https://github.com/vishvananda/cppgm-run-v3opus"],
+  ["v3codex", "https://github.com/vishvananda/cppgm-run-v3codex"],
 ]);
 const FORMAT_VERSION = 1;
-const CURRENT_ASSIGNMENT_LAYOUT = {
-  id: "current",
-  shortLabel: "current",
-  label: "current assignment layout",
-  description: "Current assignment layout used by trusted, opus, mini, fable, and luna. It includes abimangle at pa30 and tops out at pa39 Inception.",
-};
 
 function usage() {
   return `Usage: node scripts/export-viz-static.js [options]
@@ -133,8 +131,11 @@ function paNumber(value) {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-function inferAssignmentLayout(shape) {
-  return CURRENT_ASSIGNMENT_LAYOUT;
+async function inferAssignmentLayout(run, options) {
+  const prefix = inferDocPrefix(run.shape);
+  const config = await readJsonIfExists(path.join(options.workDir, `${prefix}.config.json`));
+  const id = ASSIGNMENT_LAYOUT.inferLayoutId(run.shape, config?.assignmentLayout);
+  return ASSIGNMENT_LAYOUT.descriptor(id);
 }
 
 function inferRunWorktree(run, options) {
@@ -313,7 +314,7 @@ async function writeJson(filePath, value) {
 
 async function copyViewerAssets(outDir) {
   await fs.mkdir(outDir, { recursive: true });
-  for (const name of ["index.html", "app.js", "styles.css", "model-pricing.js"]) {
+  for (const name of ["index.html", "app.js", "styles.css", "model-pricing.js", "assignment-layouts.js"]) {
     await fs.copyFile(path.join(REPO_ROOT, "ralph-viz", name), path.join(outDir, name));
   }
 }
@@ -466,8 +467,14 @@ function annotateComparison(comparison, runMetas) {
     run.ordinal = index + 1;
     run.label = `${run.ordinal}-${run.label ?? run.spec ?? `run-${run.ordinal}`}`;
   }
-  comparison.assignmentLayouts = { current: CURRENT_ASSIGNMENT_LAYOUT };
-  comparison.series = comparisonSeries(comparison);
+  comparison.assignmentLayouts = ASSIGNMENT_LAYOUT.layouts;
+  comparison.displayLayout = "v3";
+  const throughNumber = paNumber(comparison.through);
+  comparison.series = comparisonSeries({
+    ...comparison,
+    rows: ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, comparison.displayLayout)
+      .slice(0, throughNumber ?? undefined),
+  });
   return comparison;
 }
 
@@ -551,7 +558,7 @@ async function exportRun(run, options, comparison) {
   }
 
   const docs = await collectDocs(run, options, outRunDir);
-  const assignmentLayout = inferAssignmentLayout(run.shape);
+  const assignmentLayout = await inferAssignmentLayout(run, options);
   const assignmentTitles = await collectAssignmentTitles(run, options);
   const state = await readRunStateSummary(run);
   const bounds = eventTimeBounds(events);

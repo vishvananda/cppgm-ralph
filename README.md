@@ -126,6 +126,12 @@ refreshes local comparison accounting once per minute. Override the baseline
 artifact with `RALPH_VIZ_PUBLISHED_COMPARISON_URL`; by default it uses the
 public `ralph-run-viewer-zippy-960` export.
 
+Set `"assignmentLayout": "v3"` in runs using the V3 assignment order. Runs
+without this field default to V2 (with `v3*` run names recognized as a
+compatibility fallback). Comparisons use V3 order globally and the selected
+run's native order on individual run pages; event logs retain their original
+PA numbers.
+
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;
 use `?scrollDebug=0` to disable it again.

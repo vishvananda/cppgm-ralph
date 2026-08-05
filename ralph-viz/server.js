@@ -10,6 +10,7 @@ import readline from "node:readline";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import "./assignment-layouts.js";
 import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -24,6 +25,7 @@ const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
 const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_DIR = path.dirname(SPA_DIR);
 const execFileAsync = promisify(execFile);
+const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SCROLL_DEBUG_LOG_PATH = path.join(RALPH_DIR, "viz-scroll-debug.jsonl");
@@ -3135,6 +3137,7 @@ async function readRalphConfigDescriptor(configPath) {
     sliceSanitizeRunNamePart(model),
     sliceSanitizeRunNamePart(reasoningEffort),
   ].join("-");
+  const assignmentLayout = ASSIGNMENT_LAYOUT.inferLayoutId(runName, fileConfig.assignmentLayout);
   const baseDir = path.resolve(
     ROOT_DIR,
     fileConfig.baseDir ??
@@ -3152,6 +3155,7 @@ async function readRalphConfigDescriptor(configPath) {
     provider,
     model,
     reasoningEffort,
+    assignmentLayout,
     workdir,
     driverMode: String(fileConfig.driverMode ?? "standard").trim().toLowerCase(),
     testSubsets: sliceNormalizeTestSubsets(fileConfig.testSubsets),
@@ -6436,6 +6440,7 @@ function comparisonRunForChart(run, highlighted = false) {
     spec: run?.spec ?? null,
     model: run?.model ?? null,
     repositoryUrl: run?.repositoryUrl ?? null,
+    layout: ASSIGNMENT_LAYOUT.descriptor(run?.layout, "v2"),
     highlighted,
   };
 }
@@ -6483,9 +6488,15 @@ function mergePublishedAndLocalComparison(published, local, runRef, localMtime) 
   };
 }
 
-async function configuredModelForShape(shape) {
+async function configuredRunMetadataForShape(shape) {
   const descriptors = await discoverRalphConfigDescriptors();
-  return descriptors.find((descriptor) => descriptor.runName === shape)?.model ?? null;
+  const descriptor = descriptors.find((candidate) => candidate.runName === shape);
+  return descriptor
+    ? { model: descriptor.model, assignmentLayout: descriptor.assignmentLayout }
+    : {
+        model: null,
+        assignmentLayout: ASSIGNMENT_LAYOUT.inferLayoutId(shape),
+      };
 }
 
 async function readPublishedComparison(force = false) {
@@ -6557,13 +6568,16 @@ async function readRunComparison(rawId, runRef, force = false) {
     try {
       const published = await readPublishedComparison(force);
       const through = published?.through ?? "pa39";
-      const [local, stat, configuredModel] = await Promise.all([
+      const [local, stat, configured] = await Promise.all([
         buildLocalRunComparison(rawId, through),
         fs.stat(runRef.filePath),
-        configuredModelForShape(runRef.shape),
+        configuredRunMetadataForShape(runRef.shape),
       ]);
-      if (configuredModel && local?.runs?.[0]) {
-        local.runs[0].model = configuredModel;
+      if (local?.runs?.[0]) {
+        if (configured.model) {
+          local.runs[0].model = configured.model;
+        }
+        local.runs[0].layout = ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout);
       }
       const value = mergePublishedAndLocalComparison(published, local, runRef, stat.mtime);
       LOCAL_COMPARISON_CACHE.set(rawId, { loadedAt: Date.now(), value });
@@ -6577,7 +6591,7 @@ async function readRunComparison(rawId, runRef, force = false) {
 }
 
 async function appBuildId() {
-  const files = ["index.html", "app.js", "model-pricing.js", "styles.css"];
+  const files = ["index.html", "app.js", "assignment-layouts.js", "model-pricing.js", "styles.css"];
   const stats = await Promise.all(files.map(async (file) => {
     const stat = await fs.stat(path.join(SPA_DIR, file));
     return `${file}:${stat.size}:${stat.mtimeMs}`;
@@ -6623,6 +6637,10 @@ async function requestHandler(req, res) {
 
   if (pathname === "/model-pricing.js") {
     return sendStaticFile(res, path.join(SPA_DIR, "model-pricing.js"), "application/javascript; charset=utf-8");
+  }
+
+  if (pathname === "/assignment-layouts.js") {
+    return sendStaticFile(res, path.join(SPA_DIR, "assignment-layouts.js"), "application/javascript; charset=utf-8");
   }
 
   if (pathname === "/styles.css") {

@@ -5,8 +5,10 @@ import os from "os";
 import path from "path";
 import readline from "readline";
 import "../ralph-viz/model-pricing.js";
+import "../ralph-viz/assignment-layouts.js";
 
 const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
+const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 
 const MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -19,6 +21,7 @@ const DEFAULTS = {
   right: "trusted-gpt-5.5-xhigh",
   through: "pa22",
   ralphDir: path.join(os.homedir(), "work", ".ralph"),
+  workDir: path.join(os.homedir(), "work"),
   codexDir: path.join(os.homedir(), ".codex", "sessions"),
   format: "markdown",
 };
@@ -44,6 +47,7 @@ Options:
   --right-model <model> Pricing model for the second run (default: inferred)
   --through <paN|N>     Last PA to include (default: pa22)
   --ralph-dir <path>    Ralph state dir (default: ~/work/.ralph)
+  --work-dir <path>     Ralph config dir (default: ~/work)
   --codex-dir <path>    Codex sessions dir (default: ~/.codex/sessions)
   --format <md|json>    Output format (default: md)
   --help                Show this help
@@ -79,6 +83,7 @@ function parseArgs(argv) {
     else if (arg === "--right-model") options.rightModel = next();
     else if (arg === "--through") options.through = next();
     else if (arg === "--ralph-dir") options.ralphDir = next();
+    else if (arg === "--work-dir") options.workDir = next();
     else if (arg === "--codex-dir") options.codexDir = next();
     else if (arg === "--format") options.format = next();
     else if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
@@ -101,8 +106,29 @@ function parseArgs(argv) {
     spec: run.spec,
     label: run.label ?? run.spec,
     model: run.model ?? inferModelFromSpec(run.spec),
+    layout: inferAssignmentLayoutFromSpec(run.spec, options.workDir),
   }));
+  options.nativeThroughNumber = options.throughNumber >= 14
+    ? Math.max(options.throughNumber, 30)
+    : options.throughNumber;
   return options;
+}
+
+function inferAssignmentLayoutFromSpec(spec, workDir) {
+  const text = String(spec ?? "");
+  const ralphMatch = text.match(/(?:^|[/\\])\.ralph[/\\]([^/\\]+)/);
+  const shape = ralphMatch?.[1] ?? text.split("/")[0];
+  const prefix = shape.split("-")[0];
+  const configPath = path.join(expandHome(workDir), `${prefix}.config.json`);
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    return ASSIGNMENT_LAYOUT.inferLayoutId(shape, config.assignmentLayout);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`warning: could not read assignment layout from ${configPath}: ${error.message}`);
+    }
+    return ASSIGNMENT_LAYOUT.inferLayoutId(shape);
+  }
 }
 
 function inferModelFromSpec(spec) {
@@ -1206,7 +1232,8 @@ async function summarizeRun(run, options) {
     a.attemptIndex - b.attemptIndex);
   for (const turnInfo of turnInfos) {
     const number = stageNumber(turnInfo.stage);
-    if (!number || number < 1 || number > options.throughNumber) {
+    const displayNumber = ASSIGNMENT_LAYOUT.canonicalPaNumber(run.layout, number);
+    if (!number || number < 1 || displayNumber < 1 || displayNumber > options.throughNumber) {
       continue;
     }
     const pa = `pa${number}`;
@@ -1246,6 +1273,7 @@ async function summarizeRun(run, options) {
     filePath,
     state,
     model,
+    layout: run.layout,
     byTurn,
     byPa,
   };
@@ -1366,33 +1394,51 @@ function money(amount) {
 
 function buildComparison(options, summaries) {
   const rows = [];
-  for (let number = 1; number <= options.throughNumber; number += 1) {
+  for (let number = 1; number <= options.nativeThroughNumber; number += 1) {
     const pa = `pa${number}`;
     rows.push({
       pa,
       runs: summaries.map((run) => paSummary(run, pa)),
     });
   }
-  return {
+  const comparison = {
     generatedAt: new Date().toISOString(),
     through: `pa${options.throughNumber}`,
+    nativeThrough: `pa${options.nativeThroughNumber}`,
     rates: DEFAULT_RATES,
     runs: summaries.map((run, index) => ({
       label: run.label,
       model: run.model,
       spec: run.spec,
+      layout: ASSIGNMENT_LAYOUT.descriptor(run.layout),
       filePath: run.filePath,
-      total: totalSummary(rows.map((row) => row.runs[index])),
+      total: null,
       turnDurations: turnDurationSummaries(run),
       turnUsages: turnUsageSummaries(run),
     })),
     rows,
+    assignmentLayouts: ASSIGNMENT_LAYOUT.layouts,
+    displayLayout: "v3",
   };
+  const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(
+    comparison,
+    comparison.displayLayout,
+  ).slice(0, options.throughNumber);
+  for (const [runIndex, run] of comparison.runs.entries()) {
+    run.total = totalSummary(
+      displayRows.map((row) => row.runs[runIndex]).filter(Boolean),
+    );
+  }
+  return comparison;
 }
 
 function renderMarkdown(comparison) {
+  const rows = ASSIGNMENT_LAYOUT.remapComparisonRows(
+    comparison,
+    comparison.displayLayout ?? "v3",
+  ).slice(0, parseStageNumber(comparison.through));
   const lines = [];
-  lines.push(`Compared through ${comparison.through}. Times are HHH:MM:SS.`);
+  lines.push(`Compared through ${comparison.through} in ${String(comparison.displayLayout ?? "v3").toUpperCase()} order. Times are HHH:MM:SS.`);
   lines.push("");
   lines.push("| Run | Turns | Time | Cost | Status |");
   lines.push("|---|---:|---:|---:|---|");
@@ -1408,7 +1454,7 @@ function renderMarkdown(comparison) {
   }
   lines.push(`| ${header.join(" | ")} |`);
   lines.push(`|${separators.join("|")}|`);
-  for (const row of comparison.rows) {
+  for (const row of rows) {
     const cells = [row.pa];
     for (const summary of row.runs) {
       cells.push(
