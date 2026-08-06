@@ -6591,7 +6591,7 @@ async function readRunComparison(rawId, runRef, force = false) {
 }
 
 async function appBuildId() {
-  const files = ["index.html", "app.js", "assignment-layouts.js", "entry-dedupe.js", "model-pricing.js", "styles.css"];
+  const files = ["index.html", "app.js", "assignment-layouts.js", "entry-dedupe.js", "safe-markdown.js", "model-pricing.js", "styles.css"];
   const stats = await Promise.all(files.map(async (file) => {
     const stat = await fs.stat(path.join(SPA_DIR, file));
     return `${file}:${stat.size}:${stat.mtimeMs}`;
@@ -6645,6 +6645,10 @@ async function requestHandler(req, res) {
 
   if (pathname === "/entry-dedupe.js") {
     return sendStaticFile(res, path.join(SPA_DIR, "entry-dedupe.js"), "application/javascript; charset=utf-8");
+  }
+
+  if (pathname === "/safe-markdown.js") {
+    return sendStaticFile(res, path.join(SPA_DIR, "safe-markdown.js"), "application/javascript; charset=utf-8");
   }
 
   if (pathname === "/styles.css") {

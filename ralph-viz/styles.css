@@ -1058,6 +1058,17 @@ body.is-static-viz .combined-view-toggle {
   color: #ccc;
 }
 
+.msg-body p,
+.msg-body ul,
+.msg-body ol,
+.msg-body pre {
+  margin: 0.45rem 0;
+}
+
+.msg-body > :first-child { margin-top: 0; }
+.msg-body > :last-child { margin-bottom: 0; }
+.msg-body pre { white-space: pre-wrap; }
+
 /* File changes */
 .ev-file > .accordion-header {
   cursor: pointer;

@@ -43,6 +43,7 @@ let echartsLoadPromise = null;
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
+const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -1812,7 +1813,8 @@ function renderMessageCard(record) {
 
   const body = document.createElement("div");
   body.className = "msg-body";
-  body.textContent = text;
+  body.innerHTML = SAFE_MARKDOWN.renderMarkdown(text);
+  body.querySelectorAll("pre code").forEach(highlightCodeBlock);
 
   card.append(body);
   return card;

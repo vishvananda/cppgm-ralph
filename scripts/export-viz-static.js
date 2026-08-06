@@ -314,7 +314,7 @@ async function writeJson(filePath, value) {
 
 async function copyViewerAssets(outDir) {
   await fs.mkdir(outDir, { recursive: true });
-  for (const name of ["index.html", "app.js", "styles.css", "model-pricing.js", "assignment-layouts.js", "entry-dedupe.js"]) {
+  for (const name of ["index.html", "app.js", "styles.css", "model-pricing.js", "assignment-layouts.js", "entry-dedupe.js", "safe-markdown.js"]) {
     await fs.copyFile(path.join(REPO_ROOT, "ralph-viz", name), path.join(outDir, name));
   }
 }
