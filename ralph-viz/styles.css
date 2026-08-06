@@ -218,12 +218,31 @@ button:hover { background: var(--control-hover); }
 }
 
 .dock-main { color: #d0a64a; }
+.dock-main-pass { color: var(--ok); }
 .dock-phase { color: #d0a64a; }
 .dock-phase-pass { color: var(--ok); }
 .dock-turn { color: #888; }
 .dock-usage { color: #999; }
+.dock-prior-failures { color: var(--bad); font-weight: 600; }
 .dock-tests { color: #b08030; }
 .dock-tests-pass { color: var(--ok); }
+.progress-dock button.dock-usage {
+  appearance: none;
+  padding: 0.05rem 0.25rem;
+  border: 1px solid transparent;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.progress-dock button.dock-usage:hover,
+.progress-dock button.dock-usage:focus-visible {
+  color: var(--text);
+  border-color: var(--border);
+  background: none;
+  outline: none;
+}
+.dock-usage-detail { display: none; }
+.dock-usage[aria-expanded="true"] .dock-usage-detail { display: block; }
 .dock-meta {
   color: var(--muted);
   margin-left: auto;
@@ -817,6 +836,7 @@ body.is-static-viz .combined-view-toggle {
   .dock-phase,
   .dock-main,
   .dock-tests,
+  .dock-prior-failures,
   .combined-run-details .dock-turn,
   .combined-run-details .dock-usage,
   .combined-run-details .dock-phase,

@@ -146,6 +146,7 @@ const state = {
   openEntryKeys: new Set(),
   fullCardTurns: new Set(),
   expandedUsageTurns: new Set(),
+  dockUsageExpanded: false,
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
@@ -1030,8 +1031,19 @@ function renderProgressDock(summary) {
     return;
   }
   const run = selectedRunMeta();
-  const details = runDetailHtml(summary, run, { includeName: true, metaClass: "dock-meta" });
+  const details = runDetailHtml(summary, run, {
+    includeName: true,
+    metaClass: "dock-meta",
+    compact: true,
+    expandableUsage: true,
+  });
   progressDock.innerHTML = details || '<span class="muted">No run</span>';
+  const usage = progressDock.querySelector(".dock-usage[aria-expanded]");
+  usage?.addEventListener("click", () => {
+    state.dockUsageExpanded = !state.dockUsageExpanded;
+    usage.setAttribute("aria-expanded", String(state.dockUsageExpanded));
+    scheduleProgressDockSpaceUpdate();
+  });
   updateProgressDockSpace();
 }
 
@@ -1045,6 +1057,30 @@ function runDetailHtml(summary, run, options = {}) {
   const nameHtml = options.includeName
     ? `<strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>${runRepositoryLinkHtml(run)}`
     : "";
+  if (options.compact) {
+    const progressText = dockPhaseProgressText(phaseStatus, progress);
+    const progressHtml = progressText
+      ? `<span class="dock-main${progress?.status === "pass" ? " dock-main-pass" : ""}">${escapeHtml(progressText)}</span>`
+      : '<span class="muted">test progress n/a</span>';
+    const priorFailures = turnPriorFailureSummary(
+      phaseStatus,
+      testStatus,
+      summary?.testProgress?.testStatusesByTurn?.get(progress?.turn),
+      progress,
+    );
+    const priorFailureHtml = priorFailures.total > 0
+      ? `<span class="dock-prior-failures" title="${escapeHtml(priorFailureTitle(priorFailures))}">${fmtInt(priorFailures.total)} prior failure${priorFailures.total === 1 ? "" : "s"}</span>`
+      : "";
+    const turnHtml = latestTurn
+      ? `<span class="dock-turn">${escapeHtml(dockTurnText(latestTurn))}</span>`
+      : "";
+    const usageHtml = usage
+      ? dockUsageHtml(usage, summary.priceModel, options.expandableUsage)
+      : "";
+    const metaClass = options.metaClass ?? "dock-meta";
+    const updatedHtml = latest ? `<span class="${escapeHtml(metaClass)}">updated ${escapeHtml(latest)}</span>` : "";
+    return `${nameHtml}${turnHtml}${progressHtml}${priorFailureHtml}${usageHtml}${updatedHtml}`;
+  }
   const phaseHtml = phaseStatus
     ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
     : '<span class="muted">phase n/a</span>';
@@ -1139,6 +1175,42 @@ function dockUsageText(usageSummary, priceModel) {
     suffix: usageSummary.suffix,
     costUsd: usageSummary.costUsd,
   })}`;
+}
+
+function dockUsageHtml(usageSummary, priceModel, expandable) {
+  if (!expandable) {
+    return `<span class="dock-usage">${escapeHtml(dockUsageText(usageSummary, priceModel))}</span>`;
+  }
+  const compact = compactDockUsageText(usageSummary, priceModel);
+  const detail = detailedDockUsageText(usageSummary);
+  return `
+    <button type="button" class="dock-usage" aria-expanded="${state.dockUsageExpanded}" title="Show run token breakdown">
+      <span>${escapeHtml(compact)}</span>
+      <span class="dock-usage-detail">${escapeHtml(detail)}</span>
+    </button>
+  `;
+}
+
+function compactDockUsageText(usageSummary, priceModel) {
+  const usage = normalizeUsage(usageSummary?.usage);
+  if (!usage) return "usage n/a";
+  const parts = ["run"];
+  if (Number.isFinite(usageSummary?.durationMs) && usageSummary.durationMs > 0) {
+    parts.push(durationText({ durationMs: usageSummary.durationMs }));
+  }
+  const explicitCost = usageSummary?.costUsd == null ? null : Number(usageSummary.costUsd);
+  const cost = Number.isFinite(explicitCost)
+    ? fmtUsd(explicitCost)
+    : costEstimateText(usage, priceModel);
+  if (cost !== "n/a") parts.push(cost);
+  return parts.join(" / ");
+}
+
+function detailedDockUsageText(usageSummary) {
+  const usage = normalizeUsage(usageSummary?.usage);
+  if (!usage) return "usage n/a";
+  const details = fullUsageText(usage);
+  return usageSummary?.suffix ? `${details} / ${usageSummary.suffix}` : details;
 }
 
 function shapeUsageTurnCost(shapeUsage, model) {
@@ -4320,6 +4392,7 @@ function buildAgentTestProgressState(records) {
     stageTotals: new Map(stageTotalAnchors),
     stageBest: new Map(),
     stageCurrent: new Map(),
+    stageBaseline: new Map(),
     turnTargets: buildAgentProgressTargets(records, stageTotalAnchors),
     latest: null,
   };
@@ -5222,6 +5295,9 @@ function applyAgentTestProgressObservation(tracker, observation) {
   const bestKey = target
     ? progressTargetKey(observation.turn, observation.stage)
     : observation.stage;
+  if (observation.isTurnStartBaseline && !tracker.stageBaseline.has(bestKey)) {
+    tracker.stageBaseline.set(bestKey, { ...observedCurrent, recordedAt: observation.recordedAt });
+  }
   const previousCurrent = tracker.stageCurrent.get(bestKey);
   const current =
     observation.isTurnStartBaseline && previousCurrent
@@ -5246,6 +5322,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
     ...observation,
     current,
     best: normalizedBest,
+    start: tracker.stageBaseline.get(bestKey) ?? null,
   };
   if (shouldReplaceLatestAgentTestProgress(tracker.latest, progress)) {
     tracker.latest = progress;
@@ -5538,6 +5615,24 @@ function dockProgressText(progress) {
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
   const runningText = progress.status === "running" ? " running" : "";
   return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${runningText}`;
+}
+
+function dockPhaseProgressText(phase, progress) {
+  const parts = [];
+  if (phase?.phase) parts.push(phase.phase);
+  const target = phaseTargetText(phase) || progress?.stage || "";
+  if (target) parts.push(target);
+  if (progress?.current) {
+    parts.push(progressRatioText(progress.current));
+    if (progress.start) parts.push(`start ${progressRatioText(progress.start)}`);
+    if (progress.best && progress.best.passed > progress.current.passed) {
+      parts.push(`best ${progressRatioText(progress.best)}`);
+    }
+    if (progress.status === "running") parts.push("running");
+  } else if (phase?.allRequiredPassed) {
+    parts.push("pass");
+  }
+  return parts.join(" / ");
 }
 
 function turnPhaseProgressText(phase, progress) {
@@ -6392,6 +6487,7 @@ function setSelectedRun(id) {
   if (state.selectedRun !== id) {
     state.fullCardTurns.clear();
     state.expandedUsageTurns.clear();
+    state.dockUsageExpanded = false;
   }
   state.selectedRun = id;
 }
