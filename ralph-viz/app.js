@@ -5497,8 +5497,11 @@ function latestPhaseStatusHtml(status) {
     return '<span class="muted">n/a</span>';
   }
   const checkHtml = (status.checks ?? []).map(checkPillHtml).join(" ");
+  const headline = [status.phase, phaseTargetText(status)].filter(Boolean).join(" / ");
   return [
-    `<span class="summary-phase${status.allRequiredPassed ? " summary-phase-pass" : ""}">${escapeHtml(phaseStatusText(status))}</span>`,
+    headline
+      ? `<span class="summary-phase${status.allRequiredPassed ? " summary-phase-pass" : ""}">${escapeHtml(headline)}</span>`
+      : "",
     checkHtml,
   ].filter(Boolean).join(" ");
 }
