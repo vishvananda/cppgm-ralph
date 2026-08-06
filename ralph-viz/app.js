@@ -70,9 +70,15 @@ function initializeTheme() {
     // Storage can be unavailable in privacy modes; system preference remains usable.
   }
   applyTheme(theme);
-  themeSelect?.addEventListener("change", () => applyTheme(themeSelect.value));
+  themeSelect?.addEventListener("change", () => {
+    applyTheme(themeSelect.value);
+    scheduleThemeChartRefresh();
+  });
   window.matchMedia?.("(prefers-color-scheme: light)")?.addEventListener?.("change", () => {
-    if ((themeSelect?.value ?? "system") === "system") applyPrismTheme("system");
+    if ((themeSelect?.value ?? "system") === "system") {
+      applyPrismTheme("system");
+      scheduleThemeChartRefresh();
+    }
   });
 }
 
@@ -97,6 +103,21 @@ function applyPrismTheme(theme) {
     (theme === "system" && window.matchMedia?.("(prefers-color-scheme: light)")?.matches);
   if (prismThemeDark) prismThemeDark.disabled = Boolean(light);
   if (prismThemeLight) prismThemeLight.disabled = !light;
+}
+
+function scheduleThemeChartRefresh() {
+  window.requestAnimationFrame(() => {
+    if (currentViewerMode() === "compare") {
+      renderComparisonView().catch((error) => console.error("theme chart refresh failed", error));
+      return;
+    }
+    const run = state.runs.find((candidate) => candidate.id === state.selectedRun);
+    const cached = run ? state.runComparisons.get(run.id) : null;
+    if (!run || !cached?.data || !runComparisonCard || !runComparisonEl || runComparisonCard.hidden) return;
+    delete runComparisonCard.dataset.renderKey;
+    renderRunComparisonPanel(run, cached.data, cached.loadedAt)
+      .catch((error) => console.error("theme chart refresh failed", error));
+  });
 }
 
 const state = {
