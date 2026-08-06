@@ -7,6 +7,7 @@
     "gpt-5.4-mini": Object.freeze({ input: 0.75, cachedInput: 0.075, output: 4.50 }),
     "gpt-5.4": Object.freeze({ input: 2.50, cachedInput: 0.25, output: 15.00 }),
     "claude-fable-5": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
+    "claude-opus-5": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 25.00 }),
     "claude-opus-4-8": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 25.00 }),
     "claude-haiku-4-5": Object.freeze({ input: 1.00, cachedInput: 0.10, output: 5.00 }),
   });
