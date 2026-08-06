@@ -635,11 +635,7 @@ body.is-static-viz .combined-view-toggle {
 .turn-info { color: var(--muted); font-size: 0.78rem; }
 .turn-window { color: #777; font-size: 0.78rem; }
 .turn-duration { color: #777; font-size: 0.78rem; }
-.turn-phase { color: #d0a64a; font-size: 0.78rem; }
-.turn-phase-pass { color: #4a4; }
-.turn-progress { color: #d0a64a; font-size: 0.78rem; }
-.turn-tests { color: #b08030; font-size: 0.78rem; }
-.turn-tests-pass { color: #4a4; }
+.turn-phase-progress { color: #d0a64a; font-size: 0.78rem; }
 .turn-usage {
   appearance: none;
   background: none;
@@ -792,9 +788,7 @@ body.is-static-viz .combined-view-toggle {
   }
 
   .turn-window,
-  .turn-phase,
-  .turn-progress,
-  .turn-tests {
+  .turn-phase-progress {
     flex: 1 1 100%;
     margin-left: 1.2rem;
     min-width: 0;

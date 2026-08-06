@@ -5473,16 +5473,19 @@ function dockProgressText(progress) {
   return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${runningText}`;
 }
 
-function turnProgressText(progress) {
-  if (!progress) {
-    return "";
+function turnPhaseProgressText(phase, progress) {
+  const parts = [];
+  if (phase?.phase) parts.push(phase.phase);
+  const target = phaseTargetText(phase) || progress?.stage || "";
+  if (target) parts.push(target);
+  if (progress?.current) {
+    parts.push(progressRatioText(progress.current));
+    if (progress.best && progress.best.passed > progress.current.passed) {
+      parts.push(`best ${progressRatioText(progress.best)}`);
+    }
+    if (progress.status === "running") parts.push("running");
   }
-  const bestText =
-    progress.best && progress.best.passed > progress.current.passed
-      ? ` best ${progressRatioText(progress.best)}`
-      : "";
-  const statusText = progress.status === "running" ? " running" : "";
-  return `${progress.stage} current ${progressRatioText(progress.current)}${bestText}${statusText}`;
+  return parts.join(" / ");
 }
 
 function progressRatioText(value) {
@@ -5786,7 +5789,6 @@ function renderTimeline(records) {
     const usage = Number.isInteger(turn)
       ? bestTurnUsage(state.shapeUsage, turn, usageMap.get(turn))
       : usageMap.get(turn);
-    const ts = testMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
     const subagents = buildSubagentStats(items, subagentEstimateModel);
@@ -5802,17 +5804,16 @@ function renderTimeline(records) {
     const usageHtml = usage
       ? ` <button type="button" class="turn-usage" aria-expanded="${usageExpanded}" title="Show token breakdown"><span>${escapeHtml(compactTurnUsageText(usage))}</span><span class="turn-usage-detail">${escapeHtml(turnUsageComponentText(usage))}</span></button>`
       : "";
-    const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts, { progress })}</span>` : "";
-    const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
     const subagentHtml = subagents.count
       ? ` <span class="turn-subagents">${escapeHtml(subagentStatsText(subagents))}</span>`
       : "";
     const cardWindowHtml = cardWindowText ? ` <span class="turn-window">${escapeHtml(cardWindowText)}</span>` : "";
-    const phaseHtml = phase
-      ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
+    const phaseProgressText = turnPhaseProgressText(phase, progress);
+    const phaseProgressHtml = phaseProgressText
+      ? ` <span class="turn-phase-progress">${escapeHtml(phaseProgressText)}</span>`
       : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseProgressHtml}${usageHtml}`;
 
     const usagePill = summary.querySelector(".turn-usage");
     const toggleUsage = (event) => {
