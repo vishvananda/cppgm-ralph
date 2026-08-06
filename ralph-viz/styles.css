@@ -26,6 +26,12 @@
   --goal-accent: #8a6;
   --goal-text: #cfc;
   --chart-empty: #111;
+  --diff-block-bg: #151515;
+  --diff-block-text: #aaa;
+  --diff-block-border: #3a3124;
+  --source-block-border: #2d4b36;
+  --diff-insert-bg: rgba(46, 160, 67, 0.22);
+  --diff-delete-bg: rgba(248, 81, 73, 0.22);
   --progress-dock-space: 3.5rem;
 }
 
@@ -57,6 +63,12 @@
   --goal-accent: #397748;
   --goal-text: #245b34;
   --chart-empty: #fff;
+  --diff-block-bg: #f5f5f2;
+  --diff-block-text: #292929;
+  --diff-block-border: #a58a58;
+  --source-block-border: #6f9478;
+  --diff-insert-bg: rgba(46, 160, 67, 0.16);
+  --diff-delete-bg: rgba(207, 34, 46, 0.14);
 }
 
 @media (prefers-color-scheme: light) {
@@ -88,6 +100,12 @@
     --goal-accent: #397748;
     --goal-text: #245b34;
     --chart-empty: #fff;
+    --diff-block-bg: #f5f5f2;
+    --diff-block-text: #292929;
+    --diff-block-border: #a58a58;
+    --source-block-border: #6f9478;
+    --diff-insert-bg: rgba(46, 160, 67, 0.16);
+    --diff-delete-bg: rgba(207, 34, 46, 0.14);
   }
 }
 
@@ -1142,7 +1160,8 @@ body.is-static-viz .combined-view-toggle {
 }
 
 .copyable-block > .cmd-full,
-.copyable-block > .cmd-output {
+.copyable-block > .cmd-output,
+.copyable-block > .msg-body {
   padding-right: 3.5rem;
 }
 
@@ -1166,6 +1185,8 @@ body.is-static-viz .combined-view-toggle {
   border-color: var(--accent);
   color: var(--text);
 }
+
+.ev-msg .copy-button { top: 0.1rem; }
 
 /* Message */
 .ev-msg {
@@ -1231,9 +1252,9 @@ pre.file-source,
 pre.file-source[class*="language-"] {
   margin: 0.1rem 0 0.35rem 1rem;
   padding: 0.4rem 0.5rem;
-  border-left: 2px solid #3a3124;
-  color: #aaa;
-  background: #151515;
+  border-left: 2px solid var(--diff-block-border);
+  color: var(--diff-block-text);
+  background: var(--diff-block-bg);
   overflow-x: auto;
   font-size: 0.72rem;
   line-height: 1.35;
@@ -1243,7 +1264,7 @@ pre.file-source[class*="language-"] {
 
 pre.file-source,
 pre.file-source[class*="language-"] {
-  border-left-color: #2d4b36;
+  border-left-color: var(--source-block-border);
 }
 
 pre.file-diff > code,
@@ -1260,11 +1281,11 @@ pre.file-source > code[class*="language-"] {
 }
 
 pre.file-diff .token.inserted:not(.prefix) {
-  background: rgba(46, 160, 67, 0.22);
+  background: var(--diff-insert-bg);
 }
 
 pre.file-diff .token.deleted:not(.prefix) {
-  background: rgba(248, 81, 73, 0.22);
+  background: var(--diff-delete-bg);
 }
 
 pre.file-diff .token.inserted:not(.prefix),
@@ -1298,6 +1319,28 @@ pre.file-diff .token.prefix {
 .todo-done { color: var(--ok); text-decoration: line-through; }
 
 /* Prompt (ralph.prompt) */
+.ev-prompt > .accordion-header,
+.ev-goal > .accordion-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0;
+  cursor: pointer;
+}
+
+.ev-prompt > .accordion-header::before,
+.ev-goal > .accordion-header::before {
+  content: "\25B8";
+  color: var(--dim);
+  font-size: 0.65rem;
+  transition: transform 0.15s;
+}
+
+.ev-prompt.is-open > .accordion-header::before,
+.ev-goal.is-open > .accordion-header::before {
+  transform: rotate(90deg);
+}
+
 .ev-prompt {
   padding: 0.3rem 0;
   border-left: 3px solid #a64;
@@ -1312,7 +1355,7 @@ pre.file-diff .token.prefix {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #a64;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0;
 }
 
 .prompt-body {
@@ -1338,7 +1381,7 @@ pre.file-diff .token.prefix {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--goal-accent);
-  margin-bottom: 0.15rem;
+  margin-bottom: 0;
 }
 
 .goal-body {

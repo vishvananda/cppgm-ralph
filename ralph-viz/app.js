@@ -20,6 +20,8 @@ const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
 const combinedViewToggle = document.getElementById("combinedView");
 const themeSelect = document.getElementById("themeSelect");
+const prismThemeDark = document.getElementById("prismThemeDark");
+const prismThemeLight = document.getElementById("prismThemeLight");
 
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
@@ -69,6 +71,9 @@ function initializeTheme() {
   }
   applyTheme(theme);
   themeSelect?.addEventListener("change", () => applyTheme(themeSelect.value));
+  window.matchMedia?.("(prefers-color-scheme: light)")?.addEventListener?.("change", () => {
+    if ((themeSelect?.value ?? "system") === "system") applyPrismTheme("system");
+  });
 }
 
 function applyTheme(value) {
@@ -79,11 +84,19 @@ function applyTheme(value) {
     document.documentElement.dataset.theme = theme;
   }
   if (themeSelect) themeSelect.value = theme;
+  applyPrismTheme(theme);
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   } catch (_) {
     // Applying the theme does not depend on persistence succeeding.
   }
+}
+
+function applyPrismTheme(theme) {
+  const light = theme === "light" ||
+    (theme === "system" && window.matchMedia?.("(prefers-color-scheme: light)")?.matches);
+  if (prismThemeDark) prismThemeDark.disabled = Boolean(light);
+  if (prismThemeLight) prismThemeLight.disabled = !light;
 }
 
 const state = {
@@ -1745,13 +1758,13 @@ function appendFullCommand(body, command) {
   appendCopyableBlock(body, pre, text, "Copy command");
 }
 
-function appendCopyableBlock(container, content, text, label) {
+function appendCopyableBlock(container, content, text, label, buttonText = "Copy") {
   const wrapper = document.createElement("div");
   wrapper.className = "copyable-block";
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "copy-button";
-  copy.textContent = "Copy";
+  copy.textContent = buttonText;
   copy.setAttribute("aria-label", label);
   copy.title = label;
   copy.addEventListener("click", async () => {
@@ -1761,7 +1774,7 @@ function appendCopyableBlock(container, content, text, label) {
     } catch (_) {
       copy.textContent = "Failed";
     }
-    window.setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+    window.setTimeout(() => { copy.textContent = buttonText; }, 1200);
   });
   wrapper.append(copy, content);
   container.append(wrapper);
@@ -1887,7 +1900,7 @@ function renderMessageCard(record) {
   body.innerHTML = SAFE_MARKDOWN.renderMarkdown(text);
   body.querySelectorAll("pre code").forEach(highlightCodeBlock);
 
-  card.append(body);
+  appendCopyableBlock(card, body, text, "Copy Markdown", "Copy MD");
   return card;
 }
 
@@ -2546,6 +2559,9 @@ function renderPromptCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-prompt";
+  const { header, body: content } = createAccordion(card, {
+    key: promptEntryKey(record),
+  });
 
   const label = document.createElement("span");
   label.className = "prompt-label";
@@ -2555,7 +2571,8 @@ function renderPromptCard(record) {
   body.className = "prompt-body";
   body.textContent = prompt;
 
-  card.append(label, body);
+  header.append(label);
+  content.append(body);
   return card;
 }
 
@@ -2570,6 +2587,9 @@ function renderGoalCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-goal";
+  const { header, body: content } = createAccordion(card, {
+    key: goalEntryKey(record),
+  });
 
   const label = document.createElement("span");
   label.className = "goal-label";
@@ -2579,8 +2599,17 @@ function renderGoalCard(record) {
   body.className = "goal-body";
   body.textContent = objective;
 
-  card.append(label, body);
+  header.append(label);
+  content.append(body);
   return card;
+}
+
+function promptEntryKey(record) {
+  return recordScrollKey(record, "prompt");
+}
+
+function goalEntryKey(record) {
+  return recordScrollKey(record, "goal");
 }
 
 function renderPhaseStatusCard(record) {
@@ -2843,6 +2872,12 @@ function expandableEntryKey(entry) {
   }
   if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "mcp_tool_call") {
     return mcpToolEntryKey(entry.record);
+  }
+  if (entry.kind === "event" && entry.record?.eventType === "ralph.prompt") {
+    return promptEntryKey(entry.record);
+  }
+  if (entry.kind === "event" && entry.record?.eventType === "ralph.goal") {
+    return goalEntryKey(entry.record);
   }
   return null;
 }
