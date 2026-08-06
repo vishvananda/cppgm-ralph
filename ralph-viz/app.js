@@ -1696,7 +1696,11 @@ function appendExpandableText(container, text, key, className) {
     el.dataset.contentScrollKey = key;
   }
   el.textContent = text;
-  container.append(el);
+  if (el.tagName === "PRE") {
+    appendCopyableBlock(container, el, text, "Copy output");
+  } else {
+    container.append(el);
+  }
 }
 
 function appendFullCommand(body, command) {
@@ -1707,7 +1711,29 @@ function appendFullCommand(body, command) {
   const pre = document.createElement("pre");
   pre.className = "cmd-full";
   pre.textContent = text;
-  body.append(pre);
+  appendCopyableBlock(body, pre, text, "Copy command");
+}
+
+function appendCopyableBlock(container, content, text, label) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "copyable-block";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "copy-button";
+  copy.textContent = "Copy";
+  copy.setAttribute("aria-label", label);
+  copy.title = label;
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = "Copied";
+    } catch (_) {
+      copy.textContent = "Failed";
+    }
+    window.setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+  });
+  wrapper.append(copy, content);
+  container.append(wrapper);
 }
 
 function commandEntryKey(entry) {
@@ -2654,10 +2680,7 @@ function renderGeminiToolCallCard(entry) {
     // No response yet — show args as fallback
     const argText = JSON.stringify(args, null, 2);
     if (argText && argText !== "{}") {
-      const pre = document.createElement("pre");
-      pre.className = "cmd-output";
-      pre.textContent = argText;
-      body.append(pre);
+      appendExpandableText(body, argText, `out:${geminiToolEntryKey(entry)}`, "cmd-output");
     }
   }
 

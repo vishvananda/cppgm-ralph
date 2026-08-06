@@ -1042,6 +1042,37 @@ body.is-static-viz .combined-view-toggle {
   line-height: 1.4;
 }
 
+.copyable-block {
+  position: relative;
+  min-width: 0;
+}
+
+.copyable-block > .cmd-full,
+.copyable-block > .cmd-output {
+  padding-right: 3.5rem;
+}
+
+.copy-button {
+  position: absolute;
+  z-index: 1;
+  top: 0.45rem;
+  right: 0.35rem;
+  appearance: none;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+  background: #171717;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.65rem;
+  cursor: pointer;
+}
+
+.copy-button:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 /* Message */
 .ev-msg {
   padding: 0.3rem 0;
