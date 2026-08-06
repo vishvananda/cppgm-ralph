@@ -19,6 +19,7 @@ const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
 const combinedViewToggle = document.getElementById("combinedView");
+const themeSelect = document.getElementById("themeSelect");
 
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
@@ -35,6 +36,7 @@ const SCROLL_DEBUG_DEFAULT = false;
 const PROGRESS_DOCK_EXTRA_SPACE_PX = 18;
 const PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v2";
 const PROGRESS_BEST_CACHE_LIMIT = 600;
+const THEME_STORAGE_KEY = "ralphTheme";
 const STATIC_DATA_ROOT = staticDataRootFromUrl();
 const ECHARTS_CDN_URL = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
 const RUN_COMPARISON_REFRESH_MS = 60 * 1000;
@@ -55,6 +57,32 @@ function staticDataRootFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const root = params.get("data")?.trim();
   return root ? root.replace(/\/+$/, "") : "data";
+}
+
+function initializeTheme() {
+  let theme = "system";
+  try {
+    theme = window.localStorage.getItem(THEME_STORAGE_KEY) ?? "system";
+  } catch (_) {
+    // Storage can be unavailable in privacy modes; system preference remains usable.
+  }
+  applyTheme(theme);
+  themeSelect?.addEventListener("change", () => applyTheme(themeSelect.value));
+}
+
+function applyTheme(value) {
+  const theme = ["dark", "light"].includes(value) ? value : "system";
+  if (theme === "system") {
+    delete document.documentElement.dataset.theme;
+  } else {
+    document.documentElement.dataset.theme = theme;
+  }
+  if (themeSelect) themeSelect.value = theme;
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch (_) {
+    // Applying the theme does not depend on persistence succeeding.
+  }
 }
 
 const state = {
@@ -7909,6 +7937,7 @@ scrollDebug("app-loaded", {
   debugEnabled: state.scrollDebugEnabled,
 });
 
+initializeTheme();
 initializeViewControls();
 
 loadRuns().catch(err => {
