@@ -42,6 +42,7 @@ let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -1338,7 +1339,90 @@ function buildDisplayEntries(records, options = {}) {
 
     entries.push({ kind: "event", record });
   }
-  return entries;
+  return dedupeDisplayEntries(entries);
+}
+
+function dedupeDisplayEntries(entries) {
+  return ENTRY_DEDUPE.dedupeRichEntries(
+    entries,
+    displayEntryIdentity,
+    displayEntryRichnessSignature,
+  );
+}
+
+function displayEntryIdentity(entry) {
+  const item = displayEntryItem(entry);
+  if (!item?.type || item?.id == null || item.id === "") {
+    return null;
+  }
+  const record = displayEntryRecords(entry).find((candidate) => candidate?.event?.item === item) ??
+    displayEntryRecords(entry)[0];
+  return [
+    record?.threadId ?? "",
+    displayTurnForRecord(record) ?? "",
+    item.type,
+    item.id,
+  ].join("\u0000");
+}
+
+function displayEntryItem(entry) {
+  if (entry.kind === "command" || entry.kind === "subagent") {
+    return entry.asyncCompletedRecord?.event?.item ??
+      entry.endRecord?.event?.item ??
+      entry.updateRecord?.event?.item ??
+      entry.startRecord?.event?.item ??
+      null;
+  }
+  return entry.record?.event?.item ?? null;
+}
+
+function displayEntryRichnessSignature(entry) {
+  const records = displayEntryRecords(entry);
+  const parts = [];
+  for (const record of records) {
+    const item = record?.event?.item ?? {};
+    parts.push(
+      item.text,
+      item.command,
+      item.aggregated_output,
+      item.output,
+      item.diff,
+      item.path,
+      item.movePath,
+      item.move_path,
+      item.status,
+    );
+    for (const change of item.changes ?? []) {
+      parts.push(change?.kind, change?.path, change?.movePath, change?.move_path, change?.diff);
+    }
+    if (item.result != null) {
+      parts.push(typeof item.result === "string" ? item.result : JSON.stringify(item.result));
+    }
+    if (item.error != null) {
+      parts.push(typeof item.error === "string" ? item.error : JSON.stringify(item.error));
+    }
+  }
+  if (entry.kind === "command") {
+    parts.push(commandEntryOutput(entry), commandEntryExitCode(entry));
+  }
+  return parts
+    .filter((part) => part != null && part !== "")
+    .map((part) => String(part))
+    .join("\u0000");
+}
+
+function displayEntryRecords(entry) {
+  if (entry.kind === "command" || entry.kind === "subagent") {
+    return [
+      entry.startRecord,
+      entry.updateRecord,
+      entry.endRecord,
+      ...(entry.completionRecords ?? []),
+      ...(entry.asyncPollRecords ?? []),
+      entry.asyncCompletedRecord,
+    ].filter(Boolean);
+  }
+  return [entry.record, entry.responseRecord].filter(Boolean);
 }
 
 function splitCommandBatchEntry(entry) {
