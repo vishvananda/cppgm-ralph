@@ -17,6 +17,15 @@
   --dock-bg: rgba(16, 16, 16, 0.96);
   --dock-shadow: rgba(0, 0, 0, 0.35);
   --hover-overlay: rgba(255, 255, 255, 0.05);
+  --code-command: #9d9;
+  --code-block-bg: #101510;
+  --code-block-border: #354835;
+  --code-block-text: #b8e0b8;
+  --output-block-bg: #0a0a0a;
+  --output-block-text: #aaa;
+  --goal-accent: #8a6;
+  --goal-text: #cfc;
+  --chart-empty: #111;
   --progress-dock-space: 3.5rem;
 }
 
@@ -39,6 +48,15 @@
   --dock-bg: rgba(247, 247, 245, 0.97);
   --dock-shadow: rgba(0, 0, 0, 0.16);
   --hover-overlay: rgba(0, 0, 0, 0.05);
+  --code-command: #176b36;
+  --code-block-bg: #f0f5f0;
+  --code-block-border: #7e9d84;
+  --code-block-text: #205c31;
+  --output-block-bg: #f2f2ef;
+  --output-block-text: #3f3f3d;
+  --goal-accent: #397748;
+  --goal-text: #245b34;
+  --chart-empty: #fff;
 }
 
 @media (prefers-color-scheme: light) {
@@ -61,6 +79,15 @@
     --dock-bg: rgba(247, 247, 245, 0.97);
     --dock-shadow: rgba(0, 0, 0, 0.16);
     --hover-overlay: rgba(0, 0, 0, 0.05);
+    --code-command: #176b36;
+    --code-block-bg: #f0f5f0;
+    --code-block-border: #7e9d84;
+    --code-block-text: #205c31;
+    --output-block-bg: #f2f2ef;
+    --output-block-text: #3f3f3d;
+    --goal-accent: #397748;
+    --goal-text: #245b34;
+    --chart-empty: #fff;
   }
 }
 
@@ -636,6 +663,7 @@ body.is-static-viz .combined-view-toggle {
 .turn-window { color: #777; font-size: 0.78rem; }
 .turn-duration { color: #777; font-size: 0.78rem; }
 .turn-phase-progress { color: #d0a64a; font-size: 0.78rem; }
+.turn-prior-failures { color: var(--bad); font-size: 0.78rem; font-weight: 600; }
 .turn-usage {
   appearance: none;
   background: none;
@@ -788,7 +816,8 @@ body.is-static-viz .combined-view-toggle {
   }
 
   .turn-window,
-  .turn-phase-progress {
+  .turn-phase-progress,
+  .turn-prior-failures {
     flex: 1 1 100%;
     margin-left: 1.2rem;
     min-width: 0;
@@ -1072,7 +1101,7 @@ body.is-static-viz .combined-view-toggle {
   background: none;
   border: none;
   padding: 0;
-  color: #9d9;
+  color: var(--code-command);
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -1085,12 +1114,12 @@ body.is-static-viz .combined-view-toggle {
   font-size: 0.75rem;
   white-space: pre-wrap;
   word-break: break-word;
-  background: #101510;
-  border-left: 2px solid #354835;
+  background: var(--code-block-bg);
+  border-left: 2px solid var(--code-block-border);
   border-radius: 3px;
   padding: 0.4rem 0.6rem;
   margin: 0.2rem 0 0.2rem 1rem;
-  color: #b8e0b8;
+  color: var(--code-block-text);
   line-height: 1.4;
 }
 
@@ -1099,11 +1128,11 @@ body.is-static-viz .combined-view-toggle {
   font-size: 0.75rem;
   white-space: pre-wrap;
   word-break: break-word;
-  background: #0a0a0a;
+  background: var(--output-block-bg);
   border-radius: 3px;
   padding: 0.4rem 0.6rem;
   margin: 0.2rem 0 0.2rem 1rem;
-  color: #aaa;
+  color: var(--output-block-text);
   line-height: 1.4;
 }
 
@@ -1266,7 +1295,7 @@ pre.file-diff .token.prefix {
 
 .todo-list { padding: 0.1rem 0 0.1rem 1rem; }
 .todo-row { font-size: 0.78rem; padding: 0.08rem 0; }
-.todo-done { color: #686; text-decoration: line-through; }
+.todo-done { color: var(--ok); text-decoration: line-through; }
 
 /* Prompt (ralph.prompt) */
 .ev-prompt {
@@ -1297,7 +1326,7 @@ pre.file-diff .token.prefix {
 /* Goal (ralph.goal) */
 .ev-goal {
   padding: 0.3rem 0;
-  border-left: 3px solid #8a6;
+  border-left: 3px solid var(--goal-accent);
   padding-left: 0.6rem;
   margin: 0.15rem 0;
 }
@@ -1308,7 +1337,7 @@ pre.file-diff .token.prefix {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #8a6;
+  color: var(--goal-accent);
   margin-bottom: 0.15rem;
 }
 
@@ -1317,7 +1346,7 @@ pre.file-diff .token.prefix {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.55;
-  color: #cfc;
+  color: var(--goal-text);
 }
 
 /* Phase status (ralph.phase-status) */
@@ -1363,7 +1392,7 @@ pre.file-diff .token.prefix {
 .phase-check-pass .phase-check-result { color: var(--ok); }
 
 .phase-check-command {
-  color: #9d9;
+  color: var(--code-command);
   font-family: "SF Mono", "Consolas", monospace;
   font-size: 0.75rem;
   white-space: nowrap;

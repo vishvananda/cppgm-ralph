@@ -46,6 +46,7 @@ const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATE
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
+const TEST_STATUS_SUMMARY = globalThis.RALPH_TEST_STATUS_SUMMARY;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -102,6 +103,7 @@ const state = {
   runComparisons: new Map(),
   runComparisonThrough: new Map(),
   runComparisonRequestId: 0,
+  loadRequestId: 0,
   compareThrough: null,
   selectedDocName: null,
   autoRefreshTimer: null,
@@ -4063,11 +4065,11 @@ function normalizeStageName(stage) {
   return typeof stage === "string" && /^pa\d+$/.test(stage) ? stage : null;
 }
 
-function deriveTestStatusFromCommand(record) {
+function deriveTestStatusFromCommand(record, commandOverride = null, commandInfoOverride = null) {
   const item = record.event?.item ?? {};
-  const command = unwrapCommand(item.command ?? "");
+  const command = unwrapCommand(commandOverride ?? item.command ?? "");
   const output = commandOutputText(item.aggregated_output).trim();
-  const commandInfo = parseAgentTestCommand(command);
+  const commandInfo = commandInfoOverride ?? parseAgentTestCommand(command);
   if (!output || !commandInfo) {
     return null;
   }
@@ -4266,6 +4268,7 @@ function buildAgentTestProgressState(records) {
     latest: null,
   };
   const byTurn = new Map();
+  const testStatusesByTurn = new Map();
   const testReportLogCommands = new Map();
   const commandsByAsyncCell = new Map();
   const commandsBySessionStoreKey = new Map();
@@ -4324,6 +4327,14 @@ function buildAgentTestProgressState(records) {
       continue;
     }
 
+    const derivedTestStatus = deriveTestStatusFromCommand(record, commandForProgress, commandInfo);
+    if (derivedTestStatus) {
+      const turn = displayTurnForRecord(record);
+      const statuses = testStatusesByTurn.get(turn) ?? [];
+      statuses.push(derivedTestStatus);
+      testStatusesByTurn.set(turn, statuses);
+    }
+
     const observation = deriveAgentTestProgress(record, commandInfo, tracker);
     if (!observation) {
       continue;
@@ -4336,7 +4347,7 @@ function buildAgentTestProgressState(records) {
     byTurn.set(progress.turn, progress);
   }
 
-  return { byTurn, latest: tracker.latest };
+  return { byTurn, latest: tracker.latest, testStatusesByTurn };
 }
 
 function applyProgressBestCache(progressState, run = null) {
@@ -5488,6 +5499,31 @@ function turnPhaseProgressText(phase, progress) {
   return parts.join(" / ");
 }
 
+function turnPriorFailureSummary(phase, testStatus, commandStatuses, progress) {
+  const activeStage = phaseTargetText(phase).match(/^pa\d+/)?.[0] ??
+    progress?.stage ??
+    normalizeStageName(testStatus?.targetStage);
+  if (!activeStage || !TEST_STATUS_SUMMARY) {
+    return { total: 0, stages: [] };
+  }
+  const evidence = [];
+  const addStatus = (status) => {
+    if (status) evidence.push({ status, recordedAt: status.recordedAt });
+  };
+  addStatus(phase?.testStatus);
+  addStatus(phase?.primaryCheck?.testStatus);
+  for (const check of phase?.checks ?? []) addStatus(check?.testStatus);
+  addStatus(testStatus);
+  for (const status of commandStatuses ?? []) addStatus(status);
+  return TEST_STATUS_SUMMARY.summarizePriorStageFailures(evidence, activeStage);
+}
+
+function priorFailureTitle(summary) {
+  return (summary?.stages ?? [])
+    .map((stage) => `${stage.name}: ${stage.failed}`)
+    .join(", ");
+}
+
 function progressRatioText(value) {
   if (!value) {
     return "0/?";
@@ -5724,10 +5760,11 @@ function renderTimeline(records) {
   const testMap = buildTestStatusMap(records);
   const phaseMap = buildPhaseStatusMap(records);
   const durationMap = buildTurnDurationMap(records);
-  const progressMap = applyProgressBestCache(
+  const progressState = applyProgressBestCache(
     buildAgentTestProgressState(records),
     state.currentRun,
-  ).byTurn;
+  );
+  const progressMap = progressState.byTurn;
   const filtered = filterRecords(records);
   const subagentEstimateModel = buildSubagentEstimateModel(records);
   eventCountEl.textContent = `${filtered.length} / ${records.length}`;
@@ -5791,6 +5828,7 @@ function renderTimeline(records) {
       : usageMap.get(turn);
     const phase = phaseMap.get(turn);
     const progress = progressMap.get(turn);
+    const testStatus = testMap.get(turn);
     const subagents = buildSubagentStats(items, subagentEstimateModel);
     const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap, {
       activeCurrentTurn: isActiveCurrentRunTurn(selectedRunMeta(), turn),
@@ -5813,7 +5851,16 @@ function renderTimeline(records) {
     const phaseProgressHtml = phaseProgressText
       ? ` <span class="turn-phase-progress">${escapeHtml(phaseProgressText)}</span>`
       : "";
-    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseProgressHtml}${usageHtml}`;
+    const priorFailures = turnPriorFailureSummary(
+      phase,
+      testStatus,
+      progressState.testStatusesByTurn?.get(turn),
+      progress,
+    );
+    const priorFailureHtml = priorFailures.total > 0
+      ? ` <span class="turn-prior-failures" title="${escapeHtml(priorFailureTitle(priorFailures))}">${fmtInt(priorFailures.total)} prior failure${priorFailures.total === 1 ? "" : "s"}</span>`
+      : "";
+    summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseProgressHtml}${priorFailureHtml}${usageHtml}`;
 
     const usagePill = summary.querySelector(".turn-usage");
     const toggleUsage = (event) => {
@@ -6170,7 +6217,9 @@ function isCombinedView() {
 }
 
 async function loadRuns(options = {}) {
+  const requestId = options.requestId ?? ++state.loadRequestId;
   const data = await loadRunCatalog();
+  if (requestId !== state.loadRequestId) return;
   state.currentRun = data.currentThread ?? null;
   state.runs = data.runs ?? [];
 
@@ -6217,16 +6266,19 @@ async function loadRuns(options = {}) {
   if (isCombinedView()) {
     await loadCombinedRuns({
       scrollSnapshot: options.scrollSnapshot,
+      requestId,
     });
     return;
   }
   await loadRun(preferred, {
     stickToBottom: options.stickToBottom,
     scrollSnapshot: options.scrollSnapshot,
+    requestId,
   });
 }
 
 async function loadCombinedRuns(options = {}) {
+  const requestId = options.requestId ?? ++state.loadRequestId;
   setCombinedModeActive(true);
   hideRunDocsPanel();
   hideRunComparisonPanel();
@@ -6258,6 +6310,7 @@ async function loadCombinedRuns(options = {}) {
       };
     }
   }));
+  if (requestId !== state.loadRequestId) return;
 
   state.combinedRuns = loaded;
   state.events = [];
@@ -6289,6 +6342,7 @@ function setSelectedRun(id) {
 
 async function loadRun(id, options = {}) {
   if (!id) return;
+  const requestId = options.requestId ?? ++state.loadRequestId;
   setCombinedModeActive(false);
   hideRunDocsPanel();
   setViewTitles("Summary", "Turns");
@@ -6300,6 +6354,7 @@ async function loadRun(id, options = {}) {
   const data = state.staticMode
     ? await loadStaticRunData(id, detailParams)
     : await fetchJson(`/api/run/${encodeURIComponent(id)}${detailQuery ? `?${detailQuery}` : ""}`);
+  if (requestId !== state.loadRequestId) return;
 
   const rawEvents = data.events ?? [];
   state.events = collapseMirroredCodexItems(rawEvents);
@@ -6321,6 +6376,7 @@ async function loadRun(id, options = {}) {
   renderSummary(state.events);
   scheduleRunComparisonPanel(state.runs.find((run) => run.id === id) ?? null, data.staticSummary ?? null);
   await renderRunDocsPanel(state.runs.find((run) => run.id === id) ?? null, data.staticSummary ?? null);
+  if (requestId !== state.loadRequestId) return;
   scrollDebug("load-run-before-render", {
     id,
     eventCount: state.events.length,
@@ -6547,6 +6603,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
   const colors = series.map((run, index) => run.highlighted ? "#ff9e64" : palette[index % palette.length]);
   const colorBySeries = new Map(series.map((run, index) => [run.label, colors[index]]));
+  const chartEmpty = cssThemeColor("--chart-empty", "#111");
   chart.setOption({
     color: colors,
     backgroundColor: "transparent",
@@ -6622,7 +6679,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
             symbol: "circle",
             symbolSize: 9,
             itemStyle: {
-              color: complete ? color : "#111",
+              color: complete ? color : chartEmpty,
               borderColor: color,
               borderWidth: complete ? 1.5 : 2.4,
             },
@@ -6678,6 +6735,7 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
   const ticks = comparisonChartTicks(maxValue, 4);
   const xLabels = comparisonXLabels(rows);
   const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
+  const chartEmpty = cssThemeColor("--chart-empty", "#111");
   const paths = series.map((run, runIndex) => {
     if (!run.points.length) {
       return "";
@@ -6691,7 +6749,7 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
     return `
       <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color};fill-opacity:${run.highlighted ? "0.25" : "0.1"}" />
       <path class="comparison-area-line" d="${line}" stroke="${color}" style="stroke-width:${run.highlighted ? "4" : "2.1"};opacity:${run.highlighted ? "1" : "0.72"}" />
-      <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : "#111"}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
+      <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : chartEmpty}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
     `;
   }).join("");
   const latest = series.map((run, runIndex) => {
@@ -6727,6 +6785,11 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
       <div class="comparison-chart-legend">${latest}</div>
     </section>
   `;
+}
+
+function cssThemeColor(name, fallback) {
+  const value = window.getComputedStyle?.(document.documentElement)?.getPropertyValue(name)?.trim();
+  return value || fallback;
 }
 
 function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field) {
@@ -7868,7 +7931,7 @@ runSelect.addEventListener("change", e => {
     combinedViewToggle.checked = false;
     setUrlParam("view", "run");
   }
-  loadRun(e.target.value);
+  loadRun(e.target.value).catch((error) => console.error("run selection failed", error));
 });
 if (viewerMode) {
   viewerMode.addEventListener("change", () => {
