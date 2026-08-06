@@ -109,6 +109,7 @@ const state = {
   refreshInFlight: false,
   openEntryKeys: new Set(),
   fullCardTurns: new Set(),
+  expandedUsageTurns: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
@@ -1786,6 +1787,7 @@ function createAccordion(root, options = {}) {
     bodyClass = "accordion-body",
     scrollKey = key,
     onToggle = null,
+    headerTag = "button",
   } = options;
 
   root.classList.add("accordion");
@@ -1793,8 +1795,13 @@ function createAccordion(root, options = {}) {
     root.dataset.entryKey = key;
   }
 
-  const header = document.createElement("button");
-  header.type = "button";
+  const header = document.createElement(headerTag);
+  if (headerTag === "button") {
+    header.type = "button";
+  } else {
+    header.setAttribute("role", "button");
+    header.tabIndex = 0;
+  }
   header.className = headerClass;
   if (scrollKey) {
     header.dataset.scrollKey = scrollKey;
@@ -1842,6 +1849,14 @@ function createAccordion(root, options = {}) {
     });
   };
   header.addEventListener("click", toggleOpen);
+  if (headerTag !== "button") {
+    header.addEventListener("keydown", (event) => {
+      if (event.target === header && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        toggleOpen();
+      }
+    });
+  }
 
   root.append(header, body);
   if (key) {
@@ -5670,12 +5685,28 @@ function turnSummaryText(items) {
   return parts.join(", ") || `${items.length} events`;
 }
 
-function usageText(usage) {
-  if (!usage) return "";
-  return fullUsageText(usage, {
-    includeCost: true,
-    model: inferPriceModel(),
-  });
+function compactTurnUsageText(usage) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) return "";
+  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
+  const uncached = Math.max(0, normalized.input_tokens - cached);
+  const parts = [`${fmtInt(uncached + normalized.output_tokens)} uncached tok`];
+  const cost = costEstimateText(normalized, inferPriceModel());
+  if (cost !== "n/a") parts.push(cost);
+  return parts.join(" / ");
+}
+
+function turnUsageComponentText(usage) {
+  const normalized = normalizeUsage(usage);
+  if (!normalized) return "";
+  const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
+  const uncached = Math.max(0, normalized.input_tokens - cached);
+  return [
+    `${fmtInt(uncached)} input`,
+    `${fmtInt(cached)} cached`,
+    `${fmtInt(normalized.output_tokens)} output`,
+    `${fmtInt(normalized.reasoning_output_tokens)} reasoning`,
+  ].join(" / ");
 }
 
 function renderTimeline(records) {
@@ -5748,6 +5779,7 @@ function renderTimeline(records) {
       bodyClass: "turn-feed accordion-body",
       scrollKey: turnScrollKey(turn),
       onToggle: syncOpenTurnsToUrl,
+      headerTag: "div",
     });
 
     const label = turn === "setup" ? "Setup" : `Turn ${turn}`;
@@ -5766,7 +5798,10 @@ function renderTimeline(records) {
     const displayEntries = buildDisplayEntries(items, { subagentEstimateModel });
     const entryWindow = displayEntryWindow(displayEntries, turn);
     const cardWindowText = turnCardWindowText(entryWindow);
-    const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
+    const usageExpanded = state.expandedUsageTurns.has(turn);
+    const usageHtml = usage
+      ? ` <button type="button" class="turn-usage" aria-expanded="${usageExpanded}" title="Show token breakdown"><span>${escapeHtml(compactTurnUsageText(usage))}</span><span class="turn-usage-detail">${escapeHtml(turnUsageComponentText(usage))}</span></button>`
+      : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts, { progress })}</span>` : "";
     const progressHtml = progress ? ` <span class="turn-progress">${escapeHtml(turnProgressText(progress))}</span>` : "";
     const durationHtml = duration ? ` <span class="turn-duration">${duration}</span>` : "";
@@ -5778,6 +5813,16 @@ function renderTimeline(records) {
       ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
       : "";
     summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
+
+    const usagePill = summary.querySelector(".turn-usage");
+    const toggleUsage = (event) => {
+      event.stopPropagation();
+      const expanded = !state.expandedUsageTurns.has(turn);
+      if (expanded) state.expandedUsageTurns.add(turn);
+      else state.expandedUsageTurns.delete(turn);
+      usagePill.setAttribute("aria-expanded", String(expanded));
+    };
+    usagePill?.addEventListener("click", toggleUsage);
 
     if (entryWindow.hidden > 0) {
       const more = document.createElement("button");
@@ -6236,6 +6281,7 @@ async function loadCombinedRuns(options = {}) {
 function setSelectedRun(id) {
   if (state.selectedRun !== id) {
     state.fullCardTurns.clear();
+    state.expandedUsageTurns.clear();
   }
   state.selectedRun = id;
 }

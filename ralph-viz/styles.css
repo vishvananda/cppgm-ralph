@@ -641,13 +641,30 @@ body.is-static-viz .combined-view-toggle {
 .turn-tests { color: #b08030; font-size: 0.78rem; }
 .turn-tests-pass { color: #4a4; }
 .turn-usage {
+  appearance: none;
+  background: none;
   color: #777;
   font-size: 0.72rem;
   flex: 1 1 28rem;
   margin-left: auto;
   min-width: 18rem;
   text-align: right;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0.05rem 0.25rem;
 }
+
+.turn-usage:hover,
+.turn-usage:focus-visible {
+  background: none;
+  border-color: var(--border);
+  color: var(--text);
+  outline: none;
+}
+
+.turn-usage-detail { display: none; }
+.turn-usage[aria-expanded="true"] .turn-usage-detail { display: block; }
 
 @media (max-width: 800px) {
   body {
