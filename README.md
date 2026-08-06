@@ -50,10 +50,15 @@ reinstalls the same goal in the same Ralph turn. Ralph only records
 `claude.compaction_completed` after Claude emits a `compact_boundary`; the
 initial incomplete sentinel emitted while installing `/goal` is ignored. Set
 `claudeCompactOnIncompleteGoal` to `false` to retain Claude's native immediate
-continuation behavior. If Claude reports a usage/session limit mid-turn, Ralph
-waits for the limit window to reset (using the reset time from the stream when
-available, 15 minutes otherwise) and resumes the same session so the turn
-continues with its context intact. After an interrupted run,
+continuation behavior. If Claude or Codex reports a usage/session limit
+mid-turn, Ralph persists the reset deadline, waits for the limit window to
+reset (using the provider reset time when available, 15 minutes otherwise),
+and resumes the same session and turn. The wait is excluded from run timing.
+Restarting Ralph while it is waiting automatically reuses that turn's checks
+and continues waiting. Use `--ignore-limit-wait` (or
+`RALPH_IGNORE_LIMIT_WAIT=1`) to clear the deadline and retry immediately after
+an early reset or account change. After an interrupted run without a persisted
+provider wait,
 `node ralph.js --continue` resumes
 the most recent provider thread for the next turn only (subsequent turns
 follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
@@ -377,6 +382,18 @@ under `stateBaseDir`.
 - `RALPH_CLAUDE_COMPACT_ON_INCOMPLETE_GOAL`
   Set to `0`, `false`, `no`, or `off` to disable same-turn compaction after an
   incomplete Claude Stop-hook verdict
+- `RALPH_IGNORE_LIMIT_WAIT`
+  Set to `1`/`true` to clear a persisted Claude or Codex usage-limit deadline
+  and retry the interrupted turn immediately. Equivalent to
+  `--ignore-limit-wait`.
+- `RALPH_CODEX_LIMIT_RETRY_MAX`
+  Maximum Codex usage-limit resume attempts in one process (default `20`)
+- `RALPH_CODEX_LIMIT_RESET_BUFFER_MS`
+  Safety buffer added after Codex's reported reset time (default `90000`)
+- `RALPH_CODEX_LIMIT_MAX_WAIT_MS`
+  Maximum single Codex usage-limit wait (default `691200000`, eight days)
+- `RALPH_CODEX_LIMIT_FALLBACK_WAIT_MS`
+  Codex wait when no reset time can be parsed (default `900000`)
 - `RALPH_ANTIGRAVITY_PYTHON`
   Override `antigravityPython`
 - `RALPH_ANTIGRAVITY_SCRIPT_PATH`

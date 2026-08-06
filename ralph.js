@@ -26,6 +26,12 @@ import {
   pendingCheckpointForTarget,
   updatePendingCheckpoint,
 } from "./checkpoint-progress.js";
+import {
+  clearPersistedLimitWait,
+  parseCodexUsageLimitResetAt,
+  readPersistedLimitWait,
+  writePersistedLimitWait,
+} from "./provider-limit-wait.js";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -45,6 +51,15 @@ const CLAUDE_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CLAUDE_LIMIT_RESET
 const CLAUDE_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CLAUDE_LIMIT_MIN_WAIT_MS ?? 60_000);
 const CLAUDE_LIMIT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const CLAUDE_LIMIT_FALLBACK_WAIT_MS = 15 * 60 * 1000;
+const CODEX_LIMIT_RETRY_MAX = Number(process.env.RALPH_CODEX_LIMIT_RETRY_MAX ?? 20);
+const CODEX_LIMIT_RESET_BUFFER_MS = Number(process.env.RALPH_CODEX_LIMIT_RESET_BUFFER_MS ?? 90_000);
+const CODEX_LIMIT_MIN_WAIT_MS = Number(process.env.RALPH_CODEX_LIMIT_MIN_WAIT_MS ?? 60_000);
+const CODEX_LIMIT_MAX_WAIT_MS = Number(
+  process.env.RALPH_CODEX_LIMIT_MAX_WAIT_MS ?? 8 * 24 * 60 * 60 * 1000,
+);
+const CODEX_LIMIT_FALLBACK_WAIT_MS = Number(
+  process.env.RALPH_CODEX_LIMIT_FALLBACK_WAIT_MS ?? 15 * 60 * 1000,
+);
 const CLAUDE_INCOMPLETE_GOAL_RETRY_MAX = Number(process.env.RALPH_CLAUDE_INCOMPLETE_GOAL_RETRY_MAX ?? 20);
 const CLAUDE_SYSTEM_PROMPT_FD = 3;
 const CLAUDE_SYSTEM_PROMPT_FD_PATH = `/dev/fd/${CLAUDE_SYSTEM_PROMPT_FD}`;
@@ -181,6 +196,7 @@ let STATE_PATH = null;
 let TEST_LOG_PATH = null;
 let CHECK_LOG_DIR_PATH = null;
 let EVENTS_DIR_PATH = null;
+let LIMIT_WAIT_PATH = null;
 let PROMPT_PARTIALS = {};
 let TEST_STAGE_NAMES = [];
 let STAGE_COUNT_HINTS = new Map();
@@ -196,11 +212,13 @@ async function main() {
   TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
   CHECK_LOG_DIR_PATH = path.join(CONFIG.stateDir, "checks");
   EVENTS_DIR_PATH = path.join(CONFIG.stateDir, "events");
+  LIMIT_WAIT_PATH = path.join(CONFIG.stateDir, "limit-wait.json");
 
   await fs.mkdir(CONFIG.stateDir, { recursive: true });
   await fs.mkdir(CHECK_LOG_DIR_PATH, { recursive: true });
   await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
   const state = await loadState();
+  const persistedLimitResume = await handlePersistedProviderLimitWait(state);
   const startingFreshRun =
     !state.threadId &&
     state.turnsCompleted === 0 &&
@@ -270,8 +288,8 @@ async function main() {
   const configuredThreadId = process.env.RALPH_THREAD_ID ?? null;
   // --continue resumes the most recent provider thread for the next turn only;
   // afterwards the configured freshThreadPerTurn behavior applies again.
-  let continueThreadId = null;
-  if (process.argv.includes("--continue") && !configuredThreadId) {
+  let continueThreadId = persistedLimitResume?.threadId ?? null;
+  if (process.argv.includes("--continue") && !configuredThreadId && !continueThreadId) {
     continueThreadId = state.threadId ?? (await findLatestEventLogThreadId());
     if (continueThreadId) {
       log(`--continue: resuming last thread ${continueThreadId} for the next turn`);
@@ -280,6 +298,7 @@ async function main() {
     }
   }
   const reuseLastChecksRequested =
+    Boolean(persistedLimitResume) ||
     process.argv.includes("--reuse-last-checks") ||
     process.argv.includes("--skip-checks") ||
     parseBoolean(process.env.RALPH_REUSE_LAST_CHECKS, false);
@@ -294,8 +313,10 @@ async function main() {
   // With --continue, the resumed attempt re-enters the interrupted turn, so
   // keep the state's completed-turn count instead of bumping past the partial
   // turn already present in the event log.
-  let turnNumber = continueThreadId
-    ? state.turnsCompleted ?? 0
+  let turnNumber = persistedLimitResume || continueThreadId
+    ? persistedLimitResume?.turnNumber
+      ? persistedLimitResume.turnNumber - 1
+      : state.turnsCompleted ?? 0
     : await reconcileTurnsCompletedWithEventLog(state);
   let phaseCheckReuse = null;
   let reuseLastChecksForNextTurn = reuseLastChecksRequested;
@@ -672,6 +693,7 @@ async function main() {
     log(`Ralph prompt: ${previewText(turnPrompt)}`);
     let turn;
     let transientRetryAttempts = 0;
+    let providerLimitRetryAttempts = 0;
     let sigtermRecoveryAttempts = 0;
     let codexIncompleteTaskRetryAttempts = 0;
     while (true) {
@@ -679,6 +701,7 @@ async function main() {
         const { events } = await thread.runStreamed(turnPrompt, {
           goal: loopGoal,
           continueSession: Boolean(continueThreadId),
+          turnNumber: turnNumber + 1,
         });
         turn = await collectStreamedTurn(events, {
           prompt: turnPrompt,
@@ -701,6 +724,59 @@ async function main() {
         });
         break;
       } catch (error) {
+        if (isCodexUsageLimitError(error) && !shutdownInProgress) {
+          providerLimitRetryAttempts += 1;
+          const retryMax = codexLimitRetryMax();
+          if (providerLimitRetryAttempts > retryMax) {
+            throw new Error(
+              `Codex usage limit persisted after ${retryMax} resume attempts: ` +
+                formatErrorMessage(error),
+            );
+          }
+
+          const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
+          const limit = codexLimitWait(error);
+          const pendingWait = await beginPersistedProviderLimitWait({
+            provider: CONFIG.provider,
+            threadId: retryThreadId,
+            turnNumber: turnNumber + 1,
+            waitMs: limit.waitMs,
+            message: limit.message,
+            attempt: providerLimitRetryAttempts,
+            reason: "usage_limit",
+          });
+          log(
+            `Codex usage limit hit during turn ${turnNumber + 1}: ${previewText(limit.message)}; ` +
+              `waiting ${formatDurationForLog(limit.waitMs)} before resuming ` +
+              `${retryThreadId ? `thread ${retryThreadId}` : "with a fresh thread"} ` +
+              `(attempt ${providerLimitRetryAttempts}/${retryMax}).`,
+          );
+          await appendRalphEventRecord(buildRalphLimitWaitEventRecord({
+            provider: CONFIG.provider,
+            threadId: retryThreadId,
+            turnNumber: turnNumber + 1,
+            waitMs: limit.waitMs,
+            resumeAt: pendingWait.resumeAt,
+            message: limit.message,
+            attempt: providerLimitRetryAttempts,
+            reason: "usage_limit",
+          }));
+          await sleepMs(limit.waitMs);
+          await finishPersistedProviderLimitWait(pendingWait);
+          activeThreadId = retryThreadId;
+          thread = null;
+          backend = createAgentBackend();
+          thread = activeThreadId
+            ? backend.resumeThread(activeThreadId, threadOptions)
+            : backend.startThread(threadOptions);
+          if (activeThreadId) {
+            turnPrompt =
+              "Ralph paused this thread because the Codex usage limit was hit. " +
+              "The limit window has passed; continue the active goal from where you left off.";
+          }
+          continue;
+        }
+
         if (isRecoverableCodexIncompleteTask(error) && !shutdownInProgress) {
           codexIncompleteTaskRetryAttempts += 1;
           const retryMax = codexIncompleteTaskRetryMax();
@@ -968,6 +1044,49 @@ function shouldRetryTransientProviderError(error) {
     return isClaudeTransientProviderMessage(message);
   }
   return false;
+}
+
+function isCodexUsageLimitError(error) {
+  if (CONFIG.provider !== "codex") {
+    return false;
+  }
+  if (error?.codexUsageLimit === true) {
+    return true;
+  }
+  const errorInfo = error?.codexErrorInfo ?? error?.codex_error_info ?? null;
+  if (errorInfo === "usage_limit_exceeded") {
+    return true;
+  }
+  const message = formatErrorMessage(error);
+  return /\byou(?:'|’)ve hit your usage limit\b/i.test(message) ||
+    (/\busage limit\b/i.test(message) && /\btry again at\b/i.test(message));
+}
+
+function codexLimitWait(error) {
+  const message = formatErrorMessage(error);
+  const nowMs = Date.now();
+  const resetAtMs = parseCodexUsageLimitResetAt(message);
+  let waitMs = CODEX_LIMIT_FALLBACK_WAIT_MS;
+  if (Number.isFinite(resetAtMs) && resetAtMs > nowMs) {
+    waitMs = resetAtMs - nowMs + CODEX_LIMIT_RESET_BUFFER_MS;
+  }
+  const minimum = positiveFiniteNumber(CODEX_LIMIT_MIN_WAIT_MS, 60_000);
+  const maximum = positiveFiniteNumber(CODEX_LIMIT_MAX_WAIT_MS, 8 * 24 * 60 * 60 * 1000);
+  return {
+    message,
+    resetAtMs,
+    waitMs: Math.min(Math.max(positiveFiniteNumber(waitMs, 15 * 60 * 1000), minimum), maximum),
+  };
+}
+
+function codexLimitRetryMax() {
+  return Number.isInteger(CODEX_LIMIT_RETRY_MAX) && CODEX_LIMIT_RETRY_MAX > 0
+    ? CODEX_LIMIT_RETRY_MAX
+    : 20;
+}
+
+function positiveFiniteNumber(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function isCodexTransientProviderMessage(message) {
@@ -4836,6 +4955,13 @@ class CodexExec {
             );
             codexSessionFailure.codexIncompleteTask = true;
             codexSessionFailure.threadId = args.threadId;
+          } else if (result?.status === "usage_limit") {
+            codexSessionFailure = new Error(
+              result.message ?? "Codex usage limit was reached.",
+            );
+            codexSessionFailure.codexUsageLimit = true;
+            codexSessionFailure.codexErrorInfo = result.codexErrorInfo ?? null;
+            codexSessionFailure.threadId = args.threadId;
           }
           terminateChildProcess(child, "SIGTERM");
         })
@@ -5233,6 +5359,15 @@ class ClaudeThread {
       }
 
       const waitMs = claudeLimitWaitMs(attempt.rateLimitInfo);
+      const pendingWait = await beginPersistedProviderLimitWait({
+        provider: "claude",
+        threadId: this._id,
+        turnNumber: turnOptions.turnNumber,
+        waitMs,
+        message: attempt.limitMessage,
+        attempt: limitRetries,
+        reason: "usage_limit",
+      });
       log(
         `Claude usage limit hit (${previewText(attempt.limitMessage)}); waiting ` +
           `${Math.ceil(waitMs / 60000)}m before resuming ` +
@@ -5244,9 +5379,11 @@ class ClaudeThread {
         type: "claude.limit_wait",
         thread_id: this._id,
         wait_ms: waitMs,
+        resume_at: pendingWait.resumeAt,
         message: attempt.limitMessage,
       };
       await sleepMs(waitMs);
+      await finishPersistedProviderLimitWait(pendingWait);
       if (this._id) {
         // Resume the same session with a continuation nudge. The loop goal is
         // still active in the session, so the stop hook keeps enforcing it,
@@ -5434,6 +5571,86 @@ function claudeLimitWaitMs(rateLimitInfo) {
     return Math.min(Math.max(wait, CLAUDE_LIMIT_MIN_WAIT_MS), CLAUDE_LIMIT_MAX_WAIT_MS);
   }
   return CLAUDE_LIMIT_FALLBACK_WAIT_MS;
+}
+
+async function beginPersistedProviderLimitWait({
+  provider,
+  threadId,
+  turnNumber = null,
+  waitMs,
+  message,
+  attempt,
+  reason = "usage_limit",
+}) {
+  const startedAtMs = Date.now();
+  return writePersistedLimitWait(LIMIT_WAIT_PATH, {
+    id: randomUUID(),
+    provider,
+    reason,
+    threadId,
+    turnNumber,
+    attempt,
+    startedAt: new Date(startedAtMs).toISOString(),
+    resumeAt: new Date(startedAtMs + waitMs).toISOString(),
+    message,
+  });
+}
+
+async function finishPersistedProviderLimitWait(wait) {
+  await clearPersistedLimitWait(LIMIT_WAIT_PATH, wait?.id ?? null);
+}
+
+async function handlePersistedProviderLimitWait(state) {
+  const wait = await readPersistedLimitWait(LIMIT_WAIT_PATH);
+  if (!wait) {
+    return null;
+  }
+
+  const turnNumber = wait.turnNumber ?? state.activeTurn?.turnNumber ??
+    (Number.isInteger(state.turnsCompleted) ? state.turnsCompleted + 1 : null);
+  const ignoreWait = process.argv.includes("--ignore-limit-wait") ||
+    parseBoolean(process.env.RALPH_IGNORE_LIMIT_WAIT, false);
+  const providerChanged = Boolean(wait.provider && wait.provider !== CONFIG.provider);
+  if (ignoreWait || providerChanged) {
+    const reason = providerChanged ? "provider_changed" : "operator_override";
+    log(
+      `${providerChanged ? `Persisted ${wait.provider} limit wait does not apply to ${CONFIG.provider}` :
+        "Ignoring persisted provider limit wait by request"}; retrying immediately.`,
+    );
+    await appendRalphEventRecord(buildRalphLimitWaitBypassEventRecord({
+      provider: wait.provider ?? CONFIG.provider,
+      threadId: wait.threadId ?? state.threadId ?? null,
+      turnNumber,
+      reason,
+      resumeAt: wait.resumeAt,
+    }));
+    await finishPersistedProviderLimitWait(wait);
+    return {
+      threadId: providerChanged ? null : wait.threadId ?? state.threadId ?? null,
+      turnNumber,
+      bypassed: true,
+    };
+  }
+
+  const remainingMs = Math.max(0, Date.parse(wait.resumeAt) - Date.now());
+  if (remainingMs > 0) {
+    log(
+      `${formatProviderLabel(wait.provider ?? CONFIG.provider)} usage limit wait remains active until ` +
+        `${wait.resumeAt}; sleeping ${formatDurationForLog(remainingMs)} before resuming the interrupted turn.`,
+    );
+    await sleepMs(remainingMs);
+  } else {
+    log(
+      `Persisted ${formatProviderLabel(wait.provider ?? CONFIG.provider)} usage limit has expired; ` +
+        "resuming the interrupted turn.",
+    );
+  }
+  await finishPersistedProviderLimitWait(wait);
+  return {
+    threadId: wait.threadId ?? state.threadId ?? null,
+    turnNumber,
+    bypassed: false,
+  };
 }
 
 function sleepMs(durationMs) {
@@ -6270,6 +6487,7 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
             timestampMs,
             turnId: payload?.turn_id ?? null,
             lastAgentMessage: payload?.last_agent_message ?? null,
+            error: payload?.error ?? null,
           };
         }
       } else if (
@@ -6296,6 +6514,13 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
     Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
   ) {
     return { status: "pending" };
+  }
+  if (latestLifecycleEvent.error?.codex_error_info === "usage_limit_exceeded") {
+    return {
+      status: "usage_limit",
+      message: latestLifecycleEvent.error.message ?? "Codex usage limit was reached.",
+      codexErrorInfo: latestLifecycleEvent.error.codex_error_info,
+    };
   }
   const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
   const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
@@ -7166,6 +7391,9 @@ function summarizeEvent(event) {
   if (event.type === "ralph.limit_wait") {
     return `limit_wait ${formatDurationForLog(event.wait_ms ?? 0)} ${previewText(event.message ?? "")}`;
   }
+  if (event.type === "ralph.limit_wait_bypassed") {
+    return `limit_wait_bypassed ${event.reason ?? "unknown"}`;
+  }
   if (event.type === "ralph.agent_recovery") {
     return `agent_recovery ${event.reason ?? "unknown"} attempt=${event.attempt ?? "?"}`;
   }
@@ -7193,7 +7421,16 @@ function buildRalphPromptEventRecord({ prompt, threadId, turnNumber }) {
   };
 }
 
-function buildRalphLimitWaitEventRecord({ provider, threadId, turnNumber, waitMs, message, attempt, reason }) {
+function buildRalphLimitWaitEventRecord({
+  provider,
+  threadId,
+  turnNumber,
+  waitMs,
+  resumeAt = null,
+  message,
+  attempt,
+  reason,
+}) {
   if (!Number.isFinite(waitMs) || waitMs <= 0) {
     return null;
   }
@@ -7210,7 +7447,30 @@ function buildRalphLimitWaitEventRecord({ provider, threadId, turnNumber, waitMs
       reason,
       attempt,
       wait_ms: waitMs,
+      ...(resumeAt ? { resume_at: resumeAt } : {}),
       message,
+    },
+  };
+}
+
+function buildRalphLimitWaitBypassEventRecord({
+  provider,
+  threadId,
+  turnNumber,
+  reason,
+  resumeAt,
+}) {
+  return {
+    recordedAt: new Date().toISOString(),
+    threadId,
+    turnNumber,
+    eventType: "ralph.limit_wait_bypassed",
+    event: {
+      type: "ralph.limit_wait_bypassed",
+      sender: "ralph",
+      provider,
+      reason,
+      resume_at: resumeAt,
     },
   };
 }
