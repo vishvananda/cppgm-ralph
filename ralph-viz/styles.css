@@ -523,6 +523,23 @@ body.is-static-viz .combined-view-toggle {
 
 .accordion-body[hidden] { display: none !important; }
 
+.accordion {
+  position: relative;
+}
+
+.accordion-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0.45rem;
+  cursor: pointer;
+}
+
+.accordion-rail:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .accordion-header {
   appearance: none;
   border: 0;
@@ -1021,22 +1038,8 @@ body.is-static-viz .combined-view-toggle {
   border-radius: 3px;
   padding: 0.4rem 0.6rem;
   margin: 0.2rem 0 0.2rem 1rem;
-  max-height: 400px;
-  overflow-y: auto;
   color: #aaa;
   line-height: 1.4;
-}
-
-.btn-more {
-  display: inline-block;
-  margin: 0.15rem 0 0.15rem 1rem;
-  font-size: 0.72rem;
-  color: var(--accent);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
 }
 
 /* Message */

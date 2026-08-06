@@ -79,7 +79,6 @@ const state = {
   refreshInFlight: false,
   openEntryKeys: new Set(),
   fullCardTurns: new Set(),
-  expandedOutputKeys: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
@@ -1605,39 +1604,14 @@ function commandEntryRecordedAt(entry) {
     entry.startRecord?.recordedAt;
 }
 
-const OUTPUT_PREVIEW_CHAR_LIMIT = 2000;
-
 function appendExpandableText(container, text, key, className) {
   const el = document.createElement(className === "thought-body" ? "div" : "pre");
   el.className = className;
   if (key) {
     el.dataset.contentScrollKey = key;
   }
-  const expanded = key ? state.expandedOutputKeys.has(key) : false;
-  if (expanded || text.length <= OUTPUT_PREVIEW_CHAR_LIMIT) {
-    el.textContent = text;
-    container.append(el);
-    return;
-  }
-  let cut = text.lastIndexOf("\n", OUTPUT_PREVIEW_CHAR_LIMIT);
-  if (cut <= 0) {
-    cut = OUTPUT_PREVIEW_CHAR_LIMIT;
-  }
-  const totalLines = text.split(/\r?\n/).length;
-  el.textContent = text.slice(0, cut);
-  const more = document.createElement("button");
-  more.className = "btn-more";
-  more.textContent = `Show all (${fmtInt(totalLines)} lines)`;
-  more.onclick = () => {
-    const scrollSnapshot = captureScrollSnapshot();
-    if (key) {
-      state.expandedOutputKeys.add(key);
-    }
-    el.textContent = text;
-    more.remove();
-    markLayoutScrollIntent(scrollSnapshot);
-  };
-  container.append(el, more);
+  el.textContent = text;
+  container.append(el);
 }
 
 function appendFullCommand(body, command) {
@@ -1698,7 +1672,7 @@ function createAccordion(root, options = {}) {
   }
 
   setOpen(Boolean(initialOpen));
-  header.addEventListener("click", () => {
+  const toggleOpen = () => {
     const scrollSnapshot = captureScrollSnapshot();
     const open = !root.classList.contains("is-open");
     scrollDebug("accordion-click-before", {
@@ -1727,10 +1701,22 @@ function createAccordion(root, options = {}) {
       root: describeElementForScroll(root),
       header: describeElementForScroll(header),
     });
-  });
+  };
+  header.addEventListener("click", toggleOpen);
 
   root.append(header, body);
+  if (key) {
+    addAccordionRail(root, toggleOpen);
+  }
   return { header, body, setOpen };
+}
+
+function addAccordionRail(root, toggleOpen) {
+  const rail = document.createElement("div");
+  rail.className = "accordion-rail";
+  rail.setAttribute("aria-hidden", "true");
+  rail.addEventListener("click", toggleOpen);
+  root.append(rail);
 }
 
 function renderMessageCard(record) {
