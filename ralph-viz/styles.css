@@ -747,8 +747,7 @@ body.is-static-viz .combined-view-toggle {
   body.is-combined-view .toolbar label[for="codexDetail"],
   body.is-combined-view #codexDetail,
   body.is-combined-view #eventFilter,
-  body.is-combined-view #eventCount,
-  body.is-combined-view .full-view-toggle {
+  body.is-combined-view #eventCount {
     display: none;
   }
 
@@ -883,6 +882,24 @@ body.is-static-viz .combined-view-toggle {
   padding: 0.2rem 0 0.4rem 1rem;
   border-left: 2px solid #252525;
   margin-left: 0.3rem;
+}
+
+.turn-more {
+  appearance: none;
+  align-self: flex-start;
+  margin: 0.2rem 0 0.3rem 1rem;
+  padding: 0.15rem 0.5rem;
+  background: none;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.turn-more:hover {
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 /* --- Event cards --- */

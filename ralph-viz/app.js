@@ -19,7 +19,6 @@ const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
 const autoRefreshToggle = document.getElementById("autoRefresh");
 const combinedViewToggle = document.getElementById("combinedView");
-const fullViewToggle = document.getElementById("fullView");
 
 const AUTO_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
@@ -79,6 +78,7 @@ const state = {
   openTurnReloadTimer: null,
   refreshInFlight: false,
   openEntryKeys: new Set(),
+  fullCardTurns: new Set(),
   expandedOutputKeys: new Set(),
   userScrollVersion: 0,
   latestLayoutScrollSnapshot: null,
@@ -2707,12 +2707,8 @@ function expandableEntryKey(entry) {
   return null;
 }
 
-function isFullCardView() {
-  return fullViewToggle?.checked ?? false;
-}
-
-function displayEntryWindow(entries) {
-  if (isFullCardView() || entries.length <= COMPACT_TURN_CARD_LIMIT) {
+function displayEntryWindow(entries, turnKey) {
+  if (state.fullCardTurns.has(turnKey) || entries.length <= COMPACT_TURN_CARD_LIMIT) {
     return {
       entries,
       total: entries.length,
@@ -2729,6 +2725,9 @@ function displayEntryWindow(entries) {
     visibleIndices.add(index);
   }
   entries.forEach((entry, index) => {
+    if (isFileChangeEntry(entry)) {
+      visibleIndices.add(index);
+    }
     const key = expandableEntryKey(entry);
     if (key && state.openEntryKeys.has(key)) {
       visibleIndices.add(index);
@@ -2745,6 +2744,14 @@ function displayEntryWindow(entries) {
     latestCount: COMPACT_TURN_CARD_LIMIT,
     openExtra,
   };
+}
+
+function isFileChangeEntry(entry) {
+  return (
+    entry?.kind === "event" &&
+    entry.record?.eventType === "item.completed" &&
+    entry.record?.event?.item?.type === "file_change"
+  );
 }
 
 function turnCardWindowText(windowInfo) {
@@ -5634,7 +5641,7 @@ function renderTimeline(records) {
     }));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const displayEntries = buildDisplayEntries(items, { subagentEstimateModel });
-    const entryWindow = displayEntryWindow(displayEntries);
+    const entryWindow = displayEntryWindow(displayEntries, turn);
     const cardWindowText = turnCardWindowText(entryWindow);
     const usageHtml = usage ? ` <span class="turn-usage">${usageText(usage)}</span>` : "";
     const tsHtml = ts ? ` <span class="turn-tests${ts.allTestsPassed ? " turn-tests-pass" : ""}">${testStatusText(ts, { progress })}</span>` : "";
@@ -5648,6 +5655,21 @@ function renderTimeline(records) {
       ? ` <span class="turn-phase${phase.allRequiredPassed ? " turn-phase-pass" : ""}">${escapeHtml(phaseStatusText(phase))}</span>`
       : "";
     summary.innerHTML = `<strong>${label}</strong> <span class="turn-info">${infoText}</span>${durationHtml}${subagentHtml}${cardWindowHtml}${phaseHtml}${progressHtml}${tsHtml}${usageHtml}`;
+
+    if (entryWindow.hidden > 0) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "turn-more";
+      more.textContent = `Show all ${entryWindow.total} cards (${entryWindow.hidden} earlier hidden)`;
+      const expandTurn = turn;
+      more.addEventListener("click", () => {
+        const snapshot = captureScrollSnapshot();
+        state.fullCardTurns.add(expandTurn);
+        rerenderCurrentViewPreservingScroll();
+        markLayoutScrollIntent(snapshot);
+      });
+      feed.append(more);
+    }
 
     entryWindow.entries.forEach((entry, offset) => {
       const el = renderDisplayEntry(entry);
@@ -6040,7 +6062,7 @@ async function loadCombinedRuns(options = {}) {
   hideRunDocsPanel();
   hideRunComparisonPanel();
   setViewTitles("Active Runs", "Recent Cards");
-  state.selectedRun = runSelect.value || state.selectedRun;
+  setSelectedRun(runSelect.value || state.selectedRun);
   const activeRuns = state.staticMode ? staticCombinedRuns() : state.runs.filter(isActiveRunMeta);
   const query = combinedRunQueryParams().toString();
   const loaded = await Promise.all(activeRuns.map(async (run) => {
@@ -6088,13 +6110,20 @@ async function loadCombinedRuns(options = {}) {
   restoreScrollAfterRender(scrollSnapshot, { immediate: true });
 }
 
+function setSelectedRun(id) {
+  if (state.selectedRun !== id) {
+    state.fullCardTurns.clear();
+  }
+  state.selectedRun = id;
+}
+
 async function loadRun(id, options = {}) {
   if (!id) return;
   setCombinedModeActive(false);
   hideRunDocsPanel();
   setViewTitles("Summary", "Turns");
   scrollDebug("load-run-start", { id, hasScrollSnapshot: Boolean(options.scrollSnapshot) });
-  state.selectedRun = id;
+  setSelectedRun(id);
   setUrlParam("run", id);
   const detailParams = codexDetailQueryParams();
   const detailQuery = detailParams.toString();
@@ -7661,7 +7690,7 @@ reloadRun.addEventListener("click", () => {
 });
 runSelect.addEventListener("change", e => {
   if (currentViewerMode() === "compare") {
-    state.selectedRun = e.target.value;
+    setSelectedRun(e.target.value);
     setUrlParam("run", e.target.value);
     return;
   }
@@ -7706,9 +7735,6 @@ if (combinedViewToggle) {
       scrollSnapshot: captureScrollSnapshot({ preferScrollTop: true }),
     });
   });
-}
-if (fullViewToggle) {
-  fullViewToggle.addEventListener("change", rerenderCurrentViewPreservingScroll);
 }
 if (runComparisonThrough) {
   runComparisonThrough.addEventListener("change", () => {
