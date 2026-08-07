@@ -107,6 +107,9 @@ function applyPrismTheme(theme) {
 
 function scheduleThemeChartRefresh() {
   window.requestAnimationFrame(() => {
+    if (isRunsPage() && !isCombinedView() && state.events.length) {
+      renderProgressDock(buildSummary(state.events, state.shapeUsage, selectedRunMeta()));
+    }
     if (currentViewerMode() === "compare") {
       renderComparisonView().catch((error) => console.error("theme chart refresh failed", error));
       return;
@@ -1037,7 +1040,12 @@ function renderProgressDock(summary) {
     compact: true,
     expandableUsage: true,
   });
-  progressDock.innerHTML = details || '<span class="muted">No run</span>';
+  setProgressDockHtml(details || '<span class="muted">No run</span>');
+  hydrateDockProgressChart(
+    progressDock,
+    summary?.latestPhaseStatus?.status ?? null,
+    summary?.testProgress?.latest ?? null,
+  );
   const usage = progressDock.querySelector(".dock-usage[aria-expanded]");
   usage?.addEventListener("click", () => {
     state.dockUsageExpanded = !state.dockUsageExpanded;
@@ -1058,10 +1066,13 @@ function runDetailHtml(summary, run, options = {}) {
     ? `<strong>${escapeHtml(run?.label ?? state.selectedRun ?? "No run")}</strong>${runRepositoryLinkHtml(run)}`
     : "";
   if (options.compact) {
+    const progressModel = TEST_STATUS_SUMMARY?.buildTurnProgressModel(progress);
     const progressText = dockPhaseProgressText(phaseStatus, progress);
-    const progressHtml = progressText
-      ? `<span class="dock-main${progress?.status === "pass" ? " dock-main-pass" : ""}">${escapeHtml(progressText)}</span>`
-      : '<span class="muted">test progress n/a</span>';
+    const progressHtml = progressModel
+      ? dockProgressBarHtml(phaseStatus, progress, progressModel)
+      : progressText
+        ? `<span class="dock-main${progress?.status === "pass" ? " dock-main-pass" : ""}">${escapeHtml(progressText)}</span>`
+        : '<span class="muted">test progress n/a</span>';
     const priorFailures = turnPriorFailureSummary(
       phaseStatus,
       testStatus,
@@ -1107,6 +1118,198 @@ function runDetailHtml(summary, run, options = {}) {
     ${testHtml}
     ${updatedHtml}
   `;
+}
+
+function dockProgressBarHtml(phase, progress, model) {
+  const context = [phase?.phase, phaseTargetText(phase) || progress?.stage]
+    .filter(Boolean)
+    .join(" / ");
+  const ariaLabel = dockProgressAriaLabel(context, model);
+  const fallback = model.segments.map((segment) => `
+    <span class="dock-progress-fallback-segment dock-progress-${escapeHtml(segment.key)}"
+      style="flex-grow:${segment.value}"
+      title="${escapeHtml(`${segment.label}: ${segment.value}`)}">
+      <span>${escapeHtml(segment.text)}</span>
+    </span>
+  `).join("");
+  return `
+    <div class="dock-progress-block${progress?.status === "pass" ? " dock-progress-pass" : ""}">
+      <div class="dock-progress-heading">
+        <span class="dock-progress-context">${escapeHtml(context || "test progress")}</span>
+        <span class="dock-progress-total">${fmtInt(model.total)} total</span>
+      </div>
+      <div class="dock-progress-echart" role="img" aria-label="${escapeHtml(ariaLabel)}">
+        <div class="dock-progress-fallback">${fallback}</div>
+      </div>
+      ${dockProgressLegendHtml(model)}
+    </div>
+  `;
+}
+
+function dockProgressLegendHtml(model) {
+  const items = model.hasStart
+    ? [
+        { key: "start", text: `start ${fmtInt(model.start)}` },
+        {
+          key: model.delta < 0 ? "lost" : "gained",
+          text: `${model.delta >= 0 ? "+" : ""}${fmtInt(model.delta)} turn`,
+        },
+      ]
+    : [{ key: "current", text: `current ${fmtInt(model.current)}` }];
+  items.push(
+    { key: "remaining", text: `${fmtInt(model.remaining)} left` },
+  );
+  return `<div class="dock-progress-legend">${items.map((item) => `
+    <span class="dock-progress-legend-item">
+      <span class="dock-progress-swatch dock-progress-${escapeHtml(item.key)}"></span>
+      ${escapeHtml(item.text)}
+    </span>
+  `).join("")}</div>`;
+}
+
+function dockProgressAriaLabel(context, model) {
+  const parts = [context || "Test progress"];
+  if (model.hasStart) {
+    parts.push(`started with ${model.start} passing`);
+    parts.push(model.delta >= 0
+      ? `added ${model.delta} this turn`
+      : `lost ${Math.abs(model.delta)} this turn`);
+  }
+  parts.push(`${model.current} currently passing`);
+  parts.push(`${model.remaining} remaining`);
+  parts.push(`${model.total} total`);
+  return parts.join(", ");
+}
+
+function hydrateDockProgressChart(container, phase, progress) {
+  const el = container?.querySelector?.(".dock-progress-echart");
+  const model = TEST_STATUS_SUMMARY?.buildTurnProgressModel(progress);
+  if (!el || !model) return;
+  const render = () => {
+    if (!el.isConnected || !window.echarts) return;
+    renderDockProgressChart(el, phase, progress, model);
+  };
+  if (window.echarts) {
+    render();
+  } else {
+    ensureEChartsLoaded().then((loaded) => {
+      if (loaded) render();
+    });
+  }
+}
+
+function renderDockProgressChart(el, phase, progress, model) {
+  el._ralphResizeObserver?.disconnect?.();
+  el._ralphResizeObserver = null;
+  window.echarts.getInstanceByDom?.(el)?.dispose?.();
+  const fallback = el.querySelector(".dock-progress-fallback");
+  if (fallback) fallback.hidden = true;
+  const chart = window.echarts.init(el, null, { renderer: "svg" });
+  const chartWidth = Math.max(el.clientWidth, 240);
+  const colors = {
+    start: cssThemeColor("--progress-start", "#496985"),
+    current: cssThemeColor("--progress-start", "#496985"),
+    gained: cssThemeColor("--progress-gain", "#2f8f50"),
+    lost: cssThemeColor("--progress-loss", "#a94343"),
+    remaining: cssThemeColor("--progress-remaining", "#242424"),
+  };
+  const textColors = {
+    start: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    current: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    gained: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    lost: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    remaining: cssThemeColor("--progress-remaining-text", "#b9b9b9"),
+  };
+  chart.setOption({
+    animation: false,
+    aria: {
+      enabled: true,
+      description: dockProgressAriaLabel(
+        [phase?.phase, phaseTargetText(phase) || progress?.stage].filter(Boolean).join(" / "),
+        model,
+      ),
+    },
+    backgroundColor: "transparent",
+    grid: { left: 0, right: 0, top: 0, bottom: 0 },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "none" },
+      backgroundColor: cssThemeColor("--surface-raised", "#171717"),
+      borderColor: cssThemeColor("--border", "#333"),
+      textStyle: { color: cssThemeColor("--text", "#ddd"), fontSize: 11 },
+      formatter: () => dockProgressTooltipHtml(model),
+    },
+    xAxis: {
+      type: "value",
+      min: 0,
+      max: model.total,
+      show: false,
+    },
+    yAxis: {
+      type: "category",
+      data: ["progress"],
+      show: false,
+    },
+    series: model.segments.map((segment, index) => {
+      const estimatedWidth = (segment.value / model.total) * chartWidth;
+      const labelWidth = 12 + segment.text.length * 6.5;
+      const first = index === 0;
+      const last = index === model.segments.length - 1;
+      return {
+        name: segment.label,
+        type: "bar",
+        stack: "progress",
+        barWidth: 18,
+        emphasis: { disabled: true },
+        itemStyle: {
+          color: colors[segment.key],
+          borderRadius: [first ? 4 : 0, last ? 4 : 0, last ? 4 : 0, first ? 4 : 0],
+        },
+        label: {
+          show: estimatedWidth >= labelWidth,
+          position: "inside",
+          formatter: segment.text,
+          color: textColors[segment.key],
+          fontSize: 10,
+          fontWeight: 600,
+        },
+        data: [segment.value],
+      };
+    }),
+  });
+  const resize = () => chart.resize();
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(resize);
+    observer.observe(el);
+    el._ralphResizeObserver = observer;
+  }
+}
+
+function dockProgressTooltipHtml(model) {
+  const delta = `${model.delta >= 0 ? "+" : ""}${fmtInt(model.delta)}`;
+  return `
+    <div class="dock-progress-tooltip">
+      ${model.hasStart ? `<div><span>Start</span><strong>${fmtInt(model.start)}</strong></div>` : ""}
+      ${model.hasStart ? `<div><span>This turn</span><strong>${delta}</strong></div>` : ""}
+      <div><span>Current</span><strong>${fmtInt(model.current)}</strong></div>
+      <div><span>Remaining</span><strong>${fmtInt(model.remaining)}</strong></div>
+      <div><span>Total</span><strong>${fmtInt(model.total)}</strong></div>
+    </div>
+  `;
+}
+
+function disposeProgressDockChart(container = progressDock) {
+  const el = container?.querySelector?.(".dock-progress-echart");
+  if (!el) return;
+  el._ralphResizeObserver?.disconnect?.();
+  el._ralphResizeObserver = null;
+  window.echarts?.getInstanceByDom?.(el)?.dispose?.();
+}
+
+function setProgressDockHtml(html) {
+  if (!progressDock) return;
+  disposeProgressDockChart(progressDock);
+  progressDock.innerHTML = html;
 }
 
 function scheduleProgressDockSpaceUpdate() {
@@ -6372,7 +6575,7 @@ async function loadRuns(options = {}) {
     eventCountEl.textContent = "";
     state.shapeUsage = null;
     if (progressDock) {
-      progressDock.innerHTML = '<span class="muted">No runs found</span>';
+      setProgressDockHtml('<span class="muted">No runs found</span>');
       updateProgressDockSpace();
     }
     return;
@@ -6546,7 +6749,7 @@ async function renderComparisonView() {
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
     if (progressDock) {
-      progressDock.innerHTML = '<span class="muted">No static comparison data</span>';
+      setProgressDockHtml('<span class="muted">No static comparison data</span>');
       updateProgressDockSpace();
     }
     return;
@@ -6616,11 +6819,11 @@ async function renderComparisonView() {
   hydrateComparisonCharts(charts, rows, runOrder, orderedRuns);
   eventCountEl.textContent = `${fmtInt(rows.length)} PAs / ${fmtInt(comparison.runs.length)} runs`;
   if (progressDock) {
-    progressDock.innerHTML = `
+    setProgressDockHtml(`
       <strong>Compare</strong>
       <span class="dock-main">through pa${fmtInt(through)}</span>
       <span class="dock-meta">${fmtInt(comparison.runs.length)} runs</span>
-    `;
+    `);
     updateProgressDockSpace();
   }
 }
@@ -7506,11 +7709,11 @@ function renderCombinedProgressDock(entries) {
     .sort()
     .at(-1) ?? null;
   const latest = latestAt ? fmtShort(latestAt) : "";
-  progressDock.innerHTML = `
+  setProgressDockHtml(`
     <strong>Combined</strong>
     <span class="dock-main">${fmtInt(activeCount)} active run${activeCount === 1 ? "" : "s"}</span>
     ${latest ? `<span class="dock-meta">updated ${escapeHtml(latest)}</span>` : ""}
-  `;
+  `);
   updateProgressDockSpace();
 }
 

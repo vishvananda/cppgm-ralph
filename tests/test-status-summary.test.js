@@ -3,11 +3,49 @@ import test from "node:test";
 import "../ralph-viz/test-status-summary.js";
 
 const {
+  buildTurnProgressModel,
   hasAuthoritativePassingTotal,
   inferStageTotal,
   passingPrefixTotal,
   summarizePriorStageFailures,
 } = globalThis.RALPH_TEST_STATUS_SUMMARY;
+
+test("turn progress splits start, additions, and remaining tests", () => {
+  const model = buildTurnProgressModel({
+    start: { passed: 222, total: 249 },
+    current: { passed: 235, total: 249 },
+  });
+
+  assert.deepEqual(model, {
+    total: 249,
+    current: 235,
+    start: 222,
+    hasStart: true,
+    delta: 13,
+    remaining: 14,
+    segments: [
+      { key: "start", label: "start", value: 222, text: "222" },
+      { key: "gained", label: "this turn", value: 13, text: "+13" },
+      { key: "remaining", label: "left", value: 14, text: "14" },
+    ],
+  });
+});
+
+test("turn progress represents regressions without changing the total width", () => {
+  const model = buildTurnProgressModel({
+    start: { passed: 222, total: 249 },
+    current: { passed: 210, total: 249 },
+  });
+
+  assert.equal(model.delta, -12);
+  assert.equal(model.remaining, 39);
+  assert.deepEqual(model.segments, [
+    { key: "current", label: "current", value: 210, text: "210" },
+    { key: "lost", label: "lost this turn", value: 12, text: "-12" },
+    { key: "remaining", label: "left beyond start", value: 27, text: "27" },
+  ]);
+  assert.equal(model.segments.reduce((sum, segment) => sum + segment.value, 0), 249);
+});
 
 test("complete passing stage totals outrank unexplained through-run residuals", () => {
   assert.equal(hasAuthoritativePassingTotal({

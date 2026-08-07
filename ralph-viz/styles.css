@@ -26,6 +26,12 @@
   --goal-accent: #8a6;
   --goal-text: #cfc;
   --chart-empty: #111;
+  --progress-start: #496985;
+  --progress-gain: #2f8f50;
+  --progress-loss: #a94343;
+  --progress-remaining: #242424;
+  --progress-bar-text: #f7f7f7;
+  --progress-remaining-text: #b9b9b9;
   --diff-block-bg: #151515;
   --diff-block-text: #aaa;
   --diff-block-border: #3a3124;
@@ -63,6 +69,12 @@
   --goal-accent: #397748;
   --goal-text: #245b34;
   --chart-empty: #fff;
+  --progress-start: #547a96;
+  --progress-gain: #2c7a48;
+  --progress-loss: #b44842;
+  --progress-remaining: #deded9;
+  --progress-bar-text: #fff;
+  --progress-remaining-text: #3f3f3d;
   --diff-block-bg: #f5f5f2;
   --diff-block-text: #292929;
   --diff-block-border: #a58a58;
@@ -100,6 +112,12 @@
     --goal-accent: #397748;
     --goal-text: #245b34;
     --chart-empty: #fff;
+    --progress-start: #547a96;
+    --progress-gain: #2c7a48;
+    --progress-loss: #b44842;
+    --progress-remaining: #deded9;
+    --progress-bar-text: #fff;
+    --progress-remaining-text: #3f3f3d;
     --diff-block-bg: #f5f5f2;
     --diff-block-text: #292929;
     --diff-block-border: #a58a58;
@@ -226,6 +244,113 @@ button:hover { background: var(--control-hover); }
 .dock-prior-failures { color: var(--bad); font-weight: 600; }
 .dock-tests { color: #b08030; }
 .dock-tests-pass { color: var(--ok); }
+.dock-progress-block {
+  display: grid;
+  flex: 1 1 28rem;
+  gap: 0.08rem;
+  min-width: min(100%, 18rem);
+  max-width: 44rem;
+}
+.dock-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  line-height: 1.1;
+}
+.dock-progress-context {
+  color: #d0a64a;
+  font-size: 0.72rem;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-progress-pass .dock-progress-context { color: var(--ok); }
+.dock-progress-total {
+  color: var(--muted);
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+.dock-progress-echart {
+  height: 1.3rem;
+  min-width: 0;
+  position: relative;
+  width: 100%;
+}
+.dock-progress-fallback {
+  display: flex;
+  height: 1.125rem;
+  overflow: hidden;
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+}
+.dock-progress-fallback[hidden] { display: none; }
+.dock-progress-fallback-segment {
+  display: grid;
+  flex-basis: 0;
+  min-width: 0;
+  place-items: center;
+  color: var(--progress-bar-text);
+  font-size: 0.63rem;
+  font-weight: 600;
+  overflow: hidden;
+}
+.dock-progress-fallback-segment > span {
+  padding: 0 0.2rem;
+  overflow: hidden;
+}
+.dock-progress-start,
+.dock-progress-current { background: var(--progress-start); }
+.dock-progress-gained { background: var(--progress-gain); }
+.dock-progress-lost { background: var(--progress-loss); }
+.dock-progress-remaining {
+  background: var(--progress-remaining);
+  color: var(--progress-remaining-text);
+}
+.dock-progress-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem 0.65rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.dock-progress-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+.dock-progress-swatch {
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 1px;
+  flex: 0 0 auto;
+}
+.dock-progress-tooltip {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 8rem;
+}
+.dock-progress-tooltip > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.dock-progress-tooltip span { color: var(--muted); }
+.progress-dock .dock-progress-tooltip strong {
+  color: var(--text);
+  font: inherit;
+  max-width: none;
+  overflow: visible;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .progress-dock button.dock-usage {
   appearance: none;
   padding: 0.05rem 0.25rem;
@@ -792,6 +917,16 @@ body.is-static-viz .combined-view-toggle {
 
   .dock-meta {
     margin-left: 0;
+  }
+
+  .dock-progress-block {
+    flex-basis: 100%;
+    max-width: none;
+    order: 3;
+  }
+
+  .dock-progress-legend {
+    flex-wrap: wrap;
   }
 
   .combined-run-details {

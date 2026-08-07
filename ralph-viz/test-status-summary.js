@@ -90,6 +90,56 @@
     };
   }
 
+  function clampProgressCount(value, total) {
+    return Math.max(0, Math.min(total, Number.isFinite(value) ? value : 0));
+  }
+
+  function buildTurnProgressModel(progress) {
+    const total = Number.isFinite(progress?.current?.total) && progress.current.total > 0
+      ? progress.current.total
+      : null;
+    if (!total) return null;
+
+    const current = clampProgressCount(progress.current.passed, total);
+    const hasStart = Number.isFinite(progress?.start?.passed);
+    const start = hasStart ? clampProgressCount(progress.start.passed, total) : current;
+    const delta = current - start;
+    const remaining = total - current;
+    let segments;
+    if (!hasStart) {
+      segments = [
+        { key: "current", label: "current", value: current, text: String(current) },
+        { key: "remaining", label: "left", value: remaining, text: String(remaining) },
+      ];
+    } else if (delta >= 0) {
+      segments = [
+        { key: "start", label: "start", value: start, text: String(start) },
+        { key: "gained", label: "this turn", value: delta, text: `+${delta}` },
+        { key: "remaining", label: "left", value: remaining, text: String(remaining) },
+      ];
+    } else {
+      segments = [
+        { key: "current", label: "current", value: current, text: String(current) },
+        { key: "lost", label: "lost this turn", value: -delta, text: String(delta) },
+        {
+          key: "remaining",
+          label: "left beyond start",
+          value: Math.max(0, total - start),
+          text: String(Math.max(0, total - start)),
+        },
+      ];
+    }
+    return {
+      total,
+      current,
+      start,
+      hasStart,
+      delta,
+      remaining,
+      segments: segments.filter((segment) => segment.value > 0),
+    };
+  }
+
   // Test commands often report only part of a through run. Track the newest
   // explicit result for each prior PA so a partial report cannot erase other
   // known regressions and a later passing rerun can clear an earlier failure.
@@ -136,6 +186,7 @@
 
   root.RALPH_TEST_STATUS_SUMMARY = Object.freeze({
     hasAuthoritativePassingTotal,
+    buildTurnProgressModel,
     inferStageTotal,
     passingPrefixTotal,
     summarizePriorStageFailures,
