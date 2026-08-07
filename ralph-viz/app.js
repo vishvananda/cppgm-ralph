@@ -1134,14 +1134,13 @@ function dockProgressBarHtml(phase, progress, model) {
   `).join("");
   return `
     <div class="dock-progress-block${progress?.status === "pass" ? " dock-progress-pass" : ""}">
-      <div class="dock-progress-heading">
-        <span class="dock-progress-context">${escapeHtml(context || "test progress")}</span>
-        <span class="dock-progress-total">${fmtInt(model.total)} total</span>
+      <span class="dock-progress-context">${escapeHtml(context || "test progress")}</span>
+      <div class="dock-progress-meter">
+        <div class="dock-progress-echart" role="img" aria-label="${escapeHtml(ariaLabel)}">
+          <div class="dock-progress-fallback">${fallback}</div>
+        </div>
+        ${dockProgressLegendHtml(model)}
       </div>
-      <div class="dock-progress-echart" role="img" aria-label="${escapeHtml(ariaLabel)}">
-        <div class="dock-progress-fallback">${fallback}</div>
-      </div>
-      ${dockProgressLegendHtml(model)}
     </div>
   `;
 }
@@ -1158,10 +1157,11 @@ function dockProgressLegendHtml(model) {
     : [{ key: "current", text: `current ${fmtInt(model.current)}` }];
   items.push(
     { key: "remaining", text: `${fmtInt(model.remaining)} left` },
+    { key: "total", text: `${fmtInt(model.total)} total` },
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
-    <span class="dock-progress-legend-item">
-      <span class="dock-progress-swatch dock-progress-${escapeHtml(item.key)}"></span>
+    <span class="dock-progress-legend-item${item.key === "total" ? " dock-progress-legend-total" : ""}">
+      ${item.key === "total" ? "" : `<span class="dock-progress-swatch dock-progress-${escapeHtml(item.key)}"></span>`}
       ${escapeHtml(item.text)}
     </span>
   `).join("")}</div>`;
@@ -1342,9 +1342,9 @@ function updateProgressDockSpace() {
 function dockTurnText(turn) {
   const parts = [`turn ${turn.turn}`];
   if (turn.duration) {
-    parts.push(`time ${turn.duration}`);
+    parts.push(turn.duration);
   }
-  parts.push(`cost ${turn.cost || "n/a"}`);
+  parts.push(turn.cost || "n/a");
   return parts.join(" / ");
 }
 
