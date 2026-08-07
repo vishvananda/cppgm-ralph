@@ -15,6 +15,81 @@
     return stage.status === "pass" ? 0 : null;
   }
 
+  // A through-run aggregate can include tests not represented in its stage
+  // rows. Do not assign that unexplained residual to a stage whose own row is
+  // already a complete passing result.
+  function hasAuthoritativePassingTotal(stage) {
+    return (
+      stage?.status === "pass" &&
+      Number.isFinite(stage.passed) &&
+      Number.isFinite(stage.total) &&
+      stage.total > 0 &&
+      stage.passed === stage.total
+    );
+  }
+
+  function passingPrefixTotal(status) {
+    if (!status?.allTestsPassed || status?.targetSubset) return null;
+    const stages = Array.isArray(status.stages) ? status.stages : [];
+    if (
+      stages.length === 0 ||
+      !stages.every((stage, index) =>
+        stageNumber(stage?.name) === index + 1 && hasAuthoritativePassingTotal(stage))
+    ) {
+      return null;
+    }
+    const total = Number.isFinite(status.testsTotal) && status.testsTotal > 0
+      ? status.testsTotal
+      : null;
+    return total ? { stage: stages.at(-1).name, total } : null;
+  }
+
+  function inferStageTotal(status, prefixTotals) {
+    if (!status || status.targetSubset) return null;
+    const stages = Array.isArray(status.stages) ? status.stages : [];
+    const testsTotal = Number.isFinite(status.testsTotal) && status.testsTotal > 0
+      ? status.testsTotal
+      : null;
+    if (stages.length === 0 || !testsTotal) return null;
+
+    const targetStage =
+      (/^pa\d+$/.test(status.targetStage ?? "") ? status.targetStage : null) ??
+      (/^pa\d+$/.test(status.failingStage ?? "") ? status.failingStage : null) ??
+      stages.find((stage) => stage?.status === "fail")?.name ??
+      stages.at(-1)?.name;
+    const targetIndex = stages.findIndex((stage) => stage?.name === targetStage);
+    if (targetIndex < 0 || hasAuthoritativePassingTotal(stages[targetIndex])) {
+      return null;
+    }
+
+    if (stages.length === 1) {
+      return {
+        stage: targetStage,
+        total: Math.max(testsTotal, stages[0]?.total ?? 0),
+      };
+    }
+
+    const targetNumber = stageNumber(targetStage);
+    if (
+      !Number.isInteger(targetNumber) ||
+      targetIndex !== targetNumber - 1 ||
+      !stages.every((stage, index) => stageNumber(stage?.name) === index + 1)
+    ) {
+      return null;
+    }
+    const priorStage = `pa${targetNumber - 1}`;
+    const priorTotal = prefixTotals instanceof Map
+      ? prefixTotals.get(priorStage)
+      : prefixTotals?.[priorStage];
+    if (!Number.isFinite(priorTotal) || priorTotal < 0 || testsTotal <= priorTotal) {
+      return null;
+    }
+    return {
+      stage: targetStage,
+      total: Math.max(testsTotal - priorTotal, stages[targetIndex]?.total ?? 0),
+    };
+  }
+
   // Test commands often report only part of a through run. Track the newest
   // explicit result for each prior PA so a partial report cannot erase other
   // known regressions and a later passing rerun can clear an earlier failure.
@@ -59,5 +134,10 @@
     };
   }
 
-  root.RALPH_TEST_STATUS_SUMMARY = Object.freeze({ summarizePriorStageFailures });
+  root.RALPH_TEST_STATUS_SUMMARY = Object.freeze({
+    hasAuthoritativePassingTotal,
+    inferStageTotal,
+    passingPrefixTotal,
+    summarizePriorStageFailures,
+  });
 })(globalThis);

@@ -4070,9 +4070,18 @@ function mergeTestStatus(existing, derived) {
 
 function buildStageTotalAnchors(records) {
   const anchors = new Map();
+  const prefixTotals = new Map();
   for (const record of records) {
     for (const status of testStatusesFromRecord(record)) {
-      addStageTotalAnchorsFromStatus(anchors, status);
+      const prefix = TEST_STATUS_SUMMARY?.passingPrefixTotal(status);
+      if (prefix && prefix.total > (prefixTotals.get(prefix.stage) ?? 0)) {
+        prefixTotals.set(prefix.stage, prefix.total);
+      }
+    }
+  }
+  for (const record of records) {
+    for (const status of testStatusesFromRecord(record)) {
+      addStageTotalAnchorsFromStatus(anchors, status, prefixTotals);
     }
   }
   return anchors;
@@ -4094,7 +4103,7 @@ function testStatusesFromRecord(record) {
   return statuses;
 }
 
-function addStageTotalAnchorsFromStatus(anchors, status) {
+function addStageTotalAnchorsFromStatus(anchors, status, prefixTotals) {
   if (!isFullStageTestStatus(status)) {
     return;
   }
@@ -4104,38 +4113,13 @@ function addStageTotalAnchorsFromStatus(anchors, status) {
       updateStageTotalAnchor(anchors, stage.name, stage.total);
     }
   }
-  addInferredStageTotalAnchor(anchors, status);
+  addInferredStageTotalAnchor(anchors, status, prefixTotals);
 }
 
-function addInferredStageTotalAnchor(anchors, status) {
-  const stages = Array.isArray(status?.stages) ? status.stages : [];
-  const testsTotal = finitePositiveNumber(status?.testsTotal);
-  if (!stages.length || !testsTotal) {
-    return;
-  }
-  const targetStage =
-    normalizeStageName(status?.targetStage) ??
-    normalizeStageName(status?.failingStage) ??
-    stages.find((stage) => stage?.status === "fail")?.name ??
-    stages.at(-1)?.name;
-  const targetIndex = stages.findIndex((stage) => stage?.name === targetStage);
-  if (targetIndex < 0) {
-    return;
-  }
-  let knownOtherTotal = 0;
-  for (const [index, stage] of stages.entries()) {
-    if (index === targetIndex) {
-      continue;
-    }
-    const total = finitePositiveNumber(stage?.total) ?? anchors.get(stage?.name);
-    if (!total) {
-      return;
-    }
-    knownOtherTotal += total;
-  }
-  const inferredTotal = testsTotal - knownOtherTotal;
-  if (inferredTotal > 0) {
-    updateStageTotalAnchor(anchors, targetStage, Math.max(inferredTotal, stages[targetIndex]?.total ?? 0));
+function addInferredStageTotalAnchor(anchors, status, prefixTotals) {
+  const inferred = TEST_STATUS_SUMMARY?.inferStageTotal(status, prefixTotals);
+  if (inferred) {
+    updateStageTotalAnchor(anchors, inferred.stage, inferred.total);
   }
 }
 

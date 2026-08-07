@@ -2,7 +2,77 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "../ralph-viz/test-status-summary.js";
 
-const { summarizePriorStageFailures } = globalThis.RALPH_TEST_STATUS_SUMMARY;
+const {
+  hasAuthoritativePassingTotal,
+  inferStageTotal,
+  passingPrefixTotal,
+  summarizePriorStageFailures,
+} = globalThis.RALPH_TEST_STATUS_SUMMARY;
+
+test("complete passing stage totals outrank unexplained through-run residuals", () => {
+  assert.equal(hasAuthoritativePassingTotal({
+    name: "pa16",
+    status: "pass",
+    passed: 291,
+    total: 291,
+  }), true);
+  assert.equal(hasAuthoritativePassingTotal({
+    name: "pa16",
+    status: "fail",
+    passed: 243,
+    total: 291,
+  }), false);
+});
+
+test("stage totals use adjacent through-run aggregates rather than stage-row sums", () => {
+  const prior = {
+    allTestsPassed: true,
+    testsPassed: 1145,
+    testsTotal: 1145,
+    stages: Array.from({ length: 15 }, (_, index) => ({
+      name: `pa${index + 1}`,
+      status: "pass",
+      passed: index === 14 ? 108 : 1,
+      total: index === 14 ? 108 : 1,
+    })),
+  };
+  const prefix = passingPrefixTotal(prior);
+  assert.deepEqual(prefix, { stage: "pa15", total: 1145 });
+
+  const current = {
+    allTestsPassed: false,
+    targetStage: "pa16",
+    testsPassed: 1421,
+    testsTotal: 1436,
+    stages: [
+      ...prior.stages,
+      { name: "pa16", status: "fail", passed: 276, total: 291 },
+    ],
+  };
+  assert.deepEqual(inferStageTotal(current, new Map([[prefix.stage, prefix.total]])), {
+    stage: "pa16",
+    total: 291,
+  });
+});
+
+test("a complete current-stage row is not enlarged by an aggregate discrepancy", () => {
+  const status = {
+    allTestsPassed: true,
+    targetStage: "pa16",
+    testsPassed: 1436,
+    testsTotal: 1436,
+    stages: [
+      ...Array.from({ length: 15 }, (_, index) => ({
+        name: `pa${index + 1}`,
+        status: "pass",
+        passed: index === 14 ? 108 : 1,
+        total: index === 14 ? 108 : 1,
+      })),
+      { name: "pa16", status: "pass", passed: 291, total: 291 },
+    ],
+  };
+  assert.equal(inferStageTotal(status, new Map([["pa15", 1145]])), null);
+});
 
 test("prior failure summary excludes the active PA", () => {
   const summary = summarizePriorStageFailures([{
