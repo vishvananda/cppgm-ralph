@@ -1125,12 +1125,16 @@ function dockProgressBarHtml(phase, progress, model) {
     .filter(Boolean)
     .join(" / ");
   const ariaLabel = dockProgressAriaLabel(context, model);
-  const fallback = model.segments.map((segment) => `
-    <span class="dock-progress-fallback-segment dock-progress-${escapeHtml(segment.key)}"
-      style="flex-grow:${segment.value}"
-      title="${escapeHtml(`${segment.label}: ${segment.value}`)}">
-      <span>${escapeHtml(segment.text)}</span>
-    </span>
+  const fallback = model.rows.map((row) => `
+    <div class="dock-progress-fallback-row" aria-hidden="true">
+      ${row.segments.map((segment) => `
+        <span class="dock-progress-fallback-segment dock-progress-${escapeHtml(segment.key)}"
+          style="flex-grow:${segment.value}"
+          title="${escapeHtml(`${row.label} ${segment.label}: ${segment.value}`)}">
+          <span>${escapeHtml(segment.text)}</span>
+        </span>
+      `).join("")}
+    </div>
   `).join("");
   return `
     <div class="dock-progress-block${progress?.status === "pass" ? " dock-progress-pass" : ""}">
@@ -1146,17 +1150,13 @@ function dockProgressBarHtml(phase, progress, model) {
 }
 
 function dockProgressLegendHtml(model) {
-  const items = model.hasStart
-    ? [
-        { key: "start", text: `start ${fmtInt(model.start)}` },
-        {
-          key: model.delta < 0 ? "lost" : "gained",
-          text: `${model.delta >= 0 ? "+" : ""}${fmtInt(model.delta)} turn`,
-        },
-      ]
-    : [{ key: "current", text: `current ${fmtInt(model.current)}` }];
+  const items = [];
+  if (model.hasStart) {
+    items.push({ key: "start", text: `start ${fmtInt(model.start)}` });
+  }
   items.push(
-    { key: "remaining", text: `${fmtInt(model.remaining)} left` },
+    { key: "current", text: `current ${fmtInt(model.current)}` },
+    { key: "best", text: `best ${fmtInt(model.best)}` },
     { key: "total", text: `${fmtInt(model.total)} total` },
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
@@ -1171,11 +1171,12 @@ function dockProgressAriaLabel(context, model) {
   const parts = [context || "Test progress"];
   if (model.hasStart) {
     parts.push(`started with ${model.start} passing`);
-    parts.push(model.delta >= 0
-      ? `added ${model.delta} this turn`
-      : `lost ${Math.abs(model.delta)} this turn`);
+    parts.push(`reached a best of ${model.best}, ${model.bestDelta} above the start`);
   }
   parts.push(`${model.current} currently passing`);
+  if (model.regression > 0) {
+    parts.push(`${model.regression} below the best`);
+  }
   parts.push(`${model.remaining} remaining`);
   parts.push(`${model.total} total`);
   return parts.join(", ");
@@ -1205,10 +1206,10 @@ function renderDockProgressChart(el, phase, progress, model) {
   const fallback = el.querySelector(".dock-progress-fallback");
   if (fallback) fallback.hidden = true;
   const chart = window.echarts.init(el, null, { renderer: "svg" });
-  const chartWidth = Math.max(el.clientWidth, 240);
   const colors = {
     start: cssThemeColor("--progress-start", "#496985"),
     current: cssThemeColor("--progress-start", "#496985"),
+    best: cssThemeColor("--progress-gain", "#2f8f50"),
     gained: cssThemeColor("--progress-gain", "#2f8f50"),
     lost: cssThemeColor("--progress-loss", "#a94343"),
     remaining: cssThemeColor("--progress-remaining", "#242424"),
@@ -1216,6 +1217,7 @@ function renderDockProgressChart(el, phase, progress, model) {
   const textColors = {
     start: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     current: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    best: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     gained: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     lost: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     remaining: cssThemeColor("--progress-remaining-text", "#b9b9b9"),
@@ -1247,35 +1249,38 @@ function renderDockProgressChart(el, phase, progress, model) {
     },
     yAxis: {
       type: "category",
-      data: ["progress"],
+      data: model.rows.map((row) => row.label),
+      inverse: true,
       show: false,
     },
-    series: model.segments.map((segment, index) => {
-      const estimatedWidth = (segment.value / model.total) * chartWidth;
-      const labelWidth = 12 + segment.text.length * 6.5;
-      const first = index === 0;
-      const last = index === model.segments.length - 1;
-      return {
-        name: segment.label,
-        type: "bar",
-        stack: "progress",
-        barWidth: 18,
-        emphasis: { disabled: true },
-        itemStyle: {
-          color: colors[segment.key],
-          borderRadius: [first ? 4 : 0, last ? 4 : 0, last ? 4 : 0, first ? 4 : 0],
-        },
-        label: {
-          show: estimatedWidth >= labelWidth,
-          position: "inside",
-          formatter: segment.text,
-          color: textColors[segment.key],
-          fontSize: 10,
-          fontWeight: 600,
-        },
-        data: [segment.value],
-      };
-    }),
+    series: model.rows.flatMap((row, rowIndex) =>
+      row.segments.map((segment, segmentIndex) => {
+        const first = segmentIndex === 0;
+        const last = segmentIndex === row.segments.length - 1;
+        return {
+          name: `${row.label} ${segment.label}`,
+          type: "bar",
+          stack: "progress",
+          barWidth: 8,
+          emphasis: { disabled: true },
+          itemStyle: {
+            color: colors[segment.key],
+            borderRadius: [first ? 3 : 0, last ? 3 : 0, last ? 3 : 0, first ? 3 : 0],
+          },
+          label: {
+            show: Boolean(segment.text),
+            position: "inside",
+            formatter: segment.text,
+            color: textColors[segment.key],
+            fontSize: 8,
+            fontWeight: 600,
+            textBorderColor: colors[segment.key],
+            textBorderWidth: 2,
+          },
+          data: model.rows.map((_, index) => index === rowIndex ? segment.value : null),
+        };
+      })
+    ),
   });
   const resize = () => chart.resize();
   if (window.ResizeObserver) {
@@ -1286,12 +1291,15 @@ function renderDockProgressChart(el, phase, progress, model) {
 }
 
 function dockProgressTooltipHtml(model) {
-  const delta = `${model.delta >= 0 ? "+" : ""}${fmtInt(model.delta)}`;
+  const bestDelta = `+${fmtInt(model.bestDelta)}`;
+  const regression = `-${fmtInt(model.regression)}`;
   return `
     <div class="dock-progress-tooltip">
       ${model.hasStart ? `<div><span>Start</span><strong>${fmtInt(model.start)}</strong></div>` : ""}
-      ${model.hasStart ? `<div><span>This turn</span><strong>${delta}</strong></div>` : ""}
       <div><span>Current</span><strong>${fmtInt(model.current)}</strong></div>
+      <div><span>Best</span><strong>${fmtInt(model.best)}</strong></div>
+      ${model.hasStart ? `<div><span>Peak gain</span><strong>${bestDelta}</strong></div>` : ""}
+      ${model.regression > 0 ? `<div><span>Below best</span><strong>${regression}</strong></div>` : ""}
       <div><span>Remaining</span><strong>${fmtInt(model.remaining)}</strong></div>
       <div><span>Total</span><strong>${fmtInt(model.total)}</strong></div>
     </div>

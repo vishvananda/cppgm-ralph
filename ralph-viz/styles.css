@@ -270,37 +270,48 @@ button:hover { background: var(--control-hover); }
   min-width: 0;
 }
 .dock-progress-echart {
-  height: 1.3rem;
+  height: 1.65rem;
   min-width: 0;
   position: relative;
   width: 100%;
 }
 .dock-progress-fallback {
-  display: flex;
-  height: 1.125rem;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 2px;
+  height: 1.45rem;
   overflow: hidden;
   position: absolute;
   inset: 0;
   border-radius: 4px;
 }
 .dock-progress-fallback[hidden] { display: none; }
+.dock-progress-fallback-row {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 3px;
+}
 .dock-progress-fallback-segment {
   display: grid;
   flex-basis: 0;
   min-width: 0;
   place-items: center;
+  position: relative;
   color: var(--progress-bar-text);
   font-size: 0.63rem;
   font-weight: 600;
-  overflow: hidden;
+  overflow: visible;
 }
 .dock-progress-fallback-segment > span {
   padding: 0 0.2rem;
-  overflow: hidden;
+  position: relative;
+  z-index: 1;
 }
 .dock-progress-start,
 .dock-progress-current { background: var(--progress-start); }
-.dock-progress-gained { background: var(--progress-gain); }
+.dock-progress-gained,
+.dock-progress-best { background: var(--progress-gain); }
 .dock-progress-lost { background: var(--progress-loss); }
 .dock-progress-remaining {
   background: var(--progress-remaining);

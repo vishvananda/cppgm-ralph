@@ -103,40 +103,67 @@
     const current = clampProgressCount(progress.current.passed, total);
     const hasStart = Number.isFinite(progress?.start?.passed);
     const start = hasStart ? clampProgressCount(progress.start.passed, total) : current;
+    const observedBest = Number.isFinite(progress?.best?.passed)
+      ? clampProgressCount(progress.best.passed, total)
+      : current;
+    const best = Math.max(start, current, observedBest);
     const delta = current - start;
+    const bestDelta = best - start;
+    const regression = best - current;
     const remaining = total - current;
-    let segments;
-    if (!hasStart) {
-      segments = [
-        { key: "current", label: "current", value: current, text: String(current) },
-        { key: "remaining", label: "left", value: remaining, text: String(remaining) },
-      ];
-    } else if (delta >= 0) {
-      segments = [
-        { key: "start", label: "start", value: start, text: String(start) },
-        { key: "gained", label: "this turn", value: delta, text: `+${delta}` },
-        { key: "remaining", label: "left", value: remaining, text: String(remaining) },
-      ];
-    } else {
-      segments = [
-        { key: "current", label: "current", value: current, text: String(current) },
-        { key: "lost", label: "lost this turn", value: -delta, text: String(delta) },
-        {
-          key: "remaining",
-          label: "left beyond start",
-          value: Math.max(0, total - start),
-          text: String(Math.max(0, total - start)),
-        },
-      ];
-    }
+    const remainingBeyondBest = total - best;
+    const rows = [
+      {
+        key: "best",
+        label: "best",
+        segments: [
+          { key: "start", label: "start", value: start, text: "" },
+          {
+            key: "gained",
+            label: "gain at best",
+            value: bestDelta,
+            text: hasStart && bestDelta > 0 ? `+${bestDelta}` : "",
+          },
+          {
+            key: "remaining",
+            label: "left beyond best",
+            value: remainingBeyondBest,
+            text: "",
+          },
+        ].filter((segment) => segment.value > 0),
+      },
+      {
+        key: "current",
+        label: "current",
+        segments: [
+          { key: "current", label: "current", value: current, text: "" },
+          {
+            key: "lost",
+            label: "below best",
+            value: regression,
+            text: regression > 0 ? `-${regression}` : "",
+          },
+          {
+            key: "remaining",
+            label: "left beyond best",
+            value: remainingBeyondBest,
+            text: "",
+          },
+        ].filter((segment) => segment.value > 0),
+      },
+    ];
     return {
       total,
       current,
       start,
+      best,
       hasStart,
       delta,
+      bestDelta,
+      regression,
       remaining,
-      segments: segments.filter((segment) => segment.value > 0),
+      remainingBeyondBest,
+      rows,
     };
   }
 

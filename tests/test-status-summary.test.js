@@ -10,41 +10,67 @@ const {
   summarizePriorStageFailures,
 } = globalThis.RALPH_TEST_STATUS_SUMMARY;
 
-test("turn progress splits start, additions, and remaining tests", () => {
+test("turn progress shows peak gain and current regression as separate lanes", () => {
   const model = buildTurnProgressModel({
     start: { passed: 222, total: 249 },
-    current: { passed: 235, total: 249 },
+    current: { passed: 225, total: 249 },
+    best: { passed: 229, total: 249 },
   });
 
   assert.deepEqual(model, {
     total: 249,
-    current: 235,
+    current: 225,
     start: 222,
+    best: 229,
     hasStart: true,
-    delta: 13,
-    remaining: 14,
-    segments: [
-      { key: "start", label: "start", value: 222, text: "222" },
-      { key: "gained", label: "this turn", value: 13, text: "+13" },
-      { key: "remaining", label: "left", value: 14, text: "14" },
+    delta: 3,
+    bestDelta: 7,
+    regression: 4,
+    remaining: 24,
+    remainingBeyondBest: 20,
+    rows: [
+      {
+        key: "best",
+        label: "best",
+        segments: [
+          { key: "start", label: "start", value: 222, text: "" },
+          { key: "gained", label: "gain at best", value: 7, text: "+7" },
+          { key: "remaining", label: "left beyond best", value: 20, text: "" },
+        ],
+      },
+      {
+        key: "current",
+        label: "current",
+        segments: [
+          { key: "current", label: "current", value: 225, text: "" },
+          { key: "lost", label: "below best", value: 4, text: "-4" },
+          { key: "remaining", label: "left beyond best", value: 20, text: "" },
+        ],
+      },
     ],
   });
 });
 
-test("turn progress represents regressions without changing the total width", () => {
+test("turn progress places a below-start regression between current and best", () => {
   const model = buildTurnProgressModel({
     start: { passed: 222, total: 249 },
     current: { passed: 210, total: 249 },
+    best: { passed: 229, total: 249 },
   });
 
   assert.equal(model.delta, -12);
+  assert.equal(model.bestDelta, 7);
+  assert.equal(model.regression, 19);
   assert.equal(model.remaining, 39);
-  assert.deepEqual(model.segments, [
-    { key: "current", label: "current", value: 210, text: "210" },
-    { key: "lost", label: "lost this turn", value: 12, text: "-12" },
-    { key: "remaining", label: "left beyond start", value: 27, text: "27" },
+  assert.equal(model.remainingBeyondBest, 20);
+  assert.deepEqual(model.rows[1].segments, [
+    { key: "current", label: "current", value: 210, text: "" },
+    { key: "lost", label: "below best", value: 19, text: "-19" },
+    { key: "remaining", label: "left beyond best", value: 20, text: "" },
   ]);
-  assert.equal(model.segments.reduce((sum, segment) => sum + segment.value, 0), 249);
+  for (const row of model.rows) {
+    assert.equal(row.segments.reduce((sum, segment) => sum + segment.value, 0), 249);
+  }
 });
 
 test("complete passing stage totals outrank unexplained through-run residuals", () => {
