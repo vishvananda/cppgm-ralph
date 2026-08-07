@@ -117,7 +117,12 @@
         key: "best",
         label: "best",
         segments: [
-          { key: "start", label: "start", value: start, text: "" },
+          {
+            key: hasStart ? "start" : "current",
+            label: hasStart ? "start" : "current",
+            value: start,
+            text: String(start),
+          },
           {
             key: "gained",
             label: "gain at best",
@@ -132,7 +137,9 @@
           },
         ].filter((segment) => segment.value > 0),
       },
-      {
+    ];
+    if (regression > 0) {
+      rows.push({
         key: "current",
         label: "current",
         segments: [
@@ -150,8 +157,8 @@
             text: "",
           },
         ].filter((segment) => segment.value > 0),
-      },
-    ];
+      });
+    }
     return {
       total,
       current,

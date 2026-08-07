@@ -33,7 +33,7 @@ test("turn progress shows peak gain and current regression as separate lanes", (
         key: "best",
         label: "best",
         segments: [
-          { key: "start", label: "start", value: 222, text: "" },
+          { key: "start", label: "start", value: 222, text: "222" },
           { key: "gained", label: "gain at best", value: 7, text: "+7" },
           { key: "remaining", label: "left beyond best", value: 20, text: "" },
         ],
@@ -71,6 +71,22 @@ test("turn progress places a below-start regression between current and best", (
   for (const row of model.rows) {
     assert.equal(row.segments.reduce((sum, segment) => sum + segment.value, 0), 249);
   }
+});
+
+test("turn progress omits a redundant current lane at the high-water mark", () => {
+  const model = buildTurnProgressModel({
+    start: { passed: 222, total: 249 },
+    current: { passed: 229, total: 249 },
+    best: { passed: 229, total: 249 },
+  });
+
+  assert.equal(model.regression, 0);
+  assert.equal(model.rows.length, 1);
+  assert.deepEqual(model.rows[0].segments, [
+    { key: "start", label: "start", value: 222, text: "222" },
+    { key: "gained", label: "gain at best", value: 7, text: "+7" },
+    { key: "remaining", label: "left beyond best", value: 20, text: "" },
+  ]);
 });
 
 test("complete passing stage totals outrank unexplained through-run residuals", () => {

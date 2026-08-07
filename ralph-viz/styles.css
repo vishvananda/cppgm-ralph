@@ -27,6 +27,7 @@
   --goal-text: #cfc;
   --chart-empty: #111;
   --progress-start: #496985;
+  --progress-current: #9a6b32;
   --progress-gain: #2f8f50;
   --progress-loss: #a94343;
   --progress-remaining: #242424;
@@ -70,6 +71,7 @@
   --goal-text: #245b34;
   --chart-empty: #fff;
   --progress-start: #547a96;
+  --progress-current: #a45e16;
   --progress-gain: #2c7a48;
   --progress-loss: #b44842;
   --progress-remaining: #deded9;
@@ -113,6 +115,7 @@
     --goal-text: #245b34;
     --chart-empty: #fff;
     --progress-start: #547a96;
+    --progress-current: #a45e16;
     --progress-gain: #2c7a48;
     --progress-loss: #b44842;
     --progress-remaining: #deded9;
@@ -275,6 +278,7 @@ button:hover { background: var(--control-hover); }
   position: relative;
   width: 100%;
 }
+.dock-progress-echart.dock-progress-single-row { height: 1.3rem; }
 .dock-progress-fallback {
   display: grid;
   grid-template-rows: 1fr 1fr;
@@ -286,6 +290,10 @@ button:hover { background: var(--control-hover); }
   border-radius: 4px;
 }
 .dock-progress-fallback[hidden] { display: none; }
+.dock-progress-fallback.dock-progress-single-row {
+  grid-template-rows: 1fr;
+  height: 1.125rem;
+}
 .dock-progress-fallback-row {
   display: flex;
   min-height: 0;
@@ -308,8 +316,8 @@ button:hover { background: var(--control-hover); }
   position: relative;
   z-index: 1;
 }
-.dock-progress-start,
-.dock-progress-current { background: var(--progress-start); }
+.dock-progress-start { background: var(--progress-start); }
+.dock-progress-current { background: var(--progress-current); }
 .dock-progress-gained,
 .dock-progress-best { background: var(--progress-gain); }
 .dock-progress-lost { background: var(--progress-loss); }

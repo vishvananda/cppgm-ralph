@@ -1136,12 +1136,13 @@ function dockProgressBarHtml(phase, progress, model) {
       `).join("")}
     </div>
   `).join("");
+  const singleRowClass = model.rows.length === 1 ? " dock-progress-single-row" : "";
   return `
     <div class="dock-progress-block${progress?.status === "pass" ? " dock-progress-pass" : ""}">
       <span class="dock-progress-context">${escapeHtml(context || "test progress")}</span>
       <div class="dock-progress-meter">
-        <div class="dock-progress-echart" role="img" aria-label="${escapeHtml(ariaLabel)}">
-          <div class="dock-progress-fallback">${fallback}</div>
+        <div class="dock-progress-echart${singleRowClass}" role="img" aria-label="${escapeHtml(ariaLabel)}">
+          <div class="dock-progress-fallback${singleRowClass}">${fallback}</div>
         </div>
         ${dockProgressLegendHtml(model)}
       </div>
@@ -1208,7 +1209,7 @@ function renderDockProgressChart(el, phase, progress, model) {
   const chart = window.echarts.init(el, null, { renderer: "svg" });
   const colors = {
     start: cssThemeColor("--progress-start", "#496985"),
-    current: cssThemeColor("--progress-start", "#496985"),
+    current: cssThemeColor("--progress-current", "#9a6b32"),
     best: cssThemeColor("--progress-gain", "#2f8f50"),
     gained: cssThemeColor("--progress-gain", "#2f8f50"),
     lost: cssThemeColor("--progress-loss", "#a94343"),
@@ -1261,7 +1262,7 @@ function renderDockProgressChart(el, phase, progress, model) {
           name: `${row.label} ${segment.label}`,
           type: "bar",
           stack: "progress",
-          barWidth: 8,
+          barWidth: model.rows.length === 1 ? 12 : 8,
           emphasis: { disabled: true },
           itemStyle: {
             color: colors[segment.key],
