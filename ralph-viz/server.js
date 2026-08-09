@@ -22,7 +22,8 @@ const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? DEFAULT_CLAUDE_PROJECTS_DIR;
 const PORT = Number.parseInt(process.env.RALPH_VIZ_PORT ?? "4173", 10);
 const HOST = process.env.RALPH_VIZ_HOST ?? "0.0.0.0";
-const SPA_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_FILE = fileURLToPath(import.meta.url);
+const SPA_DIR = path.dirname(SERVER_FILE);
 const REPO_DIR = path.dirname(SPA_DIR);
 const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
@@ -6445,12 +6446,37 @@ function comparisonRunForChart(run, highlighted = false) {
   };
 }
 
+function comparisonRunMatchesLocal(publishedRun, localRun, runRef) {
+  const publishedPath = typeof publishedRun?.filePath === "string"
+    ? path.resolve(publishedRun.filePath)
+    : null;
+  const localPathValue = localRun?.filePath ?? runRef?.filePath;
+  const localPath = typeof localPathValue === "string" ? path.resolve(localPathValue) : null;
+  if (publishedPath && localPath && publishedPath === localPath) {
+    return true;
+  }
+
+  const publishedSpec = String(publishedRun?.spec ?? "").split("/")[0];
+  const localSpec = String(localRun?.spec ?? runRef?.shape ?? "").split("/")[0];
+  const sameSpec = Boolean(publishedSpec && localSpec && publishedSpec === localSpec);
+  if (!sameSpec) {
+    return false;
+  }
+  if (publishedPath && localPath) {
+    return path.basename(publishedPath) === path.basename(localPath);
+  }
+  return true;
+}
+
 function mergePublishedAndLocalComparison(published, local, runRef, localMtime) {
   const publishedRuns = Array.isArray(published?.runs) ? published.runs : [];
   const localRun = local?.runs?.[0] ?? null;
   if (!localRun) {
     throw new Error("Local comparison did not contain a run");
   }
+  const includedPublishedRuns = publishedRuns
+    .map((run, index) => ({ run, index }))
+    .filter(({ run }) => !comparisonRunMatchesLocal(run, localRun, runRef));
   const publishedRows = new Map((published?.rows ?? []).map((row) => [row.pa, row]));
   const localRows = new Map((local?.rows ?? []).map((row) => [row.pa, row]));
   const through = Math.max(
@@ -6458,7 +6484,7 @@ function mergePublishedAndLocalComparison(published, local, runRef, localMtime) 
     Number.parseInt(String(local?.through ?? "").replace(/^pa/, ""), 10) || 0,
   );
   const runs = [
-    ...publishedRuns.map((run) => comparisonRunForChart(run)),
+    ...includedPublishedRuns.map(({ run }) => comparisonRunForChart(run)),
     comparisonRunForChart({
       ...localRun,
       label: `${runRef.shape} (local)`,
@@ -6472,7 +6498,7 @@ function mergePublishedAndLocalComparison(published, local, runRef, localMtime) 
     rows.push({
       pa,
       runs: [
-        ...publishedRuns.map((_, index) => comparisonSummaryForChart(publishedRow?.runs?.[index], pa)),
+        ...includedPublishedRuns.map(({ index }) => comparisonSummaryForChart(publishedRow?.runs?.[index], pa)),
         comparisonSummaryForChart(localRow?.runs?.[0], pa),
       ],
     });
@@ -6769,8 +6795,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const runsPath = path.relative(ROOT_DIR, RALPH_DIR);
-  console.log(`[ralph-viz] serving from ${runsPath}/*/events`);
-  console.log(`[ralph-viz] open http://${HOST}:${PORT}`);
-});
+export { mergePublishedAndLocalComparison };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === SERVER_FILE) {
+  server.listen(PORT, HOST, () => {
+    const runsPath = path.relative(ROOT_DIR, RALPH_DIR);
+    console.log(`[ralph-viz] serving from ${runsPath}/*/events`);
+    console.log(`[ralph-viz] open http://${HOST}:${PORT}`);
+  });
+}

@@ -139,6 +139,7 @@ const state = {
   staticComparison: null,
   runComparisons: new Map(),
   runComparisonThrough: new Map(),
+  comparisonRunVisibility: new Map(),
   runComparisonRequestId: 0,
   loadRequestId: 0,
   compareThrough: null,
@@ -6856,14 +6857,15 @@ function comparisonRunOrder(runs) {
 function renderComparisonCharts(rows, runOrder, orderedRuns) {
   const wrap = document.createElement("div");
   wrap.className = "comparison-charts";
+  const legend = comparisonRunLegendHtml(orderedRuns);
   if (window.echarts) {
-    wrap.innerHTML = [
+    wrap.innerHTML = legend + [
       comparisonChartShellHtml("Accumulated Cost", "cost"),
       comparisonChartShellHtml("Accumulated Runtime", "runtime"),
     ].join("");
     return wrap;
   }
-  wrap.innerHTML = [
+  wrap.innerHTML = legend + [
     comparisonAreaChartHtml("Accumulated Cost", rows, runOrder, orderedRuns, {
       field: "cost",
       format: formatUsd,
@@ -6876,6 +6878,53 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
     }),
   ].join("");
   return wrap;
+}
+
+const COMPARISON_CHART_PALETTE = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
+
+function comparisonRunKey(run, index) {
+  const parts = [run?.spec, run?.dataPath, run?.label, run?.model]
+    .map((value) => cleanText(value))
+    .filter(Boolean);
+  return parts.length ? encodeURIComponent(parts.join("\0")) : `run-${index}`;
+}
+
+function comparisonRunDefaultVisible(run) {
+  return ![run?.label, run?.spec, run?.model, run?.dataPath]
+    .some((value) => cleanText(value).toLowerCase().includes("luna"));
+}
+
+function comparisonRunVisible(run, index) {
+  const key = comparisonRunKey(run, index);
+  return state.comparisonRunVisibility.has(key)
+    ? state.comparisonRunVisibility.get(key)
+    : comparisonRunDefaultVisible(run);
+}
+
+function comparisonRunColor(run, index) {
+  return run?.highlighted === true
+    ? "#ff9e64"
+    : COMPARISON_CHART_PALETTE[index % COMPARISON_CHART_PALETTE.length];
+}
+
+function comparisonRunLegendHtml(orderedRuns) {
+  const items = orderedRuns.map((run, index) => {
+    const label = run?.label ?? `run ${index + 1}`;
+    const checked = comparisonRunVisible(run, index) ? " checked" : "";
+    return `
+      <label class="comparison-run-legend-item">
+        <input type="checkbox" data-comparison-run-index="${index}"${checked} />
+        <i style="background:${comparisonRunColor(run, index)}"></i>
+        <span>${escapeHtml(label)}</span>
+      </label>
+    `;
+  }).join("");
+  return `
+    <div class="comparison-run-legend" role="group" aria-label="Visible graph runs">
+      <strong>Runs</strong>
+      ${items}
+    </div>
+  `;
 }
 
 async function ensureEChartsLoaded() {
@@ -6923,25 +6972,51 @@ function comparisonChartShellHtml(title, metric) {
 }
 
 function hydrateComparisonCharts(container, rows, runOrder, orderedRuns) {
-  if (!window.echarts || !container?.querySelector) {
+  if (!container?.querySelector) {
     return;
   }
-  const costEl = container.querySelector('[data-comparison-chart="cost"]');
-  const runtimeEl = container.querySelector('[data-comparison-chart="runtime"]');
-  if (costEl) {
-    renderEChartArea(costEl, "Accumulated Cost", rows, runOrder, orderedRuns, {
-      field: "cost",
-      valueFormatter: formatUsd,
-      axisFormatter: formatCompactUsd,
-      tooltipFormatter: formatUsd,
-    });
+  if (window.echarts) {
+    const costEl = container.querySelector('[data-comparison-chart="cost"]');
+    const runtimeEl = container.querySelector('[data-comparison-chart="runtime"]');
+    if (costEl) {
+      renderEChartArea(costEl, "Accumulated Cost", rows, runOrder, orderedRuns, {
+        field: "cost",
+        valueFormatter: formatUsd,
+        axisFormatter: formatCompactUsd,
+        tooltipFormatter: formatUsd,
+      });
+    }
+    if (runtimeEl) {
+      renderEChartArea(runtimeEl, "Accumulated Runtime", rows, runOrder, orderedRuns, {
+        field: "durationMs",
+        valueFormatter: formatHhhMmSs,
+        axisFormatter: formatCompactDuration,
+        tooltipFormatter: formatHhhMmSs,
+      });
+    }
   }
-  if (runtimeEl) {
-    renderEChartArea(runtimeEl, "Accumulated Runtime", rows, runOrder, orderedRuns, {
-      field: "durationMs",
-      valueFormatter: formatHhhMmSs,
-      axisFormatter: formatCompactDuration,
-      tooltipFormatter: formatHhhMmSs,
+  hydrateComparisonRunLegend(container, orderedRuns);
+}
+
+function hydrateComparisonRunLegend(container, orderedRuns) {
+  for (const input of container.querySelectorAll("[data-comparison-run-index]")) {
+    input.addEventListener("change", () => {
+      const index = Number.parseInt(input.dataset.comparisonRunIndex, 10);
+      const run = orderedRuns[index];
+      if (!run || !Number.isInteger(index)) {
+        return;
+      }
+      state.comparisonRunVisibility.set(comparisonRunKey(run, index), input.checked);
+      const action = input.checked ? "legendSelect" : "legendUnSelect";
+      for (const chartEl of container.querySelectorAll(".comparison-echart")) {
+        window.echarts?.getInstanceByDom?.(chartEl)?.dispatchAction?.({
+          type: action,
+          name: run.label ?? `run ${index + 1}`,
+        });
+      }
+      for (const fallback of container.querySelectorAll(`[data-comparison-series="${index}"]`)) {
+        fallback.style.display = input.checked ? "" : "none";
+      }
     });
   }
 }
@@ -6951,8 +7026,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   const chart = window.echarts.init(el, null, { renderer: "canvas" });
   const labels = rows.map((row) => row.pa);
   const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
-  const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
-  const colors = series.map((run, index) => run.highlighted ? "#ff9e64" : palette[index % palette.length]);
+  const colors = series.map((run, index) => comparisonRunColor(run, index));
   const colorBySeries = new Map(series.map((run, index) => [run.label, colors[index]]));
   const chartEmpty = cssThemeColor("--chart-empty", "#111");
   chart.setOption({
@@ -6961,17 +7035,17 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
     animationDuration: 550,
     tooltip: {
       trigger: "axis",
-      backgroundColor: "rgba(18, 18, 18, 0.96)",
-      borderColor: "#333",
-      textStyle: { color: "#eee", fontSize: 12 },
+      backgroundColor: cssThemeColor("--surface-raised", "#171717"),
+      borderColor: cssThemeColor("--border", "#333"),
+      textStyle: { color: cssThemeColor("--text", "#ddd"), fontSize: 12 },
       formatter: (params) => comparisonChartTooltipHtml(params, colorBySeries, metric.tooltipFormatter),
     },
     legend: {
-      bottom: 0,
-      left: 0,
-      itemWidth: 11,
-      itemHeight: 8,
-      textStyle: { color: "#aaa", fontSize: 11 },
+      show: false,
+      selected: Object.fromEntries(series.map((run, index) => [
+        run.label,
+        comparisonRunVisible(orderedRuns[index], index),
+      ])),
     },
     grid: {
       left: 54,
@@ -7085,28 +7159,30 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
   const yFor = (value) => pad.top + plotHeight - (value / maxValue) * plotHeight;
   const ticks = comparisonChartTicks(maxValue, 4);
   const xLabels = comparisonXLabels(rows);
-  const palette = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
   const chartEmpty = cssThemeColor("--chart-empty", "#111");
   const paths = series.map((run, runIndex) => {
     if (!run.points.length) {
       return "";
     }
-    const color = run.highlighted ? "#ff9e64" : palette[runIndex % palette.length];
+    const color = comparisonRunColor(run, runIndex);
     const line = run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.value).toFixed(1)}`).join(" ");
     const firstPoint = run.points[0];
     const finalPoint = run.points.at(-1);
     const complete = finalPoint.status === "complete";
     const area = `${line} L ${xFor(finalPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(firstPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} Z`;
     return `
-      <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color};fill-opacity:${run.highlighted ? "0.25" : "0.1"}" />
-      <path class="comparison-area-line" d="${line}" stroke="${color}" style="stroke-width:${run.highlighted ? "4" : "2.1"};opacity:${run.highlighted ? "1" : "0.72"}" />
-      <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : chartEmpty}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
+      <g data-comparison-series="${runIndex}"${comparisonRunVisible(orderedRuns[runIndex], runIndex) ? "" : ' style="display:none"'}>
+        <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color};fill-opacity:${run.highlighted ? "0.25" : "0.1"}" />
+        <path class="comparison-area-line" d="${line}" stroke="${color}" style="stroke-width:${run.highlighted ? "4" : "2.1"};opacity:${run.highlighted ? "1" : "0.72"}" />
+        <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : chartEmpty}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
+      </g>
     `;
   }).join("");
   const latest = series.map((run, runIndex) => {
-    const color = run.highlighted ? "#ff9e64" : palette[runIndex % palette.length];
+    const color = comparisonRunColor(run, runIndex);
     const value = run.points.at(-1)?.value ?? 0;
-    return `<span><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}</span>`;
+    const display = comparisonRunVisible(orderedRuns[runIndex], runIndex) ? "" : ' style="display:none"';
+    return `<span data-comparison-series="${runIndex}"${display}><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}</span>`;
   }).join("");
   return `
     <section class="comparison-chart">
