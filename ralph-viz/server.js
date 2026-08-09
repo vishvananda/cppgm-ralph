@@ -6525,6 +6525,44 @@ async function configuredRunMetadataForShape(shape) {
       };
 }
 
+function publishedComparisonRequestHeaders(cached) {
+  if (cached?.etag) {
+    return { "If-None-Match": cached.etag };
+  }
+  if (cached?.lastModified) {
+    return { "If-Modified-Since": cached.lastModified };
+  }
+  return {};
+}
+
+async function fetchPublishedComparison(url, cached = null, options = {}) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const now = options.now ?? Date.now;
+  const response = await fetchImpl(url, {
+    cache: "no-store",
+    headers: publishedComparisonRequestHeaders(cached),
+    signal: options.signal ?? AbortSignal.timeout(
+      options.timeoutMs ?? PUBLISHED_COMPARISON_FETCH_TIMEOUT_MS,
+    ),
+  });
+  if (response.status === 304) {
+    if (!cached?.value) {
+      throw new Error("published comparison returned 304 without cached data");
+    }
+    return { ...cached, loadedAt: now() };
+  }
+  if (!response.ok) {
+    throw new Error(`published comparison returned ${response.status}`);
+  }
+  const value = await response.json();
+  return {
+    loadedAt: now(),
+    value,
+    etag: response.headers.get("etag") ?? null,
+    lastModified: response.headers.get("last-modified") ?? null,
+  };
+}
+
 async function readPublishedComparison(force = false) {
   const now = Date.now();
   if (!force && PUBLISHED_COMPARISON_CACHE && now - PUBLISHED_COMPARISON_CACHE.loadedAt < PUBLISHED_COMPARISON_CACHE_MS) {
@@ -6535,16 +6573,13 @@ async function readPublishedComparison(force = false) {
   }
   PUBLISHED_COMPARISON_READ = (async () => {
     try {
-      const response = await fetch(PUBLISHED_COMPARISON_URL, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(PUBLISHED_COMPARISON_FETCH_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`published comparison returned ${response.status}`);
-      }
-      const value = await response.json();
-      PUBLISHED_COMPARISON_CACHE = { loadedAt: Date.now(), value };
-      return value;
+      const refreshed = await fetchPublishedComparison(
+        PUBLISHED_COMPARISON_URL,
+        PUBLISHED_COMPARISON_CACHE,
+        { timeoutMs: PUBLISHED_COMPARISON_FETCH_TIMEOUT_MS },
+      );
+      PUBLISHED_COMPARISON_CACHE = refreshed;
+      return refreshed.value;
     } catch (error) {
       if (PUBLISHED_COMPARISON_CACHE?.value) {
         console.warn(`published comparison refresh failed; using cached data: ${error.message}`);
@@ -6795,7 +6830,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-export { mergePublishedAndLocalComparison };
+export { fetchPublishedComparison, mergePublishedAndLocalComparison };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SERVER_FILE) {
   server.listen(PORT, HOST, () => {
