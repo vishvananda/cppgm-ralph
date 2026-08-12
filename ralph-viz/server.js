@@ -44,9 +44,9 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 10;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 11;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 10;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -254,7 +254,7 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     buildSessionTurnResolver(events),
   );
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
-  readOptions.suppressedItemCardStreams = primaryItemCardStreamKeys(responseEvents);
+  readOptions.suppressedItemCardStreams = sessionItemCardSuppressionKeys(responseEvents);
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
@@ -291,8 +291,9 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // A resumed Codex run may already have item cards backfilled into the Ralph
   // log. Still scan the bounded session window because patch_apply_end carries
   // unified diffs that streamed file_change summaries omit.
-  const suppressedItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
-  if (suppressedItemCardStreams.size === 0) {
+  const primaryItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
+  const suppressedItemCardStreams = sessionItemCardSuppressionKeys(responseBaseEvents);
+  if (primaryItemCardStreams.size === 0) {
     return appendLatestThreadUsageEvents(responseBaseEvents);
   }
 
@@ -3798,7 +3799,7 @@ function inferThreadIdsForDetail(filePath, events, selectedWindows, detailOption
   return ids;
 }
 
-function mergeEventStreams(primary, secondary) {
+export function mergeEventStreams(primary, secondary) {
   const primaryItemCardStreams = primaryItemCardStreamKeys(primary);
   const seen = new Set(primary.map(eventKey));
   const merged = [...primary];
@@ -3810,6 +3811,12 @@ function mergeEventStreams(primary, secondary) {
         seen.add(eventKey(event));
         continue;
       }
+    }
+    const replacementIndex = findUpgradeableItemCardIndex(merged, event);
+    if (replacementIndex >= 0) {
+      merged[replacementIndex] = event;
+      seen.add(eventKey(event));
+      continue;
     }
     if (
       isDisplayItemCardEvent(event) &&
@@ -3825,6 +3832,45 @@ function mergeEventStreams(primary, secondary) {
     }
   }
   return merged.sort((a, b) => String(a.recordedAt ?? "").localeCompare(String(b.recordedAt ?? "")));
+}
+
+function findUpgradeableItemCardIndex(events, candidate) {
+  if (!isDisplayItemCardEvent(candidate)) {
+    return -1;
+  }
+  const streamKey = eventItemCardStreamKey(candidate);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const existing = events[index];
+    if (
+      existing.eventType === candidate.eventType &&
+      eventItemCardStreamKey(existing) === streamKey &&
+      shouldPreferSessionItemCard(existing, candidate)
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function shouldPreferSessionItemCard(existing, candidate) {
+  const existingItem = existing?.event?.item ?? {};
+  const candidateItem = candidate?.event?.item ?? {};
+  if (existingItem.type !== "command_execution" || candidateItem.type !== "command_execution") {
+    return false;
+  }
+  if (
+    Array.isArray(candidateItem.batch_commands) &&
+    candidateItem.batch_commands.length > 1 &&
+    !Array.isArray(existingItem.batch_commands)
+  ) {
+    return true;
+  }
+  const existingCommand = String(existingItem.command ?? "");
+  const candidateCommand = String(candidateItem.command ?? "");
+  if (hasCommandBatchLabels(candidateCommand) && !hasCommandBatchLabels(existingCommand)) {
+    return true;
+  }
+  return isRawCodeModeCommand(existingCommand) && !isRawCodeModeCommand(candidateCommand);
 }
 
 function findMergeableFileChangeIndex(events, candidate) {
@@ -3942,6 +3988,34 @@ function primaryItemCardStreamKeys(events) {
     }
   }
   return keys;
+}
+
+export function sessionItemCardSuppressionKeys(events) {
+  const keys = primaryItemCardStreamKeys(events);
+  for (const event of events ?? []) {
+    const item = event?.event?.item;
+    if (
+      item?.type === "command_execution" &&
+      (isRawCodeModeCommand(item.command) || hasNumberedCommandResults(item.aggregated_output))
+    ) {
+      keys.delete(eventItemCardStreamKey(event));
+    }
+  }
+  return keys;
+}
+
+function isRawCodeModeCommand(command) {
+  const text = String(command ?? "").trim();
+  return /^exec\s/.test(text) && /\btools\.(?:exec_command|write_stdin)\s*\(/.test(text);
+}
+
+function hasCommandBatchLabels(command) {
+  return (String(command ?? "").match(/^command \d+:/gm) ?? []).length > 1;
+}
+
+function hasNumberedCommandResults(output) {
+  return (rawTextValue(output).match(/^---\s+(?:result\s+)?\d+(?:\s+.*?)?\s+---\s*$/gim) ?? [])
+    .length > 1;
 }
 
 function eventItemCardStreamKey(record) {
@@ -5383,7 +5457,10 @@ function compactConvertedSessionEvent(record, outputLimit = CODEX_SESSION_OUTPUT
     if (!Number.isFinite(compactItem.exit_code) && Number.isFinite(exitCode)) {
       compactItem.exit_code = exitCode;
     }
-    compactItem.aggregated_output = truncateSessionOutput(compactItem.aggregated_output, outputLimit);
+    compactItem.aggregated_output = truncateSessionOutput(
+      commandOutputText(compactItem.aggregated_output),
+      outputLimit,
+    );
   }
   if (Array.isArray(compactItem.changes)) {
     compactItem.changes = compactItem.changes.map((change) => {
@@ -5732,7 +5809,7 @@ function convertCodexResponseItem(payload, context) {
     const command = formatFunctionCall(payload, args, context);
     if (payload.call_id) {
       const batchCommands = payload.name === "exec" && typeof args?.input === "string"
-        ? extractToolExecCommands(args.input)
+        ? extractToolCommandBatch(args.input, context)
         : [];
       context.commandsByCallId?.set(payload.call_id, command);
       context.functionCallsByCallId?.set(payload.call_id, {
@@ -5760,7 +5837,15 @@ function convertCodexResponseItem(payload, context) {
       ? context.commandsBySessionId?.get(parentSessionId)
       : null;
     const sessionId = parseRunningSessionId(payload.output);
-    if (sessionId && (parentCommand || call?.command)) {
+    const batchCommands = buildCommandBatch(call?.batchCommands, payload.output);
+    if (batchCommands) {
+      for (const part of batchCommands) {
+        const partSessionId = part.session_id == null ? "" : String(part.session_id);
+        if (partSessionId && part.command && !context.commandsBySessionId?.has(partSessionId)) {
+          context.commandsBySessionId?.set(partSessionId, part.command);
+        }
+      }
+    } else if (sessionId && (parentCommand || call?.command)) {
       context.commandsBySessionId?.set(sessionId, parentCommand ?? call.command);
     }
     const sessionStoreKey = functionCallSessionStoreKey(call);
@@ -5768,12 +5853,13 @@ function convertCodexResponseItem(payload, context) {
       context.sessionIdsByStoreKey?.set(sessionStoreKey, sessionId);
     }
     const command =
-      call?.name === "write_stdin"
+      call?.batchCommands?.length > 1
+        ? call.command
+        : call?.name === "write_stdin"
         ? formatWriteStdinCommand(call.args, context)
         : parentCommand
           ? `${parentCommand} (continued session ${parentSessionId})`
           : context.commandsByCallId?.get(payload.call_id) ?? "";
-    const batchCommands = buildCommandBatch(call?.batchCommands, payload.output);
     return buildVizRecord(context, "item.completed", {
       type: "item.completed",
       item: {
@@ -5782,9 +5868,11 @@ function convertCodexResponseItem(payload, context) {
         status: "completed",
         exit_code: parseFunctionOutputExitCode(payload.output, command),
         command,
-        session_id: call?.args?.session_id ?? null,
+        session_id: call?.batchCommands?.length > 1
+          ? null
+          : call?.args?.session_id ?? parentSessionId ?? sessionId ?? null,
         stdin: call?.name === "write_stdin" ? call.args?.chars ?? "" : null,
-        aggregated_output: payload.output ?? "",
+        aggregated_output: commandOutputText(payload.output),
         ...(batchCommands ? { batch_commands: batchCommands } : {}),
         raw: payload,
       },
@@ -5825,18 +5913,32 @@ function convertCodexResponseItem(payload, context) {
 
 function buildCommandBatch(commands, output) {
   const chunks = codexCommandOutputChunks(output);
-  if (!Array.isArray(commands) || commands.length <= 1 || chunks.length !== commands.length) {
+  if (!Array.isArray(commands) || commands.length <= 1) {
+    return null;
+  }
+  if (chunks.length === commands.length) {
+    return commands.map((command, index) => ({
+      command,
+      output: chunks[index].output,
+      exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
+      wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
+        ? chunks[index].wall_time_seconds
+        : null,
+      session_id: chunks[index].session_id ?? null,
+      chunk_id: chunks[index].chunk_id ?? null,
+    }));
+  }
+  const labeledOutputs = codexLabeledCommandOutputs(output);
+  if (labeledOutputs.length !== commands.length) {
     return null;
   }
   return commands.map((command, index) => ({
     command,
-    output: chunks[index].output,
-    exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
-    wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
-      ? chunks[index].wall_time_seconds
-      : null,
-    session_id: chunks[index].session_id ?? null,
-    chunk_id: chunks[index].chunk_id ?? null,
+    output: labeledOutputs[index].output,
+    exit_code: labeledOutputs[index].exit_code,
+    wall_time_seconds: null,
+    session_id: null,
+    chunk_id: null,
   }));
 }
 
@@ -5915,11 +6017,7 @@ function resolveStoredSessionId(args, context) {
 }
 
 function formatCustomExecCommand(input, context = null) {
-  const writeStdinArgs = extractToolWriteStdinArgs(input);
-  if (writeStdinArgs) {
-    return formatWriteStdinCommand(writeStdinArgs, context ?? {});
-  }
-  const commands = extractToolExecCommands(input);
+  const commands = extractToolCommandBatch(input, context ?? {});
   if (commands.length === 1) {
     return commands[0];
   }
@@ -5936,16 +6034,25 @@ function formatCustomExecCommand(input, context = null) {
 }
 
 function extractToolWriteStdinArgs(input) {
+  return extractToolWriteStdinArgEntries(input)[0]?.args ?? null;
+}
+
+function extractToolWriteStdinArgEntries(input) {
   const text = String(input ?? "");
-  const match = text.match(/\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/);
-  if (!match) {
-    return null;
+  const entries = [];
+  const regex = /\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    entries.push({
+      index: match.index,
+      args: {
+        session_id: jsObjectPropertyValue(match[1], "session_id"),
+        session_store_key: extractSessionLoadKey(match[1]),
+        chars: jsObjectPropertyValue(match[1], "chars") ?? "",
+      },
+    });
   }
-  return {
-    session_id: jsObjectPropertyValue(match[1], "session_id"),
-    session_store_key: extractSessionLoadKey(text),
-    chars: jsObjectPropertyValue(match[1], "chars") ?? "",
-  };
+  return entries;
 }
 
 function extractSessionLoadKey(input) {
@@ -5969,14 +6076,109 @@ function jsObjectPropertyValue(text, propertyName) {
 }
 
 function extractToolExecCommands(input) {
-  const commands = [];
+  return extractToolExecCommandEntries(input).map((entry) => entry.command);
+}
+
+function extractToolExecCommandEntries(input) {
+  const commands = extractMappedToolExecCommandEntries(input);
   const text = String(input ?? "");
   const regex = /(?:\bcmd\b|["']cmd["'])\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
-    commands.push(decodeJsStringLiteral(match[2]));
+    commands.push({ index: match.index, command: decodeJsStringLiteral(match[2]) });
   }
-  return commands;
+  return commands.sort((left, right) => left.index - right.index);
+}
+
+function extractMappedToolExecCommandEntries(input) {
+  const text = String(input ?? "");
+  const entries = [];
+  const mapRegex = /\b([A-Za-z_$][\w$]*)\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.exec_command\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  let mapMatch;
+  while ((mapMatch = mapRegex.exec(text)) !== null) {
+    const [, arrayName, parameterName, properties] = mapMatch;
+    const escapedParameter = escapeRegExp(parameterName);
+    const usesParameter = new RegExp(
+      `(?:\\bcmd\\b|["']cmd["'])\\s*:\\s*${escapedParameter}\\b`,
+    ).test(properties) || (
+      parameterName === "cmd" && /(?:^|,)\s*cmd\s*(?=,|$)/.test(properties)
+    );
+    if (!usesParameter) {
+      continue;
+    }
+    const initializer = findJsArrayInitializer(text, arrayName, mapMatch.index);
+    if (!initializer) {
+      continue;
+    }
+    const literalRegex = /(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+    let literalMatch;
+    while ((literalMatch = literalRegex.exec(initializer.body)) !== null) {
+      entries.push({
+        index: initializer.start + literalMatch.index,
+        command: decodeJsStringLiteral(literalMatch[2]),
+      });
+    }
+  }
+  return entries;
+}
+
+function findJsArrayInitializer(text, variableName, beforeIndex) {
+  const declaration = new RegExp(
+    `\\b(?:const|let|var)\\s+${escapeRegExp(variableName)}\\s*=\\s*\\[`,
+    "g",
+  );
+  let match;
+  let latest = null;
+  while ((match = declaration.exec(text)) !== null && match.index < beforeIndex) {
+    latest = match;
+  }
+  if (!latest) {
+    return null;
+  }
+  const open = latest.index + latest[0].lastIndexOf("[");
+  let quote = null;
+  let escaped = false;
+  let depth = 1;
+  for (let index = open + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") {
+      quote = character;
+    } else if (character === "[") {
+      depth += 1;
+    } else if (character === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return { body: text.slice(open + 1, index), start: open + 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractToolCommandBatch(input, context = null) {
+  return [
+    ...extractToolExecCommandEntries(input),
+    ...extractToolWriteStdinArgEntries(input).map((entry) => ({
+      index: entry.index,
+      command: formatWriteStdinCommand(entry.args, context ?? {}),
+    })),
+  ]
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.command);
 }
 
 function decodeJsStringLiteral(value) {
@@ -6210,6 +6412,12 @@ function codexCommandOutputEnvelopeText(value) {
 function codexCommandOutputChunks(value) {
   const chunks = [];
   collectCodexCommandOutputChunks(value, chunks);
+  if (chunks.length === 0) {
+    const labeled = parseLabeledCodexCommandOutputChunks(rawTextValue(value));
+    if (labeled.length > 0) {
+      chunks.push(...labeled);
+    }
+  }
   return chunks;
 }
 
@@ -6221,6 +6429,11 @@ function collectCodexCommandOutputChunks(value, chunks) {
     const direct = parseCodexCommandOutputChunk(value);
     if (direct) {
       chunks.push(direct);
+      return;
+    }
+    const labeled = parseLabeledCodexCommandOutputChunks(value);
+    if (labeled.length > 0) {
+      chunks.push(...labeled);
       return;
     }
     const envelope = String(value).match(/\bOutput:\s*(\{[\s\S]*\})\s*$/);
@@ -6248,6 +6461,71 @@ function collectCodexCommandOutputChunks(value, chunks) {
       collectCodexCommandOutputChunks(value.output, chunks);
     }
   }
+}
+
+function parseLabeledCodexCommandOutputChunks(value) {
+  const outputs = parseLabeledCommandOutputs(value);
+  const chunks = [];
+  for (const output of outputs) {
+    const chunk = parseCodexCommandOutputChunk(output.output);
+    if (!chunk) {
+      return [];
+    }
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+function codexLabeledCommandOutputs(value) {
+  return parseLabeledCommandOutputs(rawTextValue(value));
+}
+
+function parseLabeledCommandOutputs(value) {
+  const text = String(value ?? "");
+  const marker = /^---\s+(?:result\s+)?(\d+)(?:\s+(.*?))?\s+---\s*$/gim;
+  const matches = [...text.matchAll(marker)];
+  if (matches.length <= 1) {
+    return [];
+  }
+  const firstLabel = Number.parseInt(matches[0][1], 10);
+  if (firstLabel !== 0 && firstLabel !== 1) {
+    return [];
+  }
+  const outputs = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    if (Number.parseInt(matches[index][1], 10) !== firstLabel + index) {
+      return [];
+    }
+    const start = matches[index].index + matches[index][0].length;
+    const end = matches[index + 1]?.index ?? text.length;
+    const suffixExitCode = String(matches[index][2] ?? "").match(/\bexit=(-?\d+)\b/i);
+    outputs.push({
+      output: text.slice(start, end).replace(/^\r?\n/, "").replace(/\r?\n$/, ""),
+      exit_code: suffixExitCode ? Number.parseInt(suffixExitCode[1], 10) : null,
+    });
+  }
+  return outputs;
+}
+
+function rawTextValue(value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return joinTextParts(value.map((entry) => rawTextValue(entry)));
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") {
+      return value.text;
+    }
+    if (typeof value.output === "string") {
+      return value.output;
+    }
+  }
+  return String(value);
 }
 
 function parseCodexCommandOutputChunk(value) {

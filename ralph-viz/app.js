@@ -358,6 +358,12 @@ function codexCommandOutputEnvelopeText(value) {
 function codexCommandOutputChunks(value) {
   const chunks = [];
   collectCodexCommandOutputChunks(value, chunks);
+  if (chunks.length === 0) {
+    const labeled = parseLabeledCodexCommandOutputChunks(rawTextValue(value));
+    if (labeled.length > 0) {
+      chunks.push(...labeled);
+    }
+  }
   return chunks;
 }
 
@@ -369,6 +375,11 @@ function collectCodexCommandOutputChunks(value, chunks) {
     const direct = parseCodexCommandOutputChunk(value);
     if (direct) {
       chunks.push(direct);
+      return;
+    }
+    const labeled = parseLabeledCodexCommandOutputChunks(value);
+    if (labeled.length > 0) {
+      chunks.push(...labeled);
       return;
     }
     const envelope = String(value).match(/\bOutput:\s*(\{[\s\S]*\})\s*$/);
@@ -396,6 +407,61 @@ function collectCodexCommandOutputChunks(value, chunks) {
       collectCodexCommandOutputChunks(value.output, chunks);
     }
   }
+}
+
+function parseLabeledCodexCommandOutputChunks(value) {
+  const outputs = parseLabeledCommandOutputs(value);
+  const chunks = [];
+  for (const output of outputs) {
+    const chunk = parseCodexCommandOutputChunk(output.output);
+    if (!chunk) {
+      return [];
+    }
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+function codexLabeledCommandOutputs(value) {
+  return parseLabeledCommandOutputs(rawTextValue(value));
+}
+
+function parseLabeledCommandOutputs(value) {
+  const text = String(value ?? "");
+  const marker = /^---\s+(?:result\s+)?(\d+)(?:\s+(.*?))?\s+---\s*$/gim;
+  const matches = [...text.matchAll(marker)];
+  if (matches.length <= 1) {
+    return [];
+  }
+  const firstLabel = Number.parseInt(matches[0][1], 10);
+  if (firstLabel !== 0 && firstLabel !== 1) {
+    return [];
+  }
+  const outputs = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    if (Number.parseInt(matches[index][1], 10) !== firstLabel + index) {
+      return [];
+    }
+    const start = matches[index].index + matches[index][0].length;
+    const end = matches[index + 1]?.index ?? text.length;
+    const suffixExitCode = String(matches[index][2] ?? "").match(/\bexit=(-?\d+)\b/i);
+    outputs.push({
+      output: text.slice(start, end).replace(/^\r?\n/, "").replace(/\r?\n$/, ""),
+      exit_code: suffixExitCode ? Number.parseInt(suffixExitCode[1], 10) : null,
+    });
+  }
+  return outputs;
+}
+
+function rawTextValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return joinTextParts(value.map((entry) => rawTextValue(entry)));
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.output === "string") return value.output;
+  }
+  return String(value);
 }
 
 function parseCodexCommandOutputChunk(value) {
@@ -467,13 +533,81 @@ function unwrapCommand(command) {
 }
 
 function extractToolExecCommandsFromSource(source) {
-  const commands = [];
+  const text = String(source ?? "");
+  const commands = extractMappedToolExecCommandsFromSource(text);
   const regex = /(?:\bcmd\b|["']cmd["'])\s*:\s*(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
   let match;
-  while ((match = regex.exec(String(source ?? ""))) !== null) {
-    commands.push(decodeToolString(match[2]));
+  while ((match = regex.exec(text)) !== null) {
+    commands.push({ index: match.index, command: decodeToolString(match[2]) });
   }
-  return commands;
+  return commands
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.command);
+}
+
+function extractMappedToolExecCommandsFromSource(source) {
+  const text = String(source ?? "");
+  const entries = [];
+  const mapRegex = /\b([A-Za-z_$][\w$]*)\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.exec_command\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  let mapMatch;
+  while ((mapMatch = mapRegex.exec(text)) !== null) {
+    const [, arrayName, parameterName, properties] = mapMatch;
+    const escapedParameter = escapeRegExp(parameterName);
+    const usesParameter = new RegExp(
+      `(?:\\bcmd\\b|["']cmd["'])\\s*:\\s*${escapedParameter}\\b`,
+    ).test(properties) || (
+      parameterName === "cmd" && /(?:^|,)\s*cmd\s*(?=,|$)/.test(properties)
+    );
+    if (!usesParameter) continue;
+    const initializer = findJsArrayInitializer(text, arrayName, mapMatch.index);
+    if (!initializer) continue;
+    const literalRegex = /(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+    let literalMatch;
+    while ((literalMatch = literalRegex.exec(initializer.body)) !== null) {
+      entries.push({
+        index: initializer.start + literalMatch.index,
+        command: decodeToolString(literalMatch[2]),
+      });
+    }
+  }
+  return entries;
+}
+
+function findJsArrayInitializer(text, variableName, beforeIndex) {
+  const declaration = new RegExp(
+    `\\b(?:const|let|var)\\s+${escapeRegExp(variableName)}\\s*=\\s*\\[`,
+    "g",
+  );
+  let match;
+  let latest = null;
+  while ((match = declaration.exec(text)) !== null && match.index < beforeIndex) {
+    latest = match;
+  }
+  if (!latest) return null;
+  const open = latest.index + latest[0].lastIndexOf("[");
+  let quote = null;
+  let escaped = false;
+  let depth = 1;
+  for (let index = open + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") quote = character;
+    else if (character === "[") depth += 1;
+    else if (character === "]") {
+      depth -= 1;
+      if (depth === 0) return { body: text.slice(open + 1, index), start: open + 1 };
+    }
+  }
+  return null;
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function decodeToolString(value) {
@@ -582,6 +716,9 @@ function mirroredCodexItemStreamKey(record) {
 
 function waitCommandCellId(command) {
   const text = unwrapCommand(command);
+  if ((text.match(/^command \d+:/gm) ?? []).length > 1) {
+    return null;
+  }
   const continuedMatch = text.match(/\(continued session ([^)]+)\)\s*$/);
   if (continuedMatch) {
     return continuedMatch[1];
@@ -1517,14 +1654,34 @@ function buildDisplayEntries(records, options = {}) {
     }
   };
 
+  const routeBatchEntries = (batchEntries) => {
+    const unhandled = [];
+    for (const batchEntry of batchEntries) {
+      const item = batchEntry.endRecord?.event?.item ?? {};
+      const candidateIds = [waitCommandCellId(item.command), ...asyncItemIds(item)]
+        .filter((value, index, values) => value != null && values.indexOf(value) === index);
+      const parent = candidateIds
+        .map((cellId) => asyncEntriesByCell.get(asyncRecordMapKey(batchEntry.endRecord, cellId)))
+        .find(Boolean) ?? null;
+      if (parent) {
+        continueAsyncEntry(parent, batchEntry.endRecord);
+      } else {
+        unhandled.push(batchEntry);
+        registerAsyncEntry(batchEntry);
+      }
+    }
+    return unhandled;
+  };
+
   const replaceWithBatchEntries = (entry) => {
     const batchEntries = splitCommandBatchEntry(entry);
     if (!batchEntries) {
       return false;
     }
+    const unhandled = routeBatchEntries(batchEntries);
     const index = entries.indexOf(entry);
     if (index >= 0) {
-      entries.splice(index, 1, ...batchEntries);
+      entries.splice(index, 1, ...unhandled);
     }
     return true;
   };
@@ -1622,8 +1779,9 @@ function buildDisplayEntries(records, options = {}) {
           asyncWaitCellId: waitCellId,
         };
         const batchEntries = splitCommandBatchEntry(entry);
+        const unhandledBatchEntries = batchEntries ? routeBatchEntries(batchEntries) : null;
         if (!commandNoise || !hideNoise) {
-          entries.push(...(batchEntries ?? [entry]));
+          entries.push(...(unhandledBatchEntries ?? [entry]));
         }
         if (!batchEntries) {
           registerAsyncEntry(entry);
@@ -1799,6 +1957,8 @@ function splitCommandBatchEntry(entry) {
       status: "completed",
       command: part.command,
       exit_code: part.exit_code,
+      session_id: part.session_id,
+      chunk_id: part.chunk_id,
       aggregated_output: part.output,
     });
     return {
@@ -1834,21 +1994,39 @@ function commandBatchParts(item) {
       output: part.output ?? "",
       exit_code: Number.isFinite(part.exit_code) ? part.exit_code : null,
       wall_time_seconds: Number.isFinite(part.wall_time_seconds) ? part.wall_time_seconds : null,
+      session_id: part.session_id ?? null,
+      chunk_id: part.chunk_id ?? null,
     }));
   }
   const commands = parseCommandBatchLabels(item.command) ??
     extractToolExecCommandsFromSource(item.command);
   const chunks = codexCommandOutputChunks(item.aggregated_output);
-  if (!commands?.length || commands.length !== chunks.length) {
+  if (!commands?.length) {
+    return null;
+  }
+  if (commands.length === chunks.length) {
+    return commands.map((command, index) => ({
+      command,
+      output: chunks[index].output,
+      exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
+      wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
+        ? chunks[index].wall_time_seconds
+        : null,
+      session_id: chunks[index].session_id ?? null,
+      chunk_id: chunks[index].chunk_id ?? null,
+    }));
+  }
+  const labeledOutputs = codexLabeledCommandOutputs(item.aggregated_output);
+  if (commands.length !== labeledOutputs.length) {
     return null;
   }
   return commands.map((command, index) => ({
     command,
-    output: chunks[index].output,
-    exit_code: Number.isFinite(chunks[index].exit_code) ? chunks[index].exit_code : null,
-    wall_time_seconds: Number.isFinite(chunks[index].wall_time_seconds)
-      ? chunks[index].wall_time_seconds
-      : null,
+    output: labeledOutputs[index].output,
+    exit_code: labeledOutputs[index].exit_code,
+    wall_time_seconds: null,
+    session_id: null,
+    chunk_id: null,
   }));
 }
 
