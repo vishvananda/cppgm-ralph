@@ -1067,7 +1067,7 @@ function rawTextValue(value) {
 }
 
 function parseCodexCommandOutputChunk(value) {
-  const trimmed = String(value ?? "").trim();
+  const trimmed = stripCodexOutputTruncationNotice(value).trim();
   if (!trimmed || trimmed[0] !== "{") {
     return null;
   }
@@ -1077,6 +1077,13 @@ function parseCodexCommandOutputChunk(value) {
   } catch (_) {
     return null;
   }
+}
+
+function stripCodexOutputTruncationNotice(value) {
+  return String(value ?? "").replace(
+    /^Warning: truncated output \(original token count: \d+\)\r?\nTotal output lines: \d+\r?\n\r?\n(?=\{)/,
+    "",
+  );
 }
 
 function isCodexCommandOutputChunk(value) {

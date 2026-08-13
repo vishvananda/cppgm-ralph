@@ -138,3 +138,40 @@ test("session conversion upgrades an unresolved wait with completion metadata", 
   assert.equal(merged[1].event.item.exit_code, null);
   assert.equal(merged[1].event.item.async_completed, true);
 });
+
+test("session conversion upgrades a truncated transport card with its decoded exit code", () => {
+  const transport = "Warning: truncated output (original token count: 12104)\n" +
+    "Total output lines: 1\n\n" +
+    '{"chunk_id":"a5fc64","exit_code":2,"output":"test failures\\n"}';
+  const primary = [
+    commandRecord("item.started", {
+      id: "truncated-1",
+      type: "command_execution",
+      status: "running",
+      command: "make test-report-through-pa31 (continued session 21452)",
+    }, "2026-08-13T04:30:10.000Z"),
+    commandRecord("item.completed", {
+      id: "truncated-1",
+      type: "command_execution",
+      status: "completed",
+      command: "make test-report-through-pa31 (continued session 21452)",
+      session_id: "21452",
+      exit_code: null,
+      aggregated_output: transport,
+    }, "2026-08-13T04:30:10.100Z"),
+  ];
+  const converted = [
+    primary[0],
+    commandRecord("item.completed", {
+      ...primary[1].event.item,
+      exit_code: 2,
+      aggregated_output: "test failures\n",
+    }, "2026-08-13T04:30:10.100Z"),
+  ];
+
+  assert.equal(sessionItemCardSuppressionKeys(primary).size, 0);
+  const merged = mergeEventStreams(primary, converted);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].event.item.exit_code, 2);
+  assert.equal(merged[1].event.item.aggregated_output, "test failures\n");
+});

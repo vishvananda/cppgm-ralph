@@ -213,6 +213,46 @@ test("infers terminal make results when code mode emitted only result.output", (
   assert.equal(finish.exit_code, 0);
 });
 
+test("decodes a JSON command result after an outer truncation notice", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "truncated-start",
+    'const r = await tools.exec_command({cmd:"make test-report-through-pa31"}); text(JSON.stringify(r));',
+  );
+  toolOutput(converter, "truncated-start", JSON.stringify({
+    session_id: 21452,
+    output: "LINK lowiropt\n",
+  }));
+
+  toolCall(
+    converter,
+    "truncated-finish",
+    'const r = await tools.write_stdin({session_id:21452, chars:""}); text(JSON.stringify(r));',
+  );
+  const innerOutput = "Warning: truncated output (original token count: 14653)\n" +
+    "Total output lines: 231\n\n===== pa1 =====\n" +
+    "make: *** [Makefile:241: test-report-through-pa31] Error 2\n";
+  const completed = toolOutput(converter, "truncated-finish", [
+    { type: "input_text", text: "Script completed\nWall time 0.0 seconds\nOutput:\n" },
+    {
+      type: "input_text",
+      text: "Warning: truncated output (original token count: 12104)\n" +
+        "Total output lines: 1\n\n" + JSON.stringify({
+          chunk_id: "a5fc64",
+          exit_code: 2,
+          original_token_count: 14653,
+          output: innerOutput,
+        }),
+    },
+  ]).item;
+
+  assert.equal(completed.command, "make test-report-through-pa31 (continued session 21452)");
+  assert.equal(completed.session_id, "21452");
+  assert.equal(completed.exit_code, 2);
+  assert.equal(completed.aggregated_output, innerOutput);
+});
+
 test("infers a completed make build from its terminal directory marker", () => {
   const converter = new CodexSessionConverter();
   toolCall(

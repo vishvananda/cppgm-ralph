@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 16;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 17;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -3880,6 +3880,9 @@ function shouldPreferSessionItemCard(existing, candidate) {
   if (candidateItem.async_completed === true && existingItem.async_completed !== true) {
     return true;
   }
+  if (Number.isFinite(candidateItem.exit_code) && !Number.isFinite(existingItem.exit_code)) {
+    return true;
+  }
   return isRawCodeModeCommand(existingCommand) && !isRawCodeModeCommand(candidateCommand);
 }
 
@@ -6607,7 +6610,7 @@ function rawTextValue(value) {
 }
 
 function parseCodexCommandOutputChunk(value) {
-  const trimmed = String(value ?? "").trim();
+  const trimmed = stripCodexOutputTruncationNotice(value).trim();
   if (!trimmed || trimmed[0] !== "{") {
     return null;
   }
@@ -6617,6 +6620,13 @@ function parseCodexCommandOutputChunk(value) {
   } catch (_) {
     return null;
   }
+}
+
+function stripCodexOutputTruncationNotice(value) {
+  return String(value ?? "").replace(
+    /^Warning: truncated output \(original token count: \d+\)\r?\nTotal output lines: \d+\r?\n\r?\n(?=\{)/,
+    "",
+  );
 }
 
 function isCodexCommandOutputChunk(value) {
