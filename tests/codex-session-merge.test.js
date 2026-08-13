@@ -175,3 +175,48 @@ test("session conversion upgrades a truncated transport card with its decoded ex
   assert.equal(merged[1].event.item.exit_code, 2);
   assert.equal(merged[1].event.item.aggregated_output, "test failures\n");
 });
+
+test("session replay can upgrade a mapped async batch poll", () => {
+  const source = "const rs = await Promise.all([59030,57111].map(session_id => " +
+    "tools.write_stdin({session_id,chars:\"\"})));";
+  const primary = [
+    commandRecord("item.started", {
+      id: "mapped-poll",
+      type: "command_execution",
+      status: "running",
+      command: "write_stdin unknown session",
+      raw: { name: "exec", input: source },
+    }, "2026-08-13T21:38:15.000Z"),
+    commandRecord("item.completed", {
+      id: "mapped-poll",
+      type: "command_execution",
+      status: "completed",
+      command: "write_stdin unknown session",
+      exit_code: 0,
+      aggregated_output: "LINK cppgm++\naudit passed\n",
+      raw: { input: source },
+    }, "2026-08-13T21:38:16.000Z"),
+  ];
+  const converted = [
+    commandRecord("item.started", {
+      ...primary[0].event.item,
+      command: "command 1: make -j2 (continued session 59030)\n" +
+        "command 2: perl audit.pl (continued session 57111)",
+    }, "2026-08-13T21:38:15.000Z"),
+    commandRecord("item.completed", {
+      ...primary[1].event.item,
+      command: "command 1: make -j2 (continued session 59030)\n" +
+        "command 2: perl audit.pl (continued session 57111)",
+      batch_commands: [
+        { command: "make -j2 (continued session 59030)", output: "LINK cppgm++\n", exit_code: 0 },
+        { command: "perl audit.pl (continued session 57111)", output: "audit passed\n", exit_code: 0 },
+      ],
+    }, "2026-08-13T21:38:16.000Z"),
+  ];
+
+  assert.equal(sessionItemCardSuppressionKeys(primary).size, 0);
+  const merged = mergeEventStreams(primary, converted);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].event.item.batch_commands.length, 2);
+  assert.equal(merged[1].event.item.batch_commands[0].exit_code, 0);
+});

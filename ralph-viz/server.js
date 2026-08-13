@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 17;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -229,6 +229,9 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     : events;
   const turnWindows = buildTurnWindows(events);
   const selectedWindows = selectTurnWindows(turnWindows, detailOptions);
+  const suppressedItemCardStreams = sessionItemCardSuppressionKeys(
+    selectRunEventsForSessionSuppression(withRunProgress, detailOptions, selectedWindows),
+  );
   const responseBaseEvents = selectRunEventsForResponse(
     withRunProgress,
     detailOptions,
@@ -254,7 +257,7 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     buildSessionTurnResolver(events),
   );
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
-  readOptions.suppressedItemCardStreams = sessionItemCardSuppressionKeys(responseEvents);
+  readOptions.suppressedItemCardStreams = suppressedItemCardStreams;
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
@@ -282,6 +285,9 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
     withRunProgress,
     detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS,
   );
+  const suppressedItemCardStreams = sessionItemCardSuppressionKeys(
+    selectRunEventsForSessionSuppression(withRunProgress, detailOptions, selectedWindows),
+  );
   const responseBaseEvents = selectRunEventsForResponse(
     withRunProgress,
     detailOptions,
@@ -292,7 +298,6 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // log. Still scan the bounded session window because patch_apply_end carries
   // unified diffs that streamed file_change summaries omit.
   const primaryItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
-  const suppressedItemCardStreams = sessionItemCardSuppressionKeys(responseBaseEvents);
   if (primaryItemCardStreams.size === 0) {
     return appendLatestThreadUsageEvents(responseBaseEvents);
   }
@@ -677,6 +682,13 @@ function selectRunEventsForResponse(events, detailOptions, selectedWindows) {
     return compacted;
   }
   return limitSessionEventsByTurn(compacted, detailOptions.maxEventsPerTurn);
+}
+
+function selectRunEventsForSessionSuppression(events, detailOptions, selectedWindows) {
+  if (detailOptions.mode !== "all" && detailOptions.mode !== "none") {
+    return filterEventsToWindows(events, selectedWindows);
+  }
+  return events;
 }
 
 function filterEventsToWindows(events, selectedWindows) {
@@ -4011,7 +4023,8 @@ export function sessionItemCardSuppressionKeys(events) {
       item?.type === "command_execution" &&
       (isRawCodeModeCommand(item.command) ||
         hasNumberedCommandResults(item.aggregated_output) ||
-        isUnresolvedAsyncCommandItem(item))
+        isUnresolvedAsyncCommandItem(item) ||
+        needsCodeModeBatchUpgrade(item))
     ) {
       keys.delete(eventItemCardStreamKey(event));
     }
@@ -4022,6 +4035,14 @@ export function sessionItemCardSuppressionKeys(events) {
 function isUnresolvedAsyncCommandItem(item) {
   return item?.session_id != null && item.session_id !== "" &&
     !Number.isFinite(item.exit_code) && item.async_completed !== true;
+}
+
+function needsCodeModeBatchUpgrade(item) {
+  if (Array.isArray(item?.batch_commands) && item.batch_commands.length > 1) {
+    return false;
+  }
+  const source = item?.raw?.input;
+  return typeof source === "string" && extractToolCommandBatch(source, {}).length > 1;
 }
 
 function isRawCodeModeCommand(command) {
@@ -6064,6 +6085,10 @@ function extractToolWriteStdinArgs(input) {
 
 function extractToolWriteStdinArgEntries(input) {
   const text = String(input ?? "");
+  const mappedEntries = extractMappedToolWriteStdinArgEntries(text);
+  if (mappedEntries.length > 0) {
+    return mappedEntries;
+  }
   const entries = [];
   const regex = /\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
   let match;
@@ -6075,6 +6100,61 @@ function extractToolWriteStdinArgEntries(input) {
         session_store_key: extractSessionLoadKey(match[1]),
         chars: jsObjectPropertyValue(match[1], "chars") ?? "",
       },
+    });
+  }
+  return entries;
+}
+
+function extractMappedToolWriteStdinArgEntries(input) {
+  const text = String(input ?? "");
+  const entries = [];
+  const addEntries = (initializer, parameterName, properties) => {
+    const escapedParameter = escapeRegExp(parameterName);
+    const usesParameter = new RegExp(
+      `(?:\\bsession_id\\b|["']session_id["'])\\s*:\\s*${escapedParameter}\\b`,
+    ).test(properties) || (
+      parameterName === "session_id" &&
+      /(?:^|,)\s*session_id\s*(?=,|$)/.test(properties)
+    );
+    if (!usesParameter) {
+      return;
+    }
+    const chars = jsObjectPropertyValue(properties, "chars") ?? "";
+    for (const value of jsScalarArrayEntries(initializer.body, initializer.start)) {
+      entries.push({
+        index: value.index,
+        args: { session_id: value.value, session_store_key: null, chars },
+      });
+    }
+  };
+
+  const inlineRegex = /\[([^\[\]]*)\]\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  let match;
+  while ((match = inlineRegex.exec(text)) !== null) {
+    addEntries({
+      body: match[1],
+      start: match.index + match[0].indexOf("[") + 1,
+    }, match[2], match[3]);
+  }
+
+  const namedRegex = /\b([A-Za-z_$][\w$]*)\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  while ((match = namedRegex.exec(text)) !== null) {
+    const initializer = findJsArrayInitializer(text, match[1], match.index);
+    if (initializer) {
+      addEntries(initializer, match[2], match[3]);
+    }
+  }
+  return entries.sort((left, right) => left.index - right.index);
+}
+
+function jsScalarArrayEntries(body, start) {
+  const entries = [];
+  const regex = /(["'])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1|(-?\d+)/g;
+  let match;
+  while ((match = regex.exec(body)) !== null) {
+    entries.push({
+      index: start + match.index,
+      value: match[3] ?? decodeJsStringLiteral(match[2]),
     });
   }
   return entries;

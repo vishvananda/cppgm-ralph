@@ -124,6 +124,62 @@ rs.forEach((r,i)=>text(\`--- \${i} ---\\n\${JSON.stringify(r)}\`));
   assert.equal(finish.aggregated_output, "make done\n");
 });
 
+test("routes a mapped session-id poll back to each async batch command", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(converter, "mapped-launch", `
+const rs = await Promise.all([
+  tools.exec_command({cmd:"make -j2"}),
+  tools.exec_command({cmd:"perl audit.pl"})
+]);
+rs.forEach(r => text(JSON.stringify(r)));
+`);
+  const launch = toolOutput(converter, "mapped-launch", [
+    { type: "input_text", text: "Script completed\nWall time 1.2 seconds\nOutput:\n" },
+    { type: "input_text", text: JSON.stringify({ session_id: 59030, output: "building\n" }) },
+    { type: "input_text", text: JSON.stringify({ session_id: 57111, output: "" }) },
+  ]).item;
+  assert.deepEqual(
+    launch.batch_commands.map(({ command, session_id }) => ({ command, session_id })),
+    [
+      { command: "make -j2", session_id: 59030 },
+      { command: "perl audit.pl", session_id: 57111 },
+    ],
+  );
+
+  const pollStart = toolCall(converter, "mapped-poll", `
+const rs = await Promise.all([59030,57111].map(session_id =>
+  tools.write_stdin({session_id,chars:"",yield_time_ms:30000})
+));
+rs.forEach(r => text(JSON.stringify(r)));
+`);
+  assert.equal(
+    pollStart.item.command,
+    "command 1: make -j2 (continued session 59030)\n" +
+      "command 2: perl audit.pl (continued session 57111)",
+  );
+
+  const poll = toolOutput(converter, "mapped-poll", [
+    { type: "input_text", text: "Script completed\nWall time 1.4 seconds\nOutput:\n" },
+    { type: "input_text", text: JSON.stringify({ exit_code: 0, output: "LINK cppgm++\n" }) },
+    { type: "input_text", text: JSON.stringify({ exit_code: 0, output: "audit passed\n" }) },
+  ]).item;
+  assert.deepEqual(
+    poll.batch_commands.map(({ command, output, exit_code }) => ({ command, output, exit_code })),
+    [
+      {
+        command: "make -j2 (continued session 59030)",
+        output: "LINK cppgm++\n",
+        exit_code: 0,
+      },
+      {
+        command: "perl audit.pl (continued session 57111)",
+        output: "audit passed\n",
+        exit_code: 0,
+      },
+    ],
+  );
+});
+
 test("pairs labeled plain output with commands from a mapped array", () => {
   const converter = new CodexSessionConverter();
   const commands = [

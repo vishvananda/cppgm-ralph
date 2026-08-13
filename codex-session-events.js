@@ -506,6 +506,10 @@ function extractToolWriteStdinArgs(input) {
 
 function extractToolWriteStdinArgEntries(input) {
   const text = String(input ?? "");
+  const mappedEntries = extractMappedToolWriteStdinArgEntries(text);
+  if (mappedEntries.length > 0) {
+    return mappedEntries;
+  }
   const entries = [];
   const regex = /\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
   let match;
@@ -517,6 +521,61 @@ function extractToolWriteStdinArgEntries(input) {
         session_store_key: extractSessionLoadKey(match[1]),
         chars: jsObjectPropertyValue(match[1], "chars") ?? "",
       },
+    });
+  }
+  return entries;
+}
+
+function extractMappedToolWriteStdinArgEntries(input) {
+  const text = String(input ?? "");
+  const entries = [];
+  const addEntries = (initializer, parameterName, properties) => {
+    const escapedParameter = escapeRegExp(parameterName);
+    const usesParameter = new RegExp(
+      `(?:\\bsession_id\\b|["']session_id["'])\\s*:\\s*${escapedParameter}\\b`,
+    ).test(properties) || (
+      parameterName === "session_id" &&
+      /(?:^|,)\s*session_id\s*(?=,|$)/.test(properties)
+    );
+    if (!usesParameter) {
+      return;
+    }
+    const chars = jsObjectPropertyValue(properties, "chars") ?? "";
+    for (const value of jsScalarArrayEntries(initializer.body, initializer.start)) {
+      entries.push({
+        index: value.index,
+        args: { session_id: value.value, session_store_key: null, chars },
+      });
+    }
+  };
+
+  const inlineRegex = /\[([^\[\]]*)\]\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  let match;
+  while ((match = inlineRegex.exec(text)) !== null) {
+    addEntries({
+      body: match[1],
+      start: match.index + match[0].indexOf("[") + 1,
+    }, match[2], match[3]);
+  }
+
+  const namedRegex = /\b([A-Za-z_$][\w$]*)\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
+  while ((match = namedRegex.exec(text)) !== null) {
+    const initializer = findJsArrayInitializer(text, match[1], match.index);
+    if (initializer) {
+      addEntries(initializer, match[2], match[3]);
+    }
+  }
+  return entries.sort((left, right) => left.index - right.index);
+}
+
+function jsScalarArrayEntries(body, start) {
+  const entries = [];
+  const regex = /(["'])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1|(-?\d+)/g;
+  let match;
+  while ((match = regex.exec(body)) !== null) {
+    entries.push({
+      index: start + match.index,
+      value: match[3] ?? decodeJsStringLiteral(match[2]),
     });
   }
   return entries;
