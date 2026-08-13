@@ -334,6 +334,16 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   namespace, and the run checkout, Ralph state, configured additional
   directories, provider state/cache directories, and user cache are writable.
   This requires `bwrap` on `PATH`.
+- `resourceLimits`
+  Default: enabled with the `systemd-run` backend, `memoryMax: "64G"`,
+  `memorySwapMax: "0"`, `oomGroup: false`, and `cleanupTimeoutSec: 2`.
+  Each limited provider or check process runs in a uniquely named transient
+  user scope. Ralph explicitly stops that scope when the direct runner exits,
+  so detached or session-leader descendants cannot outlive the attempt. Scope
+  shutdown sends `SIGTERM` to the complete cgroup and escalates to `SIGKILL`
+  after `cleanupTimeoutSec`. This requires `systemd-run`, `systemctl`, and a
+  reachable user systemd bus; otherwise Ralph logs that it is running
+  unbounded.
 
 Ralph builds a per-run name as `<name>-<model>-<reasoningEffort>`. That value is
 used for the git branch, checkout directory under `baseDir`, and state directory
@@ -432,6 +442,13 @@ under `stateBaseDir`.
   Override `sessionIsolation.privateTmp`
 - `RALPH_SESSION_ISOLATION_BWRAP_PATH`
   Override the Bubblewrap executable path
+- `RALPH_RESOURCE_LIMITS`
+  Set to `0`/`false` to disable transient systemd scopes and memory limits
+- `RALPH_RESOURCE_LIMITS_MEMORY_MAX`
+  Override the aggregate memory limit for a provider/check scope
+- `RALPH_RESOURCE_LIMITS_CLEANUP_TIMEOUT_SEC`
+  Seconds to allow scope descendants to exit after `SIGTERM` before systemd
+  sends `SIGKILL` (default `2`)
 - `RALPH_SIGTERM_RECOVERY_MAX`
   Maximum same-turn recovery attempts after an unexpected provider `SIGTERM`
   or exit `143` (default `3`). Signals received by Ralph itself still stop the

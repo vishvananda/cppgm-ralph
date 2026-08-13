@@ -32,6 +32,10 @@ import {
   readPersistedLimitWait,
   writePersistedLimitWait,
 } from "./provider-limit-wait.js";
+import {
+  buildSystemdScopeSpawn,
+  stopSystemdScope,
+} from "./systemd-scope.js";
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -89,6 +93,8 @@ const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
 // A provider can terminate itself with an over-broad kill command. Retry the
 // interrupted Ralph turn, but cap attempts so a persistent crash cannot loop.
 const SIGTERM_RECOVERY_MAX = Number(process.env.RALPH_SIGTERM_RECOVERY_MAX ?? 3);
+const RESOURCE_SCOPE_UNIT = Symbol("ralphResourceScopeUnit");
+const RESOURCE_SCOPE_CLEANUP = Symbol("ralphResourceScopeCleanup");
 const DEFAULT_TEMPLATE_DIR = path.join(RALPH_DIR, "templates");
 const PARTIAL_TEMPLATE_KINDS = {
   defaultPrompt: {
@@ -184,6 +190,7 @@ const DEFAULT_CONFIG = {
     memoryMax: "64G",
     memorySwapMax: "0",
     oomGroup: false,
+    cleanupTimeoutSec: 2,
   },
 };
 const DEFAULT_REPO_URL = "git@github.com:anotherjesse/cppgm.git";
@@ -264,7 +271,9 @@ async function main() {
     const active = resourceLimitsEnabled();
     log(
       `Resource limits: ${active ? "active" : "requested but unavailable (running unbounded)"} ` +
-        `(memoryMax=${CONFIG.resourceLimits.memoryMax}, oomGroup=${CONFIG.resourceLimits.oomGroup ? "on" : "off"})`,
+        `(memoryMax=${CONFIG.resourceLimits.memoryMax}, ` +
+        `oomGroup=${CONFIG.resourceLimits.oomGroup ? "on" : "off"}, ` +
+        `cleanupTimeout=${CONFIG.resourceLimits.cleanupTimeoutSec}s)`,
     );
   } else {
     log("Resource limits: disabled");
@@ -2486,6 +2495,9 @@ function installProcessSignalHandlers() {
       }
       for (const child of [...ACTIVE_CHILD_PROCESSES]) {
         terminateChildProcess(child, "SIGTERM");
+        void cleanupChildResourceScope(child).catch((error) => {
+          process.stderr.write(`${formatErrorMessage(error)}\n`);
+        });
       }
       const timer = setTimeout(() => {
         for (const child of [...ACTIVE_CHILD_PROCESSES]) {
@@ -2511,6 +2523,7 @@ function spawnTracked(command, args, options = {}) {
   } = options;
   let spawnCommand = command;
   let spawnArgs = args;
+  let resourceScopeUnit = null;
   if (isolateSession && sessionIsolationEnabled()) {
     const wrapped = buildSessionIsolationSpawn(
       command,
@@ -2528,14 +2541,24 @@ function spawnTracked(command, args, options = {}) {
     const wrapped = buildResourceLimitedSpawn(spawnCommand, spawnArgs);
     spawnCommand = wrapped.command;
     spawnArgs = wrapped.args;
+    resourceScopeUnit = wrapped.unitName;
   }
   const child = spawn(spawnCommand, spawnArgs, {
     ...spawnOptions,
     detached: process.platform !== "win32",
   });
+  if (resourceScopeUnit) {
+    child[RESOURCE_SCOPE_UNIT] = resourceScopeUnit;
+  }
   ACTIVE_CHILD_PROCESSES.add(child);
   const remove = () => {
-    ACTIVE_CHILD_PROCESSES.delete(child);
+    void cleanupChildResourceScope(child)
+      .catch((error) => {
+        log(formatErrorMessage(error));
+      })
+      .finally(() => {
+        ACTIVE_CHILD_PROCESSES.delete(child);
+      });
   };
   child.once("exit", remove);
   child.once("error", remove);
@@ -2647,11 +2670,13 @@ function resourceLimitsAvailable() {
     Boolean(process.env.DBUS_SESSION_BUS_ADDRESS) ||
     (Boolean(runtimeDir) && existsSync(path.join(runtimeDir, "bus")));
   const hasBinary = existsBinaryOnPath("systemd-run");
-  RESOURCE_LIMITS_AVAILABILITY = hasBus && hasBinary;
+  const hasSystemctl = existsBinaryOnPath("systemctl");
+  RESOURCE_LIMITS_AVAILABILITY = hasBus && hasBinary && hasSystemctl;
   if (!RESOURCE_LIMITS_AVAILABILITY) {
     log(
       "Resource limits requested but unavailable " +
-        `(systemd-run present: ${hasBinary}, user bus present: ${hasBus}); ` +
+        `(systemd-run present: ${hasBinary}, systemctl present: ${hasSystemctl}, ` +
+        `user bus present: ${hasBus}); ` +
         "agent turns will run without a memory cgroup.",
     );
   }
@@ -2678,22 +2703,27 @@ function agentExitError(message, signal, code = null) {
 }
 
 function buildResourceLimitedSpawn(command, args) {
-  const config = resourceLimitsConfig();
-  const props = [
-    `MemoryMax=${config.memoryMax}`,
-    `MemorySwapMax=${config.memorySwapMax}`,
-    // OOMPolicy governs what systemd does to the *unit* once the kernel
-    // OOM-kills a process inside it. "continue" leaves the rest of the scope
-    // running, so only the single largest task (normally the runaway
-    // subcommand) dies. "stop"/"kill" tear down the whole agent on any OOM.
-    `OOMPolicy=${config.oomGroup ? "stop" : "continue"}`,
-  ];
-  const scopeArgs = ["--user", "--scope", "--quiet", "--collect"];
-  for (const prop of props) {
-    scopeArgs.push("--property", prop);
+  return buildSystemdScopeSpawn(command, args, resourceLimitsConfig());
+}
+
+function cleanupChildResourceScope(child) {
+  const unitName = child?.[RESOURCE_SCOPE_UNIT];
+  if (!unitName) {
+    return Promise.resolve({ status: "absent" });
   }
-  scopeArgs.push("--", command, ...args);
-  return { command: "systemd-run", args: scopeArgs };
+  if (!child[RESOURCE_SCOPE_CLEANUP]) {
+    child[RESOURCE_SCOPE_CLEANUP] = stopSystemdScope(unitName, {
+      timeoutMs: Math.max(
+        10_000,
+        Number(resourceLimitsConfig()?.cleanupTimeoutSec ?? 2) * 1000 + 5_000,
+      ),
+    });
+    // The exit hook performs best-effort cleanup even when a caller does not
+    // await it. Attach a handler immediately while preserving rejection for
+    // lifecycle paths that do await the original promise.
+    child[RESOURCE_SCOPE_CLEANUP].catch(() => {});
+  }
+  return child[RESOURCE_SCOPE_CLEANUP];
 }
 
 function terminateChildProcess(child, signal = "SIGTERM") {
@@ -2735,13 +2765,28 @@ async function runCommand(command, cwd, options = {}) {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      resolve({
-        exitCode: code ?? 1,
-        output: combineOutput(stdout, stderr),
-      });
-    });
+    let settled = false;
+    const settle = async (error, code = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      try {
+        await cleanupChildResourceScope(child);
+        if (error) {
+          reject(error);
+        } else {
+          resolve({
+            exitCode: code ?? 1,
+            output: combineOutput(stdout, stderr),
+          });
+        }
+      } catch (cleanupError) {
+        reject(cleanupError);
+      }
+    };
+    child.on("error", (error) => void settle(error));
+    child.on("close", (code) => void settle(null, code));
   });
 }
 
@@ -4972,6 +5017,7 @@ class CodexExec {
     });
     if (!child.stdin || !child.stdout) {
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
       throw new Error("Codex exec did not expose stdio pipes");
     }
 
@@ -5104,6 +5150,7 @@ class CodexExec {
           throw spawnError;
         }
         const { code, signal } = await exitPromise;
+        await cleanupChildResourceScope(child);
         if (args.threadId && stdoutNonThreadEventCount === 0) {
           startSessionFallback();
         }
@@ -5131,8 +5178,8 @@ class CodexExec {
       sessionTailer?.stop();
       stopTaskCompleteWatcher?.();
       rl.close();
-      child.removeAllListeners();
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
     }
   }
 }
@@ -6083,39 +6130,46 @@ class ClaudeExec {
     }
   }
 
-  runToCompletion(commandArgs, input, args) {
-    return new Promise((resolve, reject) => {
-      const child = spawnTracked(this.claudePath, commandArgs, {
-        cwd: args.workingDirectory || process.cwd(),
-        isolateSession: true,
-        limitResources: true,
-        isolationWritableDirs: [
-          args.workingDirectory,
-          ...(args.additionalDirectories ?? []),
-        ],
-        signal: args.signal,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const stdoutChunks = [];
-      child.stdout?.on("data", (chunk) => {
-        stdoutChunks.push(chunk);
-      });
-      const stderrChunks = [];
-      child.stderr?.on("data", (chunk) => {
-        stderrChunks.push(chunk);
-      });
-      child.once("error", reject);
-      child.once("exit", (code, signal) => {
-        if (code === 0 && !signal) {
-          resolve(Buffer.concat(stdoutChunks).toString("utf8"));
-        } else {
-          const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-          reject(new Error(`Claude exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`));
-        }
-      });
-      child.stdin?.write(input ?? "");
-      child.stdin?.end();
+  async runToCompletion(commandArgs, input, args) {
+    const child = spawnTracked(this.claudePath, commandArgs, {
+      cwd: args.workingDirectory || process.cwd(),
+      isolateSession: true,
+      limitResources: true,
+      isolationWritableDirs: [
+        args.workingDirectory,
+        ...(args.additionalDirectories ?? []),
+      ],
+      signal: args.signal,
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    const stdoutChunks = [];
+    child.stdout?.on("data", (chunk) => {
+      stdoutChunks.push(chunk);
+    });
+    const stderrChunks = [];
+    child.stderr?.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+    });
+    const exit = new Promise((resolve) => {
+      child.once("error", (error) => resolve({ error }));
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    child.stdin?.write(input ?? "");
+    child.stdin?.end();
+    try {
+      const result = await exit;
+      if (result.error) {
+        throw result.error;
+      }
+      if (result.code === 0 && !result.signal) {
+        return Buffer.concat(stdoutChunks).toString("utf8");
+      }
+      const detail = result.signal ? `signal ${result.signal}` : `code ${result.code ?? 1}`;
+      throw new Error(`Claude exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`);
+    } finally {
+      terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
+    }
   }
 
   async *run(args) {
@@ -6176,6 +6230,7 @@ class ClaudeExec {
     });
     if (!child.stdin || !child.stdout) {
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
       if (appendSystemPromptTempPath) {
         await fs.unlink(appendSystemPromptTempPath).catch(() => {});
       }
@@ -6186,6 +6241,7 @@ class ClaudeExec {
       const systemPromptInput = child.stdio[CLAUDE_SYSTEM_PROMPT_FD];
       if (!systemPromptInput?.writable) {
         terminateChildProcess(child);
+        await cleanupChildResourceScope(child);
         throw new Error("Claude exec did not expose the system-prompt pipe");
       }
       // Claude opens /dev/fd/3 as --append-system-prompt-file while stdin
@@ -6231,8 +6287,8 @@ class ClaudeExec {
       }
     } finally {
       rl.close();
-      child.removeAllListeners();
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
       if (appendSystemPromptTempPath) {
         await fs.unlink(appendSystemPromptTempPath).catch(() => {});
       }
@@ -6351,6 +6407,7 @@ class AntigravityExec {
     });
     if (!child.stdin || !child.stdout) {
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
       throw new Error("Antigravity bridge did not expose stdio pipes");
     }
 
@@ -6391,8 +6448,8 @@ class AntigravityExec {
       }
     } finally {
       rl.close();
-      child.removeAllListeners();
       terminateChildProcess(child);
+      await cleanupChildResourceScope(child);
     }
   }
 }
@@ -6901,6 +6958,12 @@ async function loadConfig() {
   }
   if (process.env.RALPH_RESOURCE_LIMITS_MEMORY_MAX != null) {
     resourceLimits.memoryMax = String(process.env.RALPH_RESOURCE_LIMITS_MEMORY_MAX);
+  }
+  if (process.env.RALPH_RESOURCE_LIMITS_CLEANUP_TIMEOUT_SEC != null) {
+    resourceLimits.cleanupTimeoutSec = parsePositiveNumber(
+      process.env.RALPH_RESOURCE_LIMITS_CLEANUP_TIMEOUT_SEC,
+      resourceLimits.cleanupTimeoutSec,
+    );
   }
   const sessionIsolation = normalizeSessionIsolation(fileConfig.sessionIsolation);
   if (process.env.RALPH_SESSION_ISOLATION != null) {
@@ -8841,6 +8904,10 @@ function normalizeResourceLimits(value) {
         ? String(value.memorySwapMax)
         : defaults.memorySwapMax,
     oomGroup: parseBoolean(value.oomGroup, defaults.oomGroup),
+    cleanupTimeoutSec: parsePositiveNumber(
+      value.cleanupTimeoutSec,
+      defaults.cleanupTimeoutSec,
+    ),
   };
 }
 
@@ -8885,6 +8952,11 @@ function shellEscape(value) {
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePositiveNumber(value, fallback) {
+  const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
