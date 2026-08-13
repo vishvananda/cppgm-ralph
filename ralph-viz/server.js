@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 15;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 16;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -6291,7 +6291,7 @@ function parseFunctionOutputExitCode(output, command = "") {
   if (commandOutputSessionId(output) != null) {
     return null;
   }
-  return inferDirectMakeExitCode(command, output);
+  return inferCommandOutputExitCode(command, output);
 }
 
 function parseExplicitCommandOutputExitCode(output) {
@@ -6299,6 +6299,41 @@ function parseExplicitCommandOutputExitCode(output) {
     /(?:^|\r?\n)\s*EXIT(?:_CODE)?\s*(?:=\s*)?(-?\d+)\s*$/i,
   );
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function inferCommandOutputExitCode(command, output) {
+  return inferCountedFailureExitCode(command, output) ??
+    inferDirectMakeExitCode(command, output);
+}
+
+function inferCountedFailureExitCode(command, output) {
+  const shell = String(command ?? "")
+    .replace(/\s+\(continued session [^)]+\)\s*$/, "")
+    .trim();
+  const exitMatch = shell.match(
+    /(?:^|\n)\s*exit\s+["']?\$\{?([A-Za-z_]\w*)\}?["']?\s*$/,
+  );
+  if (!exitMatch || !/(?:^|\n)\s*failed=0\s*(?:$|\n)/.test(shell) ||
+      !/(?:^|\n)\s*failed=\$\(\(\s*failed\s*\+\s*1\s*\)\)\s*(?:$|\n)/.test(shell)) {
+    return null;
+  }
+  const statusVariable = escapeRegExp(exitMatch[1]);
+  if (!new RegExp(`(?:^|\\n)\\s*${statusVariable}=0\\s*(?:$|\\n)`).test(shell)) {
+    return null;
+  }
+  const assignedCodes = [...shell.matchAll(
+    new RegExp(`(?:^|\\n)\\s*${statusVariable}=(-?\\d+)\\s*(?=$|\\n)`, "g"),
+  )].map((match) => Number.parseInt(match[1], 10));
+  const failureCodes = [...new Set(assignedCodes.filter((code) => code !== 0))];
+  if (failureCodes.length !== 1) {
+    return null;
+  }
+  const lastLine = commandOutputText(output).trim().split(/\r?\n/).at(-1) ?? "";
+  const failures = lastLine.match(/(?:^|\s)failures=(\d+)(?:\s|$)/);
+  if (!failures) {
+    return null;
+  }
+  return Number.parseInt(failures[1], 10) === 0 ? 0 : failureCodes[0];
 }
 
 function inferDirectMakeExitCode(command, output) {

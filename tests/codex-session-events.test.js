@@ -327,6 +327,61 @@ test("does not mark a yielded built-in wait as completed", () => {
   assert.equal(running.session_id, "22");
 });
 
+test("recovers a counted-failure shell exit code from its terminal summary", () => {
+  const converter = new CodexSessionConverter();
+  const command = [
+    "status=0",
+    "failed=0",
+    "for source_path in one two three; do",
+    "  if ! compile \"$source_path\"; then",
+    "    failed=$((failed + 1))",
+    "    status=1",
+    "  fi",
+    "done",
+    "printf 'cases=3 failures=%s audit_dir=/tmp/audit\\n' \"$failed\"",
+    "exit \"$status\"",
+  ].join("\n");
+  toolCall(
+    converter,
+    "counted-failure",
+    `const r = await tools.exec_command({cmd:${JSON.stringify(command)}}); text(r.output);`,
+  );
+  const failed = toolOutput(
+    converter,
+    "counted-failure",
+    "FAIL one\nFAIL two\ncases=3 failures=2 audit_dir=/tmp/audit\n",
+  ).item;
+  assert.equal(failed.exit_code, 1);
+
+  toolCall(
+    converter,
+    "counted-success",
+    `const r = await tools.exec_command({cmd:${JSON.stringify(command)}}); text(r.output);`,
+  );
+  const passed = toolOutput(
+    converter,
+    "counted-success",
+    "cases=3 failures=0 audit_dir=/tmp/audit\n",
+  ).item;
+  assert.equal(passed.exit_code, 0);
+});
+
+test("does not infer counted-failure status before the terminal summary", () => {
+  const converter = new CodexSessionConverter();
+  const command = "status=0\nfailed=0\nfailed=$((failed + 1))\nstatus=1\nexit \"$status\"";
+  toolCall(
+    converter,
+    "counted-progress",
+    `const r = await tools.exec_command({cmd:${JSON.stringify(command)}}); text(r.output);`,
+  );
+  const progress = toolOutput(
+    converter,
+    "counted-progress",
+    "cases=3 failures=1 audit_dir=/tmp/audit\nstill working\n",
+  ).item;
+  assert.equal(progress.exit_code, null);
+});
+
 test("make failure output wins over a terminal directory marker", () => {
   const converter = new CodexSessionConverter();
   toolCall(
