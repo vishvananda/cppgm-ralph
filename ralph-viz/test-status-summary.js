@@ -150,7 +150,7 @@
             key: "remaining",
             label: "left beyond best",
             value: remainingBeyondBest,
-            text: "",
+            text: String(remainingBeyondBest),
           },
         ].filter((segment) => segment.value > 0),
       },
@@ -171,7 +171,7 @@
             key: "remaining",
             label: "left beyond best",
             value: remainingBeyondBest,
-            text: "",
+            text: String(remainingBeyondBest),
           },
         ].filter((segment) => segment.value > 0),
       });

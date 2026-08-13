@@ -36,7 +36,7 @@ test("turn progress shows peak gain and current regression as separate lanes", (
         segments: [
           { key: "start", label: "start", value: 222, text: "222" },
           { key: "gained", label: "gain at best", value: 7, text: "+7" },
-          { key: "remaining", label: "left beyond best", value: 20, text: "" },
+          { key: "remaining", label: "left beyond best", value: 20, text: "20" },
         ],
       },
       {
@@ -45,7 +45,7 @@ test("turn progress shows peak gain and current regression as separate lanes", (
         segments: [
           { key: "current", label: "current", value: 225, text: "" },
           { key: "lost", label: "below best", value: 4, text: "-4" },
-          { key: "remaining", label: "left beyond best", value: 20, text: "" },
+          { key: "remaining", label: "left beyond best", value: 20, text: "20" },
         ],
       },
     ],
@@ -67,7 +67,7 @@ test("turn progress places a below-start regression between current and best", (
   assert.deepEqual(model.rows[1].segments, [
     { key: "current", label: "current", value: 210, text: "" },
     { key: "lost", label: "below best", value: 19, text: "-19" },
-    { key: "remaining", label: "left beyond best", value: 20, text: "" },
+    { key: "remaining", label: "left beyond best", value: 20, text: "20" },
   ]);
   for (const row of model.rows) {
     assert.equal(row.segments.reduce((sum, segment) => sum + segment.value, 0), 249);
@@ -86,7 +86,7 @@ test("turn progress omits a redundant current lane at the high-water mark", () =
   assert.deepEqual(model.rows[0].segments, [
     { key: "start", label: "start", value: 222, text: "222" },
     { key: "gained", label: "gain at best", value: 7, text: "+7" },
-    { key: "remaining", label: "left beyond best", value: 20, text: "" },
+    { key: "remaining", label: "left beyond best", value: 20, text: "20" },
   ]);
 });
 
