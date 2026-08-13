@@ -1644,6 +1644,7 @@ function buildDisplayEntries(records, options = {}) {
     const nextIds = asyncItemIds(item);
     const parentCommand = parent.startRecord?.event?.item?.command ?? item.command ?? "";
     const hasExitCode = Number.isFinite(item.exit_code) ||
+      Number.isFinite(parseExplicitCommandOutputExitCode(output)) ||
       Number.isFinite(inferDirectMakeExitCode(parentCommand, output));
     if (nextIds.length > 0 && !hasExitCode && (item.session_id != null || asyncOutputStillRunning(output))) {
       parent.asyncCellId = nextIds.at(-1);
@@ -2184,13 +2185,19 @@ function commandEntryExitCode(entry) {
   if (Number.isFinite(item.exit_code)) {
     return item.exit_code;
   }
-  const explicitExitCode = commandOutputText(item.aggregated_output)
-    .match(/(?:^|\n)\s*EXIT_CODE=(-?\d+)\s*(?:$|\n)/);
-  if (explicitExitCode) {
-    return Number.parseInt(explicitExitCode[1], 10);
+  const explicitExitCode = parseExplicitCommandOutputExitCode(item.aggregated_output);
+  if (Number.isFinite(explicitExitCode)) {
+    return explicitExitCode;
   }
   const command = entry.startRecord?.event?.item?.command ?? item.command ?? "";
   return inferDirectMakeExitCode(command, item.aggregated_output);
+}
+
+function parseExplicitCommandOutputExitCode(output) {
+  const match = commandOutputText(output).match(
+    /(?:^|\r?\n)\s*EXIT(?:_CODE)?\s*(?:=\s*)?(-?\d+)\s*$/i,
+  );
+  return match ? Number.parseInt(match[1], 10) : null;
 }
 
 function inferDirectMakeExitCode(command, output) {

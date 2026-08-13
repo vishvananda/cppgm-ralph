@@ -231,6 +231,44 @@ test("does not treat a nested make directory marker as top-level completion", ()
   assert.equal(progress.exit_code, null);
 });
 
+test("parses a terminal EXIT 0 marker from an output-only async poll", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "long-start",
+    'const r = await tools.exec_command({cmd:"long-tool"}); text(JSON.stringify(r));',
+  );
+  toolOutput(converter, "long-start", JSON.stringify({
+    session_id: 229,
+    output: "working\n",
+  }));
+
+  toolCall(
+    converter,
+    "long-finish",
+    'const r = await tools.write_stdin({session_id:229, chars:""}); text(r.output);',
+  );
+  const completed = toolOutput(converter, "long-finish", "done\nEXIT 0\n").item;
+  assert.equal(completed.command, "long-tool (continued session 229)");
+  assert.equal(completed.session_id, "229");
+  assert.equal(completed.exit_code, 0);
+});
+
+test("does not parse a non-terminal exit-looking progress line", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "exit-progress",
+    'const r = await tools.exec_command({cmd:"long-tool"}); text(r.output);',
+  );
+  const progress = toolOutput(
+    converter,
+    "exit-progress",
+    "subcommand\nEXIT 0\nstill working\n",
+  ).item;
+  assert.equal(progress.exit_code, null);
+});
+
 test("make failure output wins over a terminal directory marker", () => {
   const converter = new CodexSessionConverter();
   toolCall(

@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 12;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 13;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -6269,10 +6269,21 @@ function parseFunctionOutputExitCode(output, command = "") {
   if (match) {
     return Number.parseInt(match[1], 10);
   }
+  const explicitExitCode = parseExplicitCommandOutputExitCode(output);
+  if (Number.isFinite(explicitExitCode)) {
+    return explicitExitCode;
+  }
   if (commandOutputSessionId(output) != null) {
     return null;
   }
   return inferDirectMakeExitCode(command, output);
+}
+
+function parseExplicitCommandOutputExitCode(output) {
+  const match = commandOutputText(output).match(
+    /(?:^|\r?\n)\s*EXIT(?:_CODE)?\s*(?:=\s*)?(-?\d+)\s*$/i,
+  );
+  return match ? Number.parseInt(match[1], 10) : null;
 }
 
 function inferDirectMakeExitCode(command, output) {

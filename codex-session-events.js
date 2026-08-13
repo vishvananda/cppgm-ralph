@@ -761,10 +761,21 @@ function parseFunctionOutputExitCode(output, command = "") {
   if (match) {
     return Number.parseInt(match[1], 10);
   }
+  const explicitExitCode = parseExplicitCommandOutputExitCode(output);
+  if (Number.isFinite(explicitExitCode)) {
+    return explicitExitCode;
+  }
   if (parseRunningSessionId(output) != null) {
     return null;
   }
   return inferDirectMakeExitCode(command, output);
+}
+
+function parseExplicitCommandOutputExitCode(output) {
+  const match = textValue(output).match(
+    /(?:^|\r?\n)\s*EXIT(?:_CODE)?\s*(?:=\s*)?(-?\d+)\s*$/i,
+  );
+  return match ? Number.parseInt(match[1], 10) : null;
 }
 
 function inferDirectMakeExitCode(command, output) {
