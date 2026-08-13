@@ -4771,7 +4771,7 @@ class CodexThread {
   async *runStreamedInternal(input, turnOptions = {}) {
     const { prompt, images } = normalizeCodexInput(input);
     const events = this.exec.run({
-      input: prompt,
+      input: attachCodexToolResultMetadataPrompt(prompt),
       baseUrl: this.codexOptions.baseUrl,
       apiKey: this.codexOptions.apiKey,
       threadId: this._id,
@@ -6635,6 +6635,21 @@ function normalizeCodexInput(input) {
     }
   }
   return { prompt: promptParts.join("\n\n"), images };
+}
+
+const CODEX_TOOL_RESULT_METADATA_MARKER = "<ralph_codex_tool_result_metadata>";
+
+function attachCodexToolResultMetadataPrompt(prompt) {
+  const text = String(prompt ?? "");
+  if (text.includes(CODEX_TOOL_RESULT_METADATA_MARKER)) {
+    return text;
+  }
+  return `${text}\n\n${CODEX_TOOL_RESULT_METADATA_MARKER}\n` +
+    "When calling tools.exec_command or tools.write_stdin from JavaScript code mode, " +
+    "emit each complete result object (for example, text(JSON.stringify(result))) instead " +
+    "of emitting only result.output. For batches, preserve exit_code and session_id for " +
+    "every result so Ralph can reconstruct long-running commands.\n" +
+    `</ralph_codex_tool_result_metadata>`;
 }
 
 function buildCodexExecEnv(envOverride, apiKey) {

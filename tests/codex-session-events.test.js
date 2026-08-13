@@ -162,3 +162,87 @@ rs.forEach((r,i)=>text(\`--- \${i+1} ---\\n\${r.output}\`));
     [null, null, null, null, 0],
   );
 });
+
+test("infers terminal make results when code mode emitted only result.output", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "start",
+    'const r = await tools.exec_command({cmd:"make test-report-through-pa30"}); text(JSON.stringify(r));',
+  );
+  const started = toolOutput(converter, "start", JSON.stringify({
+    session_id: 60179,
+    output: "LINK cppgm++\n",
+  })).item;
+  assert.equal(started.exit_code, null);
+
+  toolCall(
+    converter,
+    "progress",
+    'const r = await tools.write_stdin({session_id:60179, chars:""}); text(r.output);',
+  );
+  const progress = toolOutput(converter, "progress", "===== pa1 =====\n").item;
+  assert.equal(progress.session_id, "60179");
+  assert.equal(progress.exit_code, null);
+
+  toolCall(
+    converter,
+    "finish",
+    'const r = await tools.write_stdin({session_id:60179, chars:""}); text(r.output);',
+  );
+  const finish = toolOutput(
+    converter,
+    "finish",
+    "===== pa1 =====\n===== pa30 =====\n" +
+      "===== ALL TESTS PASSED SUCCESSFULLY! (4132 / 4132) =====\n",
+  ).item;
+  assert.equal(finish.command, "make test-report-through-pa30 (continued session 60179)");
+  assert.equal(finish.session_id, "60179");
+  assert.equal(finish.exit_code, 0);
+});
+
+test("infers a completed make build from its terminal directory marker", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "build",
+    'const r = await tools.exec_command({cmd:"make -C dev cppgm++"}); text(r.output);',
+  );
+  const completed = toolOutput(
+    converter,
+    "build",
+    "LINK cppgm++\nmake: Leaving directory '/work/dev'\n",
+  ).item;
+  assert.equal(completed.exit_code, 0);
+});
+
+test("does not treat a nested make directory marker as top-level completion", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "nested-build",
+    'const r = await tools.exec_command({cmd:"make all"}); text(r.output);',
+  );
+  const progress = toolOutput(
+    converter,
+    "nested-build",
+    "make[1]: Leaving directory '/work/dev'\n",
+  ).item;
+  assert.equal(progress.exit_code, null);
+});
+
+test("make failure output wins over a terminal directory marker", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "build-failure",
+    'const r = await tools.exec_command({cmd:"make -C dev cppgm++"}); text(r.output);',
+  );
+  const completed = toolOutput(
+    converter,
+    "build-failure",
+    "src/file.cpp: error: broken\nmake: *** [Makefile:1: file.o] Error 1\n" +
+      "make: Leaving directory '/work/dev'\n",
+  ).item;
+  assert.equal(completed.exit_code, 2);
+});

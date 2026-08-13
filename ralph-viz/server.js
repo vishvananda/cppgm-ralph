@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 11;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 12;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -725,7 +725,7 @@ function progressEventsFromRunEvents(events) {
     const metadataItem = startItem ?? item;
     const toolSource = commandToolSource(metadataItem);
     const waitCellId = waitCommandCellId(toolSource);
-    const outputCellId = commandOutputSessionId(item.aggregated_output);
+    const outputCellId = commandItemSessionId(item);
     const sessionLoadKey = commandSessionLoadKey(startItem ?? item);
     const command = (waitCellId
       ? commandsByAsyncCell.get(asyncRecordMapKey(record, waitCellId))
@@ -827,7 +827,7 @@ function normalizeRunAsyncCommandChains(events) {
     if (item.id) {
       startsById.delete(item.id);
     }
-    const outputSessionId = commandOutputSessionId(item.aggregated_output);
+    const outputSessionId = commandItemSessionId(item);
     if (outputSessionId) {
       commandsByAsyncCell.set(
         asyncRecordMapKey(record, outputSessionId),
@@ -860,6 +860,13 @@ function asyncRecordMapKey(record, value) {
 
 function commandToolSource(item) {
   return String(item?.raw?.input ?? item?.command ?? "");
+}
+
+function commandItemSessionId(item) {
+  if (item?.session_id != null && item.session_id !== "") {
+    return String(item.session_id);
+  }
+  return commandOutputSessionId(item?.aggregated_output);
 }
 
 function commandSessionLoadKey(item) {
@@ -6274,9 +6281,19 @@ function inferDirectMakeExitCode(command, output) {
     return null;
   }
   const outputText = commandOutputText(output);
-  return /^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)
-    ? 2
-    : null;
+  if (/^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)) {
+    return 2;
+  }
+  return isTerminalSuccessfulMakeOutput(outputText) ? 0 : null;
+}
+
+function isTerminalSuccessfulMakeOutput(output) {
+  const lastLine = String(output ?? "").trim().split(/\r?\n/).at(-1) ?? "";
+  return (
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \(\d+\s*\/\s*\d+\))? =====$/.test(lastLine) ||
+    /^make: Leaving directory ['"].+['"]$/.test(lastLine) ||
+    /^pa\d+ course\/[^:]+: PASS \(\d+\/\d+\)$/.test(lastLine)
+  );
 }
 
 function isDirectMakeCommandForExitInference(command) {

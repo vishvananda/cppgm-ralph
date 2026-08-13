@@ -1642,7 +1642,9 @@ function buildDisplayEntries(records, options = {}) {
       parent.asyncPollRecords.push(record);
     }
     const nextIds = asyncItemIds(item);
-    const hasExitCode = Number.isFinite(item.exit_code);
+    const parentCommand = parent.startRecord?.event?.item?.command ?? item.command ?? "";
+    const hasExitCode = Number.isFinite(item.exit_code) ||
+      Number.isFinite(inferDirectMakeExitCode(parentCommand, output));
     if (nextIds.length > 0 && !hasExitCode && (item.session_id != null || asyncOutputStillRunning(output))) {
       parent.asyncCellId = nextIds.at(-1);
       for (const nextId of nextIds) {
@@ -2197,9 +2199,19 @@ function inferDirectMakeExitCode(command, output) {
     return null;
   }
   const outputText = commandOutputText(output);
-  return /^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)
-    ? 2
-    : null;
+  if (/^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)) {
+    return 2;
+  }
+  return isTerminalSuccessfulMakeOutput(outputText) ? 0 : null;
+}
+
+function isTerminalSuccessfulMakeOutput(output) {
+  const lastLine = String(output ?? "").trim().split(/\r?\n/).at(-1) ?? "";
+  return (
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \(\d+\s*\/\s*\d+\))? =====$/.test(lastLine) ||
+    /^make: Leaving directory ['"].+['"]$/.test(lastLine) ||
+    /^pa\d+ course\/[^:]+: PASS \(\d+\/\d+\)$/.test(lastLine)
+  );
 }
 
 function isDirectMakeCommandForExitInference(command) {
@@ -4602,8 +4614,12 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
   const failingIndex = failingStage ? stageNames.indexOf(failingStage) : -1;
   const stageCount = stageNames.length;
   const canInferPassingThrough = isContiguousStagePrefix(stageNames);
+  const sharedFailureStages = TEST_STATUS_SUMMARY?.testReportFailureLinesByStage(output) ?? [];
   const stages = stageSections.map((stage, index) => {
-    const failureLines = extractStageFailureLines(stage.body);
+    const sharedStage = sharedFailureStages[index];
+    const failureLines = sharedStage?.name === stage.name
+      ? sharedStage.failureLines
+      : extractStageFailureLines(stage.body);
     const failed = failureLines.length;
     return {
       name: stage.name,
@@ -4813,7 +4829,7 @@ function buildAgentTestProgressState(records) {
         : null) ??
       null;
     const commandForProgress = parentCommand ?? unwrapCommand(item.command ?? startItem?.command ?? "");
-    for (const outputId of asyncOutputIds(item.aggregated_output)) {
+    for (const outputId of asyncItemIds(item)) {
       commandsByAsyncCell.set(asyncRecordMapKey(record, outputId), commandForProgress);
     }
     const sessionStoreKey = commandSessionStoreKey(startItem ?? item);

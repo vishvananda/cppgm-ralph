@@ -15,6 +15,23 @@
     return stage.status === "pass" ? 0 : null;
   }
 
+  function testReportFailureLinesByStage(output) {
+    const text = String(output ?? "");
+    const headers = [...text.matchAll(/^===== (pa\d+) =====$/gm)].map((match) => ({
+      name: match[1],
+      index: match.index ?? 0,
+    }));
+    return headers.map((header, index) => ({
+      name: header.name,
+      failureLines: text
+        .slice(header.index, headers[index + 1]?.index ?? text.length)
+        .split(/\r?\n/)
+        .filter((line) =>
+          /^(?:(?:pa\d+\/|pa\d+\/\.\.\/).+|(?:tests|course|cppgm\.tests)\/.+): /.test(line) &&
+          /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line)),
+    }));
+  }
+
   // A through-run aggregate can include tests not represented in its stage
   // rows. Do not assign that unexplained residual to a stage whose own row is
   // already a complete passing result.
@@ -224,5 +241,6 @@
     inferStageTotal,
     passingPrefixTotal,
     summarizePriorStageFailures,
+    testReportFailureLinesByStage,
   });
 })(globalThis);

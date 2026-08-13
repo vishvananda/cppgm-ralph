@@ -761,6 +761,9 @@ function parseFunctionOutputExitCode(output, command = "") {
   if (match) {
     return Number.parseInt(match[1], 10);
   }
+  if (parseRunningSessionId(output) != null) {
+    return null;
+  }
   return inferDirectMakeExitCode(command, output);
 }
 
@@ -770,9 +773,19 @@ function inferDirectMakeExitCode(command, output) {
     return null;
   }
   const outputText = textValue(output);
-  return /^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)
-    ? 2
-    : null;
+  if (/^make(?:\[\d+\])?: \*\*\* .*?(?:Error \d+|Terminated|Killed)\s*$/m.test(outputText)) {
+    return 2;
+  }
+  return isTerminalSuccessfulMakeOutput(outputText) ? 0 : null;
+}
+
+function isTerminalSuccessfulMakeOutput(output) {
+  const lastLine = String(output ?? "").trim().split(/\r?\n/).at(-1) ?? "";
+  return (
+    /^===== ALL TESTS PASSED SUCCESSFULLY!(?: \(\d+\s*\/\s*\d+\))? =====$/.test(lastLine) ||
+    /^make: Leaving directory ['"].+['"]$/.test(lastLine) ||
+    /^pa\d+ course\/[^:]+: PASS \(\d+\/\d+\)$/.test(lastLine)
+  );
 }
 
 function isDirectMakeCommand(command) {

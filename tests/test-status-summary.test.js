@@ -8,6 +8,7 @@ const {
   inferStageTotal,
   passingPrefixTotal,
   summarizePriorStageFailures,
+  testReportFailureLinesByStage,
 } = globalThis.RALPH_TEST_STATUS_SUMMARY;
 
 test("turn progress shows peak gain and current regression as separate lanes", () => {
@@ -166,6 +167,73 @@ test("prior failure summary excludes the active PA", () => {
     total: 10,
     stages: [{ name: "pa14", failed: 10 }],
   });
+});
+
+test("PA30 through-report preserves the full prior-suite failure count", () => {
+  const failedByStage = new Map([
+    ["pa16", 2],
+    ["pa17", 6],
+    ["pa18", 9],
+    ["pa19", 3],
+    ["pa26", 7],
+    ["pa27", 1],
+    ["pa28", 3],
+  ]);
+  const summary = summarizePriorStageFailures([{
+    recordedAt: "2026-08-13T02:24:12.725Z",
+    status: {
+      testsPassed: 4101,
+      testsTotal: 4132,
+      stages: Array.from({ length: 30 }, (_, index) => {
+        const name = `pa${index + 1}`;
+        const failed = failedByStage.get(name) ?? 0;
+        return { name, status: failed ? "fail" : "unknown", failed };
+      }),
+    },
+  }], "pa30");
+
+  assert.equal(summary.total, 31);
+  assert.deepEqual(summary.stages, [
+    { name: "pa16", failed: 2 },
+    { name: "pa17", failed: 6 },
+    { name: "pa18", failed: 9 },
+    { name: "pa19", failed: 3 },
+    { name: "pa26", failed: 7 },
+    { name: "pa27", failed: 1 },
+    { name: "pa28", failed: 3 },
+  ]);
+});
+
+test("extracts all 31 prior-suite failures from the observed PA30 report shape", () => {
+  const failedByStage = new Map([
+    ["pa16", 2],
+    ["pa17", 6],
+    ["pa18", 9],
+    ["pa19", 3],
+    ["pa26", 7],
+    ["pa27", 1],
+    ["pa28", 3],
+  ]);
+  const report = Array.from({ length: 30 }, (_, index) => {
+    const name = `pa${index + 1}`;
+    const failures = Array.from({ length: failedByStage.get(name) ?? 0 }, (_, failureIndex) =>
+      `${name}/tests/general/failure-${failureIndex + 1}.t: ERROR: generated output does not match reference`);
+    return [`===== ${name} =====`, ...failures].join("\n");
+  }).join("\n") + "\n===== TEST SUMMARY: 4101 / 4132 TESTS PASSED =====\n";
+
+  const stages = testReportFailureLinesByStage(report)
+    .filter((stage) => stage.failureLines.length > 0)
+    .map((stage) => ({ name: stage.name, failed: stage.failureLines.length }));
+  assert.deepEqual(stages, [
+    { name: "pa16", failed: 2 },
+    { name: "pa17", failed: 6 },
+    { name: "pa18", failed: 9 },
+    { name: "pa19", failed: 3 },
+    { name: "pa26", failed: 7 },
+    { name: "pa27", failed: 1 },
+    { name: "pa28", failed: 3 },
+  ]);
+  assert.equal(stages.reduce((sum, stage) => sum + stage.failed, 0), 31);
 });
 
 test("newer stage evidence clears failures without erasing other stages", () => {
