@@ -105,3 +105,36 @@ test("session conversion upgrades an old single-session view of a parallel poll"
   assert.equal(merged[0].event.item.command, converted[0].event.item.command);
   assert.equal(merged[1].event.item.batch_commands.length, 2);
 });
+
+test("session conversion upgrades an unresolved wait with completion metadata", () => {
+  const primary = [
+    commandRecord("item.started", {
+      id: "wait-1",
+      type: "command_execution",
+      status: "running",
+      command: 'wait {"cell_id":"21"}',
+    }, "2026-08-13T03:31:00.000Z"),
+    commandRecord("item.completed", {
+      id: "wait-1",
+      type: "command_execution",
+      status: "completed",
+      command: "profile-tool (continued session 21)",
+      session_id: "21",
+      exit_code: null,
+      aggregated_output: "profile report",
+    }, "2026-08-13T03:31:17.000Z"),
+  ];
+  const converted = [
+    primary[0],
+    commandRecord("item.completed", {
+      ...primary[1].event.item,
+      async_completed: true,
+    }, "2026-08-13T03:31:17.000Z"),
+  ];
+
+  assert.equal(sessionItemCardSuppressionKeys(primary).size, 0);
+  const merged = mergeEventStreams(primary, converted);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].event.item.exit_code, null);
+  assert.equal(merged[1].event.item.async_completed, true);
+});

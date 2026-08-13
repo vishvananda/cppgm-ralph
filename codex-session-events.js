@@ -344,6 +344,7 @@ export class CodexSessionConverter {
             ? null
             : call?.args?.session_id ?? parentSessionId ?? sessionId ?? null,
           stdin: call?.name === "write_stdin" ? call.args?.chars ?? "" : null,
+          ...(isCompletedWaitOutput(call, payload.output) ? { async_completed: true } : {}),
           aggregated_output: commandOutputText(payload.output),
           ...(batchCommands ? { batch_commands: batchCommands } : {}),
           raw: payload,
@@ -382,6 +383,10 @@ export class CodexSessionConverter {
     }
     return null;
   }
+}
+
+function isCompletedWaitOutput(call, output) {
+  return call?.name === "wait" && /^Script completed\b/m.test(textValue(output));
 }
 
 function buildCommandBatch(commands, output) {

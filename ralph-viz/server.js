@@ -44,7 +44,7 @@ const RUN_USAGE_CACHE_VERSION = 25;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 13;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 15;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -3877,6 +3877,9 @@ function shouldPreferSessionItemCard(existing, candidate) {
   if (hasCommandBatchLabels(candidateCommand) && !hasCommandBatchLabels(existingCommand)) {
     return true;
   }
+  if (candidateItem.async_completed === true && existingItem.async_completed !== true) {
+    return true;
+  }
   return isRawCodeModeCommand(existingCommand) && !isRawCodeModeCommand(candidateCommand);
 }
 
@@ -4003,12 +4006,19 @@ export function sessionItemCardSuppressionKeys(events) {
     const item = event?.event?.item;
     if (
       item?.type === "command_execution" &&
-      (isRawCodeModeCommand(item.command) || hasNumberedCommandResults(item.aggregated_output))
+      (isRawCodeModeCommand(item.command) ||
+        hasNumberedCommandResults(item.aggregated_output) ||
+        isUnresolvedAsyncCommandItem(item))
     ) {
       keys.delete(eventItemCardStreamKey(event));
     }
   }
   return keys;
+}
+
+function isUnresolvedAsyncCommandItem(item) {
+  return item?.session_id != null && item.session_id !== "" &&
+    !Number.isFinite(item.exit_code) && item.async_completed !== true;
 }
 
 function isRawCodeModeCommand(command) {
@@ -5879,6 +5889,7 @@ function convertCodexResponseItem(payload, context) {
           ? null
           : call?.args?.session_id ?? parentSessionId ?? sessionId ?? null,
         stdin: call?.name === "write_stdin" ? call.args?.chars ?? "" : null,
+        ...(isCompletedWaitOutput(call, payload.output) ? { async_completed: true } : {}),
         aggregated_output: commandOutputText(payload.output),
         ...(batchCommands ? { batch_commands: batchCommands } : {}),
         raw: payload,
@@ -5916,6 +5927,10 @@ function convertCodexResponseItem(payload, context) {
     });
   }
   return null;
+}
+
+function isCompletedWaitOutput(call, output) {
+  return call?.name === "wait" && /^Script completed\b/m.test(textValue(output));
 }
 
 function buildCommandBatch(commands, output) {

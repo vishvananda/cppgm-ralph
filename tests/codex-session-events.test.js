@@ -26,6 +26,18 @@ function toolOutput(converter, callId, output) {
   });
 }
 
+function functionCall(converter, callId, name, args) {
+  return converter.convert({
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name,
+      call_id: callId,
+      arguments: JSON.stringify(args),
+    },
+  });
+}
+
 function labeledJsonChunks(chunks, firstLabel = 0) {
   return chunks
     .map((chunk, index) => `--- ${firstLabel + index} ---\n${JSON.stringify(chunk)}`)
@@ -267,6 +279,52 @@ test("does not parse a non-terminal exit-looking progress line", () => {
     "subcommand\nEXIT 0\nstill working\n",
   ).item;
   assert.equal(progress.exit_code, null);
+});
+
+test("marks a completed built-in wait as done when the nested exit code was discarded", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "profile-start",
+    'const r = await tools.exec_command({cmd:"profile-tool"}); text(r.output);',
+  );
+  toolOutput(converter, "profile-start", "Script running with cell ID 21\n");
+
+  functionCall(converter, "profile-wait", "wait", {
+    cell_id: "21",
+    yield_time_ms: 30000,
+  });
+  const completed = toolOutput(converter, "profile-wait", [
+    { type: "input_text", text: "Script completed\nWall time 16.8 seconds\nOutput:\n" },
+    { type: "input_text", text: "perf_status=0\nprofile report\n" },
+  ]).item;
+  assert.equal(completed.command, "profile-tool (continued session 21)");
+  assert.equal(completed.session_id, "21");
+  assert.equal(completed.exit_code, null);
+  assert.equal(completed.async_completed, true);
+  assert.equal(completed.aggregated_output, "perf_status=0\nprofile report");
+});
+
+test("does not mark a yielded built-in wait as completed", () => {
+  const converter = new CodexSessionConverter();
+  toolCall(
+    converter,
+    "profile-start-running",
+    'const r = await tools.exec_command({cmd:"profile-tool"}); text(r.output);',
+  );
+  toolOutput(converter, "profile-start-running", "Script running with cell ID 22\n");
+
+  functionCall(converter, "profile-wait-running", "wait", {
+    cell_id: "22",
+    yield_time_ms: 30000,
+  });
+  const running = toolOutput(
+    converter,
+    "profile-wait-running",
+    "Script running with cell ID 22\nWall time 30.0 seconds\nOutput:\nstill working\n",
+  ).item;
+  assert.notEqual(running.async_completed, true);
+  assert.equal(running.session_id, "22");
 });
 
 test("make failure output wins over a terminal directory marker", () => {

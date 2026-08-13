@@ -1646,14 +1646,15 @@ function buildDisplayEntries(records, options = {}) {
     const hasExitCode = Number.isFinite(item.exit_code) ||
       Number.isFinite(parseExplicitCommandOutputExitCode(output)) ||
       Number.isFinite(inferDirectMakeExitCode(parentCommand, output));
-    if (nextIds.length > 0 && !hasExitCode && (item.session_id != null || asyncOutputStillRunning(output))) {
+    const completed = hasExitCode || item.async_completed === true || asyncOutputCompleted(output);
+    if (completed) {
+      parent.asyncCompletedRecord = record;
+      unregisterAsyncEntry(parent);
+    } else if (nextIds.length > 0 && (item.session_id != null || asyncOutputStillRunning(output))) {
       parent.asyncCellId = nextIds.at(-1);
       for (const nextId of nextIds) {
         asyncEntriesByCell.set(asyncRecordMapKey(record, nextId), parent);
       }
-    } else if (hasExitCode || asyncOutputCompleted(output)) {
-      parent.asyncCompletedRecord = record;
-      unregisterAsyncEntry(parent);
     }
   };
 
