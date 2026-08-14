@@ -49,6 +49,7 @@ const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
 const TEST_STATUS_SUMMARY = globalThis.RALPH_TEST_STATUS_SUMMARY;
+const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -1300,8 +1301,14 @@ function dockProgressLegendHtml(model) {
   if (model.hasStart) {
     items.push({ key: "start", text: `start ${fmtInt(model.start)}` });
   }
+  const currentText = model.isBounded
+    ? `${fmtInt(model.current)}-${fmtInt(model.currentUpper)}`
+    : fmtInt(model.current);
   items.push(
-    { key: "current", text: `current ${fmtInt(model.current)}` },
+    { key: "current", text: `current ${currentText}` },
+    ...(model.isBounded
+      ? [{ key: "unknown", text: `unrun ${fmtInt(model.unknown)}` }]
+      : []),
     { key: "best", text: `best ${fmtInt(model.best)}` },
     { key: "total", text: `${fmtInt(model.total)} total` },
   );
@@ -1319,11 +1326,18 @@ function dockProgressAriaLabel(context, model) {
     parts.push(`started with ${model.start} passing`);
     parts.push(`reached a best of ${model.best}, ${model.bestDelta} above the start`);
   }
-  parts.push(`${model.current} currently passing`);
-  if (model.regression > 0) {
+  parts.push(model.isBounded
+    ? `between ${model.current} and ${model.currentUpper} currently passing`
+    : `${model.current} currently passing`);
+  if (model.isBounded) {
+    parts.push(`${model.knownFailed} confirmed failing`);
+    parts.push(`${model.unknown} not run after the first failure`);
+  } else if (model.regression > 0) {
     parts.push(`${model.regression} below the best`);
   }
-  parts.push(`${model.remaining} remaining`);
+  if (!model.isBounded) {
+    parts.push(`${model.remaining} remaining`);
+  }
   parts.push(`${model.total} total`);
   return parts.join(", ");
 }
@@ -1358,6 +1372,7 @@ function renderDockProgressChart(el, phase, progress, model) {
     best: cssThemeColor("--progress-gain", "#2f8f50"),
     gained: cssThemeColor("--progress-gain", "#2f8f50"),
     lost: cssThemeColor("--progress-loss", "#a94343"),
+    unknown: cssThemeColor("--progress-unknown", "#5a6470"),
     remaining: cssThemeColor("--progress-remaining", "#242424"),
   };
   const textColors = {
@@ -1366,6 +1381,7 @@ function renderDockProgressChart(el, phase, progress, model) {
     best: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     gained: cssThemeColor("--progress-bar-text", "#f7f7f7"),
     lost: cssThemeColor("--progress-bar-text", "#f7f7f7"),
+    unknown: cssThemeColor("--progress-unknown-text", "#f1f1f1"),
     remaining: cssThemeColor("--progress-remaining-text", "#b9b9b9"),
   };
   chart.setOption({
@@ -1442,11 +1458,14 @@ function dockProgressTooltipHtml(model) {
   return `
     <div class="dock-progress-tooltip">
       ${model.hasStart ? `<div><span>Start</span><strong>${fmtInt(model.start)}</strong></div>` : ""}
-      <div><span>Current</span><strong>${fmtInt(model.current)}</strong></div>
+      <div><span>Current</span><strong>${model.isBounded ? `${fmtInt(model.current)}-${fmtInt(model.currentUpper)}` : fmtInt(model.current)}</strong></div>
       <div><span>Best</span><strong>${fmtInt(model.best)}</strong></div>
       ${model.hasStart ? `<div><span>Peak gain</span><strong>${bestDelta}</strong></div>` : ""}
-      ${model.regression > 0 ? `<div><span>Below best</span><strong>${regression}</strong></div>` : ""}
-      <div><span>Remaining</span><strong>${fmtInt(model.remaining)}</strong></div>
+      ${model.isBounded
+        ? `<div><span>Confirmed failing</span><strong>${fmtInt(model.knownFailed)}</strong></div>
+          <div><span>Not run</span><strong>${fmtInt(model.unknown)}</strong></div>`
+        : model.regression > 0 ? `<div><span>Below best</span><strong>${regression}</strong></div>` : ""}
+      ${model.isBounded ? "" : `<div><span>Remaining</span><strong>${fmtInt(model.remaining)}</strong></div>`}
       <div><span>Total</span><strong>${fmtInt(model.total)}</strong></div>
     </div>
   `;
@@ -4599,10 +4618,21 @@ function anchorTestStatusTotals(status, anchors) {
       return stage;
     }
     changed = true;
+    const lowerPassed = stage?.status === "pass" ? anchor : Math.min(stage?.passed ?? 0, anchor);
+    const oldUpper = Math.max(stage?.passed ?? 0, stage?.passedUpperBound ?? stage?.passed ?? 0);
+    const bounded = oldUpper > (stage?.passed ?? 0);
+    const knownFailed = Math.max(0, (stage?.total ?? 0) - oldUpper);
+    const passedUpperBound = stage?.status === "pass"
+      ? anchor
+      : bounded
+        ? Math.max(lowerPassed, anchor - knownFailed)
+        : lowerPassed;
     return {
       ...stage,
       total: anchor,
-      passed: stage?.status === "pass" ? anchor : Math.min(stage?.passed ?? 0, anchor),
+      passed: lowerPassed,
+      passedUpperBound,
+      unknown: Math.max(0, passedUpperBound - lowerPassed),
     };
   });
   if (!changed) {
@@ -4610,9 +4640,17 @@ function anchorTestStatusTotals(status, anchors) {
   }
   const stageTotal = anchoredStages.reduce((sum, stage) => sum + (stage.total ?? 0), 0);
   const stagePassed = anchoredStages.reduce((sum, stage) => sum + (stage.passed ?? 0), 0);
+  const stagePassedUpperBound = anchoredStages.reduce(
+    (sum, stage) => sum + (stage.passedUpperBound ?? stage.passed ?? 0),
+    0,
+  );
   return {
     ...status,
     testsPassed: Math.max(status.testsPassed ?? 0, stagePassed),
+    testsPassedUpperBound: Math.max(
+      status.testsPassedUpperBound ?? status.testsPassed ?? 0,
+      stagePassedUpperBound,
+    ),
     testsTotal: Math.max(status.testsTotal ?? 0, stageTotal),
     stages: anchoredStages,
   };
@@ -5123,6 +5161,10 @@ function deriveRalphTestProgress(record, tracker) {
       recordedAt: record.recordedAt,
       status: "running",
       passed: Math.max(0, Math.min(progress.passed, configured.total)),
+      passedUpperBound: Math.max(
+        0,
+        Math.min(progress.passedUpperBound ?? progress.passed, configured.total),
+      ),
       total: configured.total,
       isTurnStartBaseline: true,
     };
@@ -5136,6 +5178,10 @@ function deriveRalphTestProgress(record, tracker) {
     recordedAt: testStatus.recordedAt ?? record.recordedAt,
     status: progress.status,
     passed: Math.max(0, Math.min(progress.passed, configured.total)),
+    passedUpperBound: Math.max(
+      0,
+      Math.min(progress.passedUpperBound ?? progress.passed, configured.total),
+    ),
     total: configured.total,
   };
 }
@@ -5160,6 +5206,10 @@ function deriveCachedAgentTestProgress(record) {
     recordedAt: raw?.recordedAt ?? record.recordedAt,
     status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
     passed: Math.max(0, Math.min(raw?.passed ?? 0, total)),
+    passedUpperBound: Math.max(
+      Math.max(0, Math.min(raw?.passed ?? 0, total)),
+      Math.min(raw?.passedUpperBound ?? raw?.passed ?? 0, total),
+    ),
     total,
   };
 }
@@ -5231,6 +5281,10 @@ function progressFromTestStatus(testStatus, stage, tracker) {
   ) {
     return {
       passed: Math.max(0, testStatus?.testsPassed ?? 0),
+      passedUpperBound: Math.max(
+        0,
+        testStatus?.testsPassedUpperBound ?? testStatus?.testsPassed ?? 0,
+      ),
       status: testStatus?.allTestsPassed ? "pass" : "fail",
     };
   }
@@ -5241,11 +5295,16 @@ function progressFromTestStatus(testStatus, stage, tracker) {
     const passed = stagePassedCount(stageStatus);
     return {
       passed: passed ?? inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ?? 0,
+      passedUpperBound: stageStatus?.passedUpperBound ?? passed ??
+        inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ?? 0,
       status: stageStatus.status === "pass" || testStatus.allTestsPassed ? "pass" : "fail",
     };
   }
   return {
     passed: inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ??
+      Math.max(0, testStatus?.testsPassed ?? 0),
+    passedUpperBound: testStatus?.testsPassedUpperBound ??
+      inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ??
       Math.max(0, testStatus?.testsPassed ?? 0),
     status: testStatus?.allTestsPassed ? "pass" : "fail",
   };
@@ -5614,6 +5673,10 @@ function buildAgentTestProgressObservation(record, commandInfo, progress) {
     recordedAt: record.recordedAt,
     status: progress.status,
     passed: Math.max(0, progress.passed ?? 0),
+    passedUpperBound: Math.max(
+      Math.max(0, progress.passed ?? 0),
+      progress.passedUpperBound ?? progress.passed ?? 0,
+    ),
     total: Math.max(0, progress.total ?? 0),
   };
 }
@@ -5713,12 +5776,26 @@ function summaryProgressStatus(summary, exitCode) {
 }
 
 function applyAgentTestProgressObservation(tracker, observation) {
-  const target = tracker.turnTargets.get(progressTargetKey(observation.turn, observation.stage));
+  const targetKey = progressTargetKey(observation.turn, observation.stage);
+  let target = tracker.turnTargets.get(targetKey);
   if (!target && turnHasConfiguredProgressTarget(tracker, observation.turn)) {
     return null;
   }
   if (target && observation.total !== target.total) {
-    return null;
+    const baselineTotal = target.configuredTotal ?? target.total;
+    const expandedTotal = TEST_PROGRESS_EVIDENCE?.expandedProgressTargetTotal({
+      targetTotal: target.total,
+      baselineTotal,
+      observedTotal: observation.total,
+      priorStageTotal: knownPriorStageTotal(tracker, observation.stageNumber) ?? 0,
+      hasSubset: observation.hasSubset,
+    });
+    if (!expandedTotal) {
+      return null;
+    }
+    target = { ...target, total: expandedTotal, configuredTotal: baselineTotal };
+    tracker.turnTargets.set(targetKey, target);
+    updateKnownStageTotal(tracker, observation.stage, expandedTotal);
   }
   if (!target && !observation.hasSubset) {
     updateKnownStageTotal(tracker, observation.stage, observation.total);
@@ -5731,6 +5808,13 @@ function applyAgentTestProgressObservation(tracker, observation) {
       : Math.max(observation.total, tracker.stageTotals.get(observation.stage) ?? 0));
   const observedCurrent = {
     passed: Math.min(observation.passed, knownTotal || observation.passed),
+    passedUpperBound: Math.max(
+      Math.min(observation.passed, knownTotal || observation.passed),
+      Math.min(
+        observation.passedUpperBound ?? observation.passed,
+        knownTotal || observation.passedUpperBound || observation.passed,
+      ),
+    ),
     total: knownTotal,
   };
   const bestKey = target
@@ -5744,6 +5828,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
     observation.isTurnStartBaseline && previousCurrent
       ? {
           passed: previousCurrent.passed,
+          passedUpperBound: previousCurrent.passedUpperBound ?? previousCurrent.passed,
           total: Math.max(previousCurrent.total ?? 0, knownTotal),
         }
       : observedCurrent;
@@ -5843,6 +5928,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
         passed: 0,
         total: Number.parseInt(match[2], 10),
         status: "running",
+        mode: "running",
       });
       continue;
     }
@@ -5856,6 +5942,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "pass",
+        mode: "exact",
       });
       continue;
     }
@@ -5869,6 +5956,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
+        mode: "exact",
       });
       continue;
     }
@@ -5882,6 +5970,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
+        mode: "fail-fast",
       });
     }
   }
@@ -5895,15 +5984,10 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
       !isStageAggregateProgressTarget(target, stage));
     const targets = (aggregateEntries.length ? aggregateEntries : nonAggregateEntries)
       .map(([, target]) => target);
-    const passed = targets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
-    const total = targets.reduce((sum, target) => sum + (target.total ?? 0), 0);
-    const failed = targets.some((target) => target.status === "fail");
-    const allPassed = targets.length > 0 && targets.every((target) => target.status === "pass");
+    const aggregate = TEST_PROGRESS_EVIDENCE.aggregateTargetEvidence(targets);
     progress.set(stage, {
       stage,
-      passed,
-      total,
-      status: failed ? "fail" : allPassed ? "pass" : "running",
+      ...aggregate,
     });
   }
   return progress;
@@ -5922,11 +6006,12 @@ function setStageTargetProgress(stages, options) {
   if (!stages.has(stage)) {
     stages.set(stage, { targets: new Map() });
   }
-  stages.get(stage).targets.set(options.target, {
+  stages.get(stage).targets.set(options.target, TEST_PROGRESS_EVIDENCE.targetEvidence({
     passed: options.passed,
     total: options.total,
     status: options.status,
-  });
+    mode: options.mode,
+  }));
 }
 
 function inferProgressStage(target, sectionStage, fallbackStage) {
@@ -6124,7 +6209,11 @@ function progressRatioText(value) {
     return "0/?";
   }
   const total = value.total > 0 ? value.total : "?";
-  return `${value.passed ?? 0}/${total}`;
+  const lower = value.passed ?? 0;
+  const upper = Number.isFinite(value.passedUpperBound)
+    ? Math.max(lower, value.passedUpperBound)
+    : lower;
+  return `${upper > lower ? `${lower}-${upper}` : lower}/${total}`;
 }
 
 function escapeHtml(value) {
@@ -6141,10 +6230,10 @@ function testStatusText(ts, options = {}) {
   const currentFull = inferCurrentFullRunStatus(ts, options.progress);
   const parts = currentFull
     ? [
-        `full beginning ${ts.testsPassed}/${ts.testsTotal} tests`,
-        `full current ${currentFull.testsPassed}/${currentFull.testsTotal} est`,
+        `full beginning ${testStatusPassingRange(ts)}/${ts.testsTotal} tests`,
+        `full current ${testStatusPassingRange(currentFull)}/${currentFull.testsTotal} est`,
       ]
-    : [`full ${ts.testsPassed}/${ts.testsTotal} tests`];
+    : [`full ${testStatusPassingRange(ts)}/${ts.testsTotal} tests`];
   if (ts.stageCount > 0) parts.push(`${ts.stagesPassed}/${ts.stageCount} stages`);
   if (ts.failingStage) parts.push(ts.failingStage);
   else if (ts.allTestsPassed) parts.push("all pass");
@@ -6178,7 +6267,7 @@ function inferCurrentFullRunStatus(ts, progress) {
   if (stagePassed == null || stageTotal == null || currentTotal == null) {
     return null;
   }
-  if (currentTotal !== stageTotal) {
+  if (currentTotal < stageTotal) {
     return null;
   }
 
@@ -6187,7 +6276,22 @@ function inferCurrentFullRunStatus(ts, progress) {
     testsTotal,
     Math.max(0, ts.testsPassed - stagePassed + (current.passed ?? 0)),
   );
-  return { testsPassed, testsTotal };
+  const currentUpper = Number.isFinite(current.passedUpperBound)
+    ? Math.max(current.passed ?? 0, current.passedUpperBound)
+    : current.passed ?? 0;
+  const testsPassedUpperBound = Math.min(
+    testsTotal,
+    Math.max(0, ts.testsPassed - stagePassed + currentUpper),
+  );
+  return { testsPassed, testsPassedUpperBound, testsTotal };
+}
+
+function testStatusPassingRange(status) {
+  const lower = status?.testsPassed ?? 0;
+  const upper = Number.isFinite(status?.testsPassedUpperBound)
+    ? Math.max(lower, status.testsPassedUpperBound)
+    : lower;
+  return upper > lower ? `${lower}-${upper}` : String(lower);
 }
 
 function stagePassedCount(stage) {

@@ -30,6 +30,8 @@
   --progress-current: #9a6b32;
   --progress-gain: #2f8f50;
   --progress-loss: #a94343;
+  --progress-unknown: #59636e;
+  --progress-unknown-text: #f1f1f1;
   --progress-remaining: #242424;
   --progress-bar-text: #f7f7f7;
   --progress-remaining-text: #b9b9b9;
@@ -74,6 +76,8 @@
   --progress-current: #a45e16;
   --progress-gain: #2c7a48;
   --progress-loss: #b44842;
+  --progress-unknown: #8c969f;
+  --progress-unknown-text: #202326;
   --progress-remaining: #deded9;
   --progress-bar-text: #fff;
   --progress-remaining-text: #3f3f3d;
@@ -118,6 +122,8 @@
     --progress-current: #a45e16;
     --progress-gain: #2c7a48;
     --progress-loss: #b44842;
+    --progress-unknown: #8c969f;
+    --progress-unknown-text: #202326;
     --progress-remaining: #deded9;
     --progress-bar-text: #fff;
     --progress-remaining-text: #3f3f3d;
@@ -321,6 +327,10 @@ button:hover { background: var(--control-hover); }
 .dock-progress-gained,
 .dock-progress-best { background: var(--progress-gain); }
 .dock-progress-lost { background: var(--progress-loss); }
+.dock-progress-unknown {
+  background: var(--progress-unknown);
+  color: var(--progress-unknown-text);
+}
 .dock-progress-remaining {
   background: var(--progress-remaining);
   color: var(--progress-remaining-text);

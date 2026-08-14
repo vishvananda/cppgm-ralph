@@ -36,6 +36,9 @@ import {
   buildSystemdScopeSpawn,
   stopSystemdScope,
 } from "./systemd-scope.js";
+import "./ralph-viz/test-progress-evidence.js";
+
+const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -1655,8 +1658,15 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     .map((stage) => stage.name);
 
   const stagePassedTotal = stages.reduce((sum, stage) => sum + stage.passed, 0);
+  const stagePassedUpperTotal = stages.reduce(
+    (sum, stage) => sum + (stage.passedUpperBound ?? stage.passed),
+    0,
+  );
   const stageCountTotal = stages.reduce((sum, stage) => sum + stage.total, 0);
   const testsPassed = Math.max(reportSummary?.passed ?? 0, stagePassedTotal);
+  const testsPassedUpperBound = reportSummary?.hasCounts
+    ? testsPassed
+    : Math.max(testsPassed, stagePassedUpperTotal);
   const testsTotal = Math.max(reportSummary?.total ?? 0, stageCountTotal);
   const stagesPassed = stages.filter((stage) => stage.status === "pass").length;
   const timeoutFailures = stages.reduce((sum, stage) => sum + (stage.timeouts ?? 0), 0);
@@ -1686,6 +1696,8 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     stageCount: stages.length,
     stagesPassed,
     testsPassed,
+    testsPassedUpperBound,
+    testsUnknown: Math.max(0, testsPassedUpperBound - testsPassed),
     testsTotal,
     failingStage,
     passingThrough,
@@ -1912,12 +1924,18 @@ function applyStageCountHintFloors(stages, options = {}) {
     if (!hint || hint.total <= (stage.total ?? 0)) {
       continue;
     }
-    const passed = stage.status === "pass"
-      ? hint.total
-      : Number.isFinite(stage.failed)
-        ? Math.max(0, hint.total - stage.failed)
-        : Math.min(stage.passed ?? 0, hint.total);
-    setStageStatus(stage, stage.status, passed, hint.total);
+    const bounded = (stage.unknown ?? 0) > 0 && Number.isFinite(stage.failed);
+    const passed = bounded
+      ? Math.min(stage.passed ?? 0, hint.total)
+      : stage.status === "pass"
+        ? hint.total
+        : Number.isFinite(stage.failed)
+          ? Math.max(0, hint.total - stage.failed)
+          : Math.min(stage.passed ?? 0, hint.total);
+    const passedUpperBound = bounded
+      ? Math.max(passed, hint.total - stage.failed)
+      : passed;
+    setStageStatus(stage, stage.status, passed, hint.total, passedUpperBound);
   }
 }
 
@@ -2026,10 +2044,14 @@ function hasStageCounts(stage) {
   return Number.isFinite(stage?.passed) && Number.isFinite(stage?.total) && stage.total > 0;
 }
 
-function setStageStatus(stage, status, passed, total) {
+function setStageStatus(stage, status, passed, total, passedUpperBound = passed) {
   stage.status = status;
   stage.passed = Number.isFinite(passed) ? passed : 0;
   stage.total = Number.isFinite(total) ? total : 0;
+  stage.passedUpperBound = Number.isFinite(passedUpperBound)
+    ? Math.max(stage.passed, Math.min(stage.total, passedUpperBound))
+    : stage.passed;
+  stage.unknown = Math.max(0, stage.passedUpperBound - stage.passed);
 }
 
 function parseStageStatus(stageName, body) {
@@ -2044,48 +2066,56 @@ function parseStageStatus(stageName, body) {
     let match = line.match(/^(.+?): running (\d+) tests$/);
     if (match) {
       const target = ensureStageTarget(targets, match[1]);
-      target.total = Number.parseInt(match[2], 10);
+      Object.assign(target, TEST_PROGRESS_EVIDENCE.targetEvidence({
+        passed: 0,
+        total: Number.parseInt(match[2], 10),
+        status: "running",
+        mode: "running",
+      }));
       continue;
     }
 
     match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
     if (match) {
       const target = ensureStageTarget(targets, match[1]);
-      target.status = "pass";
-      target.passed = Number.parseInt(match[2], 10);
-      target.total = Number.parseInt(match[3], 10);
+      Object.assign(target, TEST_PROGRESS_EVIDENCE.targetEvidence({
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "pass",
+      }));
       continue;
     }
 
     match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/);
     if (match) {
       const target = ensureStageTarget(targets, match[1]);
-      target.status = "fail";
-      target.passed = Number.parseInt(match[2], 10);
-      target.total = Number.parseInt(match[3], 10);
+      Object.assign(target, TEST_PROGRESS_EVIDENCE.targetEvidence({
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+      }));
       continue;
     }
 
     match = line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
     if (match) {
       const target = ensureStageTarget(targets, match[1]);
-      target.status = "fail";
-      target.passed = Number.parseInt(match[2], 10);
-      target.total = Number.parseInt(match[3], 10);
+      Object.assign(target, TEST_PROGRESS_EVIDENCE.targetEvidence({
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+        mode: "fail-fast",
+      }));
     }
   }
 
   const stageTargets = Array.from(targets.values());
+  const aggregate = TEST_PROGRESS_EVIDENCE.aggregateTargetEvidence(stageTargets);
   const timeouts = failureLines.filter((line) => classifyFailureLine(line) === "timeout").length;
   const timeoutExpectations = failureLines.filter(
     (line) => classifyFailureLine(line) === "timeout_expected",
   ).length;
-  const targetFailureCount = stageTargets.reduce((sum, target) => {
-    if (target.status !== "fail" || !Number.isFinite(target.total) || !Number.isFinite(target.passed)) {
-      return sum;
-    }
-    return sum + Math.max(0, target.total - target.passed);
-  }, 0);
+  const targetFailureCount = aggregate.knownFailed;
   const failed = Math.max(failureLines.length, targetFailureCount);
   const hasFailureMarker = failed > 0 || /\bFAIL\b|ERROR:/.test(body);
   const status = stageTargets.some((target) => target.status === "fail") || hasFailureMarker
@@ -2093,14 +2123,14 @@ function parseStageStatus(stageName, body) {
     : stageTargets.length > 0 && stageTargets.every((target) => target.status === "pass")
       ? "pass"
       : "unknown";
-  const passed = stageTargets.reduce((sum, target) => sum + (target.passed ?? 0), 0);
-  const total = stageTargets.reduce((sum, target) => sum + (target.total ?? 0), 0);
 
   return {
     name: stageName,
     status,
-    passed,
-    total,
+    passed: aggregate.passed,
+    passedUpperBound: aggregate.passedUpperBound,
+    unknown: aggregate.unknown,
+    total: aggregate.total,
     failed,
     timeouts,
     timeoutExpectations,
@@ -2145,7 +2175,9 @@ function ensureStageTarget(targets, targetName) {
       name: targetName,
       status: "unknown",
       passed: null,
+      passedUpperBound: null,
       total: null,
+      evidence: "unknown",
     });
   }
   return targets.get(targetName);
@@ -2342,7 +2374,7 @@ function formatTestStatusSummary(testStatus) {
   }
 
   const parts = [
-    `${testStatus.testsPassed}/${testStatus.testsTotal} tests passing`,
+    `${formatPassingEvidence(testStatus)}/${testStatus.testsTotal} tests passing`,
     `${testStatus.stagesPassed}/${testStatus.stageCount} stages passing`,
   ];
   if (testStatus.targetSubset) {
@@ -2377,18 +2409,37 @@ function formatSingleStageBreakdown(stage) {
       if (!Number.isFinite(target.total) || target.total <= 0) {
         return `${target.name} ${target.status}`;
       }
-      return `${target.name} ${target.passed ?? 0}/${target.total}`;
+      return `${target.name} ${formatPassingEvidence(target)}/${target.total}`;
     })
     .join(", ");
   const stageSummary = hasStageCounts(stage)
-    ? `${stage.name} ${stage.passed}/${stage.total} ${stage.status}`
+    ? `${stage.name} ${formatPassingEvidence(stage)}/${stage.total} ${stage.status}`
     : `${stage.name} ${stage.status}`;
   const failureSummary = Number.isFinite(stage.failed) && stage.failed > 0
     ? `${stage.failed} failing`
     : "";
+  const unknownSummary = Number.isFinite(stage.unknown) && stage.unknown > 0
+    ? `${stage.unknown} unrun`
+    : "";
   const timeoutSummary = formatStageTimeoutSummary(stage);
-  const details = [failureSummary, timeoutSummary, targetSummary].filter(Boolean).join(", ");
+  const details = [failureSummary, unknownSummary, timeoutSummary, targetSummary]
+    .filter(Boolean)
+    .join(", ");
   return details ? `${stageSummary} (${details})` : stageSummary;
+}
+
+function formatPassingEvidence(value) {
+  const lower = Number.isFinite(value?.passed)
+    ? value.passed
+    : Number.isFinite(value?.testsPassed)
+      ? value.testsPassed
+      : 0;
+  const upper = Number.isFinite(value?.passedUpperBound)
+    ? value.passedUpperBound
+    : Number.isFinite(value?.testsPassedUpperBound)
+      ? value.testsPassedUpperBound
+      : lower;
+  return upper > lower ? `${lower}-${upper}` : String(lower);
 }
 
 function formatTimeoutStatusSummary(testStatus) {

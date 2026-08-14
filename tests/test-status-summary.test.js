@@ -90,6 +90,29 @@ test("turn progress omits a redundant current lane at the high-water mark", () =
   ]);
 });
 
+test("turn progress renders fail-fast evidence as a bounded current range", () => {
+  const model = buildTurnProgressModel({
+    start: { passed: 45, total: 45 },
+    current: { passed: 10, passedUpperBound: 44, total: 45 },
+    best: { passed: 45, total: 45 },
+  });
+
+  assert.equal(model.current, 10);
+  assert.equal(model.currentUpper, 44);
+  assert.equal(model.unknown, 34);
+  assert.equal(model.knownFailed, 1);
+  assert.equal(model.knownRegression, 1);
+  assert.deepEqual(model.rows[1], {
+    key: "current",
+    label: "current range",
+    segments: [
+      { key: "current", label: "confirmed passing", value: 10, text: "10" },
+      { key: "lost", label: "confirmed failing", value: 1, text: "-1" },
+      { key: "unknown", label: "not run after fail-fast stop", value: 34, text: "34?" },
+    ],
+  });
+});
+
 test("complete passing stage totals outrank unexplained through-run residuals", () => {
   assert.equal(hasAuthoritativePassingTotal({
     name: "pa16",
@@ -272,4 +295,28 @@ test("unknown stages do not clear explicit failures", () => {
   ], "pa11");
 
   assert.equal(summary.total, 3);
+});
+
+test("fail-fast bounds count only the observed failure in prior-stage summaries", () => {
+  const summary = summarizePriorStageFailures([
+    {
+      recordedAt: "2026-08-06T10:00:00Z",
+      status: {
+        stages: [
+          {
+            name: "pa34",
+            status: "fail",
+            passed: 10,
+            passedUpperBound: 44,
+            total: 45,
+          },
+        ],
+      },
+    },
+  ], "pa35");
+
+  assert.deepEqual(summary, {
+    total: 1,
+    stages: [{ name: "pa34", failed: 1 }],
+  });
 });

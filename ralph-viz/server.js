@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import "./assignment-layouts.js";
+import "./test-progress-evidence.js";
 import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -27,6 +28,7 @@ const SPA_DIR = path.dirname(SERVER_FILE);
 const REPO_DIR = path.dirname(SPA_DIR);
 const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SCROLL_DEBUG_LOG_PATH = path.join(RALPH_DIR, "viz-scroll-debug.jsonl");
@@ -46,7 +48,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 11;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 12;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -4722,7 +4724,7 @@ function progressObservationFromCodexOutputRecord(record, command = "") {
   return progressObservationFromSessionOutput(output, record.timestamp, command);
 }
 
-function progressObservationFromSessionOutput(output, recordedAt, command = "") {
+export function progressObservationFromSessionOutput(output, recordedAt, command = "") {
   const commandInfo = parseSingleStageProgressCommand(command);
   const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   const directProgress = stage
@@ -4733,6 +4735,7 @@ function progressObservationFromSessionOutput(output, recordedAt, command = "") 
       recordedAt,
       stage,
       passed: directProgress.passed,
+      passedUpperBound: directProgress.passedUpperBound,
       total: directProgress.total,
       status: directProgress.status,
       hasSubset: commandInfo?.hasSubset === true,
@@ -4767,21 +4770,30 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   for (const line of (section?.body ?? String(output ?? "")).split(/\r?\n/)) {
     let match = line.match(/^(.+?): PASS \((\d+)\/(\d+)\)$/);
     if (match) {
-      targets.set(match[1], {
+      targets.set(match[1], TEST_PROGRESS_EVIDENCE.targetEvidence({
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "pass",
-      });
+      }));
       continue;
     }
-    match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/) ??
-      line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
+    match = line.match(/^(.+?): FAIL \((\d+)\/(\d+)\)$/);
     if (match) {
-      targets.set(match[1], {
+      targets.set(match[1], TEST_PROGRESS_EVIDENCE.targetEvidence({
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
-      });
+      }));
+      continue;
+    }
+    match = line.match(/^(.+?): FAIL after (\d+)\/(\d+) passed$/);
+    if (match) {
+      targets.set(match[1], TEST_PROGRESS_EVIDENCE.targetEvidence({
+        passed: Number.parseInt(match[2], 10),
+        total: Number.parseInt(match[3], 10),
+        status: "fail",
+        mode: "fail-fast",
+      }));
     }
   }
   const entries = [...targets.entries()];
@@ -4797,15 +4809,7 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   if (selectedTargets.length === 0) {
     return null;
   }
-  const passed = selectedTargets.reduce((sum, target) => sum + target.passed, 0);
-  const total = selectedTargets.reduce((sum, target) => sum + target.total, 0);
-  const failed = selectedTargets.some((target) => target.status === "fail");
-  const allPassed = selectedTargets.every((target) => target.status === "pass");
-  return {
-    passed,
-    total,
-    status: failed ? "fail" : allPassed ? "pass" : "running",
-  };
+  return TEST_PROGRESS_EVIDENCE.aggregateTargetEvidence(selectedTargets);
 }
 
 function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage, output = "") {
@@ -5004,6 +5008,12 @@ function normalizeProgressObservation(raw) {
     recordedAt,
     stage,
     passed: Math.max(0, Math.min(passed, total)),
+    passedUpperBound: Math.max(
+      Math.max(0, Math.min(passed, total)),
+      Math.min(total, Number.isFinite(Number(raw?.passedUpperBound))
+        ? Number(raw.passedUpperBound)
+        : passed),
+    ),
     total,
     status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
     hasSubset: raw?.hasSubset === true,
@@ -5027,6 +5037,7 @@ function progressObservationKey(observation) {
     observation.recordedAt,
     observation.stage,
     observation.passed,
+    observation.passedUpperBound,
     observation.total,
     observation.status,
   ].join("|");

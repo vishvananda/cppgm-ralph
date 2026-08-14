@@ -9,6 +9,9 @@
     if (Number.isFinite(stage.failed) && stage.failed >= 0) {
       return stage.failed;
     }
+    if (Number.isFinite(stage.total) && Number.isFinite(stage.passedUpperBound)) {
+      return Math.max(0, stage.total - stage.passedUpperBound);
+    }
     if (Number.isFinite(stage.total) && Number.isFinite(stage.passed)) {
       return Math.max(0, stage.total - stage.passed);
     }
@@ -118,6 +121,11 @@
     if (!total) return null;
 
     const current = clampProgressCount(progress.current.passed, total);
+    const currentUpper = Math.max(
+      current,
+      clampProgressCount(progress.current.passedUpperBound ?? current, total),
+    );
+    const isBounded = currentUpper > current;
     const hasStart = Number.isFinite(progress?.start?.passed);
     const start = hasStart ? clampProgressCount(progress.start.passed, total) : current;
     const observedBest = Number.isFinite(progress?.best?.passed)
@@ -155,7 +163,29 @@
         ].filter((segment) => segment.value > 0),
       },
     ];
-    if (regression > 0) {
+    if (isBounded) {
+      const unknown = currentUpper - current;
+      const knownFailed = total - currentUpper;
+      rows.push({
+        key: "current",
+        label: "current range",
+        segments: [
+          { key: "current", label: "confirmed passing", value: current, text: String(current) },
+          {
+            key: "lost",
+            label: "confirmed failing",
+            value: knownFailed,
+            text: knownFailed > 0 ? `-${knownFailed}` : "",
+          },
+          {
+            key: "unknown",
+            label: "not run after fail-fast stop",
+            value: unknown,
+            text: unknown > 0 ? `${unknown}?` : "",
+          },
+        ].filter((segment) => segment.value > 0),
+      });
+    } else if (regression > 0) {
       rows.push({
         key: "current",
         label: "current",
@@ -187,6 +217,15 @@
       regression,
       remaining,
       remainingBeyondBest,
+      ...(isBounded
+        ? {
+            currentUpper,
+            isBounded: true,
+            unknown: currentUpper - current,
+            knownFailed: total - currentUpper,
+            knownRegression: Math.max(0, best - currentUpper),
+          }
+        : {}),
       rows,
     };
   }
