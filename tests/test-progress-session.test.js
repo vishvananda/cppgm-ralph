@@ -1,7 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { progressObservationFromSessionOutput } from "../ralph-viz/server.js";
+import {
+  progressObservationFromSessionOutput,
+  requestHandler,
+} from "../ralph-viz/server.js";
+
+test("viewer serves the shared progress evidence helper as JavaScript", async () => {
+  const response = {
+    status: null,
+    headers: null,
+    body: null,
+    writeHead(status, headers) {
+      this.status = status;
+      this.headers = headers;
+    },
+    end(body) {
+      this.body = body;
+    },
+  };
+
+  await requestHandler({
+    url: "/test-progress-evidence.js",
+    headers: { host: "localhost" },
+  }, response);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["Content-Type"], "application/javascript; charset=utf-8");
+  assert.match(response.body, /RALPH_TEST_PROGRESS_EVIDENCE/);
+});
 
 test("session progress preserves the unknown tail of a fail-fast make test", () => {
   const observation = progressObservationFromSessionOutput(

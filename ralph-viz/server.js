@@ -13,6 +13,10 @@ import { promisify } from "node:util";
 import "./assignment-layouts.js";
 import "./test-progress-evidence.js";
 import {
+  VIEWER_ASSET_NAMES,
+  viewerAssetForPathname,
+} from "./viewer-assets.js";
+import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../claude-subagent-events.js";
@@ -7109,8 +7113,7 @@ async function readRunComparison(rawId, runRef, force = false) {
 }
 
 async function appBuildId() {
-  const files = ["index.html", "app.js", "assignment-layouts.js", "entry-dedupe.js", "safe-markdown.js", "test-status-summary.js", "model-pricing.js", "styles.css"];
-  const stats = await Promise.all(files.map(async (file) => {
+  const stats = await Promise.all(VIEWER_ASSET_NAMES.map(async (file) => {
     const stat = await fs.stat(path.join(SPA_DIR, file));
     return `${file}:${stat.size}:${stat.mtimeMs}`;
   }));
@@ -7145,36 +7148,13 @@ async function requestHandler(req, res) {
   const url = new URL(req.url ?? "", `http://${req.headers.host}`);
   const pathname = url.pathname;
 
-  if (pathname === "/") {
-    return sendStaticFile(res, path.join(SPA_DIR, "index.html"), "text/html; charset=utf-8");
-  }
-
-  if (pathname === "/app.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "app.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/model-pricing.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "model-pricing.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/assignment-layouts.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "assignment-layouts.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/entry-dedupe.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "entry-dedupe.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/safe-markdown.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "safe-markdown.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/test-status-summary.js") {
-    return sendStaticFile(res, path.join(SPA_DIR, "test-status-summary.js"), "application/javascript; charset=utf-8");
-  }
-
-  if (pathname === "/styles.css") {
-    return sendStaticFile(res, path.join(SPA_DIR, "styles.css"), "text/css; charset=utf-8");
+  const viewerAsset = viewerAssetForPathname(pathname);
+  if (viewerAsset) {
+    return sendStaticFile(
+      res,
+      path.join(SPA_DIR, viewerAsset.name),
+      viewerAsset.contentType,
+    );
   }
 
   if (pathname === "/api/state") {
@@ -7287,7 +7267,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-export { fetchPublishedComparison, mergePublishedAndLocalComparison };
+export { fetchPublishedComparison, mergePublishedAndLocalComparison, requestHandler };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SERVER_FILE) {
   server.listen(PORT, HOST, () => {

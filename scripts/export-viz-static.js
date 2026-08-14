@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 import "../ralph-viz/assignment-layouts.js";
+import { VIEWER_ASSET_NAMES } from "../ralph-viz/viewer-assets.js";
 import {
   collectClaudeSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -314,7 +315,7 @@ async function writeJson(filePath, value) {
 
 async function copyViewerAssets(outDir) {
   await fs.mkdir(outDir, { recursive: true });
-  for (const name of ["index.html", "app.js", "styles.css", "model-pricing.js", "assignment-layouts.js", "entry-dedupe.js", "safe-markdown.js", "test-status-summary.js"]) {
+  for (const name of VIEWER_ASSET_NAMES) {
     await fs.copyFile(path.join(REPO_ROOT, "ralph-viz", name), path.join(outDir, name));
   }
 }
