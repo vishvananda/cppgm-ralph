@@ -1726,6 +1726,7 @@ pre.file-diff .token.prefix {
 .pill-ok { color: var(--ok); }
 .pill-bad { color: var(--bad); }
 .pill-running { color: #cc2; }
+.pill-uncollected { color: #d99045; }
 
 .cmd-lines { color: #555; font-size: 0.7rem; white-space: nowrap; }
 

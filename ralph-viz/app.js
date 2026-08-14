@@ -46,6 +46,7 @@ let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const COMMAND_STATUS = globalThis.RALPH_COMMAND_STATUS;
 const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
 const TEST_STATUS_SUMMARY = globalThis.RALPH_TEST_STATUS_SUMMARY;
@@ -2093,10 +2094,14 @@ function renderCommandCard(entry) {
   const endItem = entry.endRecord?.event?.item ?? {};
   const item = entry.endRecord ? endItem : startItem;
   const cmd = unwrapCommand(item.command || startItem.command) || "unknown command";
-  const output = commandEntryOutput(entry);
+  const uncollected = commandEntryUncollectedEvidence(entry);
+  const collectedOutput = commandEntryOutput(entry);
+  const output = uncollected
+    ? [collectedOutput, uncollected.message].filter(Boolean).join("\n")
+    : collectedOutput;
   const exitCode = commandEntryExitCode(entry);
   const time = fmtShort(commandEntryRecordedAt(entry));
-  const asyncRunning = entry.asyncCellId && !entry.asyncCompletedRecord;
+  const asyncRunning = entry.asyncCellId && !entry.asyncCompletedRecord && !uncollected;
 
   const card = document.createElement("div");
   card.className = "ev ev-cmd" + (exitCode != null && exitCode !== 0 ? " ev-cmd-fail" : "");
@@ -2150,6 +2155,11 @@ function renderCommandCard(entry) {
     badge.className = exitCode === 0 ? "pill pill-ok" : "pill pill-bad";
     badge.textContent = exitCode === 0 ? "ok" : `exit ${exitCode}`;
     summary.append(badge);
+  } else if (uncollected) {
+    const badge = document.createElement("span");
+    badge.className = "pill pill-uncollected";
+    badge.textContent = "uncollected";
+    summary.append(badge);
   } else if (asyncRunning || !entry.endRecord) {
     const badge = document.createElement("span");
     badge.className = "pill pill-running";
@@ -2169,6 +2179,17 @@ function renderCommandCard(entry) {
   }
 
   return card;
+}
+
+function commandEntryUncollectedEvidence(entry, nowMs = Date.now()) {
+  const item = entry.endRecord?.event?.item ?? {};
+  return COMMAND_STATUS?.staleAsyncCommandEvidence({
+    command: entry.startRecord?.event?.item?.command ?? item.command ?? "",
+    sessionId: entry.asyncCellId ?? item.session_id,
+    completed: Boolean(entry.asyncCompletedRecord),
+    recordedAt: entry.startRecord?.recordedAt ?? entry.endRecord?.recordedAt,
+    nowMs,
+  }) ?? null;
 }
 
 function commandEntryOutput(entry) {

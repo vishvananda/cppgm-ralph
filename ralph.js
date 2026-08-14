@@ -6756,7 +6756,10 @@ function attachCodexToolResultMetadataPrompt(prompt) {
     "When calling tools.exec_command or tools.write_stdin from JavaScript code mode, " +
     "emit each complete result object (for example, text(JSON.stringify(result))) instead " +
     "of emitting only result.output. For batches, preserve exit_code and session_id for " +
-    "every result so Ralph can reconstruct long-running commands.\n" +
+    "every result so Ralph can reconstruct long-running commands. If any result returns " +
+    "a session_id without an exit_code, poll every such session with tools.write_stdin " +
+    "until it returns a terminal result before starting unrelated work or ending the turn; " +
+    "for parallel batches, drain all returned session IDs.\n" +
     `</ralph_codex_tool_result_metadata>`;
 }
 

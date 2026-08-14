@@ -6,28 +6,30 @@ import {
   requestHandler,
 } from "../ralph-viz/server.js";
 
-test("viewer serves the shared progress evidence helper as JavaScript", async () => {
-  const response = {
-    status: null,
-    headers: null,
-    body: null,
-    writeHead(status, headers) {
-      this.status = status;
-      this.headers = headers;
-    },
-    end(body) {
-      this.body = body;
-    },
-  };
+test("viewer serves shared browser helpers as JavaScript", async () => {
+  for (const [url, marker] of [
+    ["/test-progress-evidence.js", /RALPH_TEST_PROGRESS_EVIDENCE/],
+    ["/command-status.js", /RALPH_COMMAND_STATUS/],
+  ]) {
+    const response = {
+      status: null,
+      headers: null,
+      body: null,
+      writeHead(status, headers) {
+        this.status = status;
+        this.headers = headers;
+      },
+      end(body) {
+        this.body = body;
+      },
+    };
 
-  await requestHandler({
-    url: "/test-progress-evidence.js",
-    headers: { host: "localhost" },
-  }, response);
+    await requestHandler({ url, headers: { host: "localhost" } }, response);
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers["Content-Type"], "application/javascript; charset=utf-8");
-  assert.match(response.body, /RALPH_TEST_PROGRESS_EVIDENCE/);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers["Content-Type"], "application/javascript; charset=utf-8");
+    assert.match(response.body, marker);
+  }
 });
 
 test("session progress preserves the unknown tail of a fail-fast make test", () => {
