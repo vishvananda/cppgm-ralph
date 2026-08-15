@@ -1623,16 +1623,17 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   let stages = stageHeaders.map((stage, index) => {
     const start = stage.index;
     const end = index + 1 < stageHeaders.length ? stageHeaders[index + 1].index : normalizedOutput.length;
-    return parseStageStatus(stage.name, normalizedOutput.slice(start, end));
+    return parseStageStatus(stage.name, normalizedOutput.slice(start, end), options);
   });
   if (stages.length === 0 && options.targetStage) {
-    const syntheticStage = parseStageStatus(options.targetStage, normalizedOutput);
+    const syntheticStage = parseStageStatus(options.targetStage, normalizedOutput, options);
     if (syntheticStage.status !== "unknown" || syntheticStage.targets.length > 0) {
       stages = [syntheticStage];
     }
   }
   const reportSummary = parseReportSummary(normalizedOutput);
   applyReportSummaryToStages(stages, previousStatus, reportSummary, options);
+  applyStageCountHintFloors(stages, options);
 
   const failingIndex = stages.findIndex((stage) => stage.status === "fail");
   const failingStage = failingIndex >= 0 ? stages[failingIndex].name : null;
@@ -1924,18 +1925,20 @@ function applyStageCountHintFloors(stages, options = {}) {
     if (!hint || hint.total <= (stage.total ?? 0)) {
       continue;
     }
-    const bounded = (stage.unknown ?? 0) > 0 && Number.isFinite(stage.failed);
-    const passed = bounded
-      ? Math.min(stage.passed ?? 0, hint.total)
-      : stage.status === "pass"
-        ? hint.total
-        : Number.isFinite(stage.failed)
-          ? Math.max(0, hint.total - stage.failed)
-          : Math.min(stage.passed ?? 0, hint.total);
-    const passedUpperBound = bounded
-      ? Math.max(passed, hint.total - stage.failed)
-      : passed;
-    setStageStatus(stage, stage.status, passed, hint.total, passedUpperBound);
+    if (stage.status === "pass") {
+      setStageStatus(stage, "pass", hint.total, hint.total);
+      continue;
+    }
+    const anchored = TEST_PROGRESS_EVIDENCE.anchorPartialStageEvidence(stage, hint.total);
+    if (anchored) {
+      setStageStatus(
+        stage,
+        stage.status,
+        anchored.passed,
+        anchored.total,
+        anchored.passedUpperBound,
+      );
+    }
   }
 }
 
@@ -2054,9 +2057,12 @@ function setStageStatus(stage, status, passed, total, passedUpperBound = passed)
   stage.unknown = Math.max(0, stage.passedUpperBound - stage.passed);
 }
 
-function parseStageStatus(stageName, body) {
+function parseStageStatus(stageName, body, options = {}) {
   const targets = new Map();
   const failureLines = [];
+  const directStageCommand = TEST_PROGRESS_EVIDENCE.directStageTestCommand(options.command);
+  const failFastCommand = directStageCommand?.stage === stageName &&
+    directStageCommand.failFast;
 
   for (const line of body.split(/\r?\n/)) {
     if (isTestFailureLine(line)) {
@@ -2093,6 +2099,7 @@ function parseStageStatus(stageName, body) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
+        mode: failFastCommand ? "fail-fast" : "exact",
       }));
       continue;
     }
@@ -2143,7 +2150,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {
@@ -6756,10 +6763,7 @@ function attachCodexToolResultMetadataPrompt(prompt) {
     "When calling tools.exec_command or tools.write_stdin from JavaScript code mode, " +
     "emit each complete result object (for example, text(JSON.stringify(result))) instead " +
     "of emitting only result.output. For batches, preserve exit_code and session_id for " +
-    "every result so Ralph can reconstruct long-running commands. If any result returns " +
-    "a session_id without an exit_code, poll every such session with tools.write_stdin " +
-    "until it returns a terminal result before starting unrelated work or ending the turn; " +
-    "for parallel batches, drain all returned session IDs.\n" +
+    "every result so Ralph can reconstruct long-running commands.\n" +
     `</ralph_codex_tool_result_metadata>`;
 }
 

@@ -70,6 +70,60 @@ test("session progress combines completed targets with a fail-fast target", () =
   assert.equal(observation.status, "fail");
 });
 
+test("direct stage test preserves a failing sub-suite as partial stage evidence", () => {
+  const observation = progressObservationFromSessionOutput(
+    "tests/object-roundtrip/200-pa35-hosted-ostringstream-unsigned-int.t: " +
+      "command failed with exit status 1:\n" +
+      "  ../dev/cppgm++ -c -o /tmp/case.o tests/object-roundtrip/case.t\n" +
+      "pa37 object-roundtrip: FAIL (3/7)\n",
+    "2026-08-15T12:00:00.000Z",
+    "make -C pa37 test",
+  );
+
+  assert.deepEqual(observation, {
+    recordedAt: "2026-08-15T12:00:00.000Z",
+    stage: "pa37",
+    passed: 3,
+    passedUpperBound: 6,
+    total: 7,
+    status: "fail",
+    hasSubset: false,
+    partialStage: true,
+  });
+});
+
+test("keep-going direct stage test retains exhaustive sub-suite counts", () => {
+  const observation = progressObservationFromSessionOutput(
+    "pa37 object-roundtrip: FAIL (3/7)\n",
+    "2026-08-15T12:00:00.000Z",
+    "KEEP_GOING=1 make -C pa37 test",
+  );
+
+  assert.equal(observation.passed, 3);
+  assert.equal(observation.passedUpperBound, 3);
+  assert.equal(observation.partialStage, true);
+});
+
+test("single-stage report total outranks an intermediate sub-suite total", () => {
+  const observation = progressObservationFromSessionOutput(
+    "===== pa37 =====\n" +
+      "pa37 object-roundtrip: FAIL (3/7)\n" +
+      "===== TEST SUMMARY: 70 / 78 TESTS PASSED =====\n",
+    "2026-08-15T12:00:00.000Z",
+    "make test-report ACTIVE_TEST_REPORT_PAS='pa37'",
+  );
+
+  assert.deepEqual(observation, {
+    recordedAt: "2026-08-15T12:00:00.000Z",
+    stage: "pa37",
+    passed: 70,
+    passedUpperBound: 70,
+    total: 78,
+    status: "fail",
+    hasSubset: false,
+  });
+});
+
 test("exhaustive failure progress remains an exact count", () => {
   const observation = progressObservationFromSessionOutput(
     "===== pa35 =====\n" +

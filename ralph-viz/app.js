@@ -4639,21 +4639,18 @@ function anchorTestStatusTotals(status, anchors) {
       return stage;
     }
     changed = true;
-    const lowerPassed = stage?.status === "pass" ? anchor : Math.min(stage?.passed ?? 0, anchor);
-    const oldUpper = Math.max(stage?.passed ?? 0, stage?.passedUpperBound ?? stage?.passed ?? 0);
-    const bounded = oldUpper > (stage?.passed ?? 0);
-    const knownFailed = Math.max(0, (stage?.total ?? 0) - oldUpper);
-    const passedUpperBound = stage?.status === "pass"
-      ? anchor
-      : bounded
-        ? Math.max(lowerPassed, anchor - knownFailed)
-        : lowerPassed;
+    const anchored = stage?.status === "pass"
+      ? { passed: anchor, passedUpperBound: anchor, total: anchor }
+      : TEST_PROGRESS_EVIDENCE?.anchorPartialStageEvidence(stage, anchor);
+    if (!anchored) {
+      return stage;
+    }
     return {
       ...stage,
-      total: anchor,
-      passed: lowerPassed,
-      passedUpperBound,
-      unknown: Math.max(0, passedUpperBound - lowerPassed),
+      total: anchored.total,
+      passed: anchored.passed,
+      passedUpperBound: anchored.passedUpperBound,
+      unknown: Math.max(0, anchored.passedUpperBound - anchored.passed),
     };
   });
   if (!changed) {
@@ -4796,7 +4793,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {
@@ -5223,6 +5220,7 @@ function deriveCachedAgentTestProgress(record) {
     commandKind: cleanText(raw?.commandKind) || "session-cache",
     commandTarget: cleanText(raw?.commandTarget) || "cached test summary",
     hasSubset: raw?.hasSubset === true,
+    partialStage: raw?.partialStage === true,
     turn: displayTurnForRecord(record),
     recordedAt: raw?.recordedAt ?? record.recordedAt,
     status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
@@ -5445,16 +5443,28 @@ function parseAgentTestCommandTarget(text) {
   }
 
   match = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
-  if (!match) {
+  if (match) {
+    const number = Number.parseInt(match[1], 10);
+    return {
+      kind: "single",
+      stage: `pa${number}`,
+      stageNumber: number,
+      target: `test-pa${number}`,
+      hasSubset: false,
+    };
+  }
+
+  const direct = TEST_PROGRESS_EVIDENCE?.directStageTestCommand(text);
+  if (!direct) {
     return null;
   }
-  const number = Number.parseInt(match[1], 10);
   return {
-    kind: "single",
-    stage: `pa${number}`,
-    stageNumber: number,
-    target: `test-pa${number}`,
-    hasSubset: false,
+    kind: "stage",
+    stage: direct.stage,
+    stageNumber: stageNumber(direct.stage),
+    target: `make -C ${direct.stage} test`,
+    hasSubset: direct.hasSubset,
+    failFast: direct.failFast,
   };
 }
 
@@ -5588,13 +5598,34 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
     return null;
   }
 
-  const stageProgress = parseStageProgressFromAgentOutput(output, commandInfo.stage);
+  const stageProgress = parseStageProgressFromAgentOutput(output, commandInfo.stage, {
+    failFastFailures: commandInfo.failFast === true,
+  });
   const direct = stageProgress.get(commandInfo.stage);
-  if (direct?.total > 0) {
+  if (direct?.total > 0 && !(commandInfo.kind === "selected" && direct.partialStage)) {
     return buildAgentTestProgressObservation(record, commandInfo, direct);
   }
 
   if (commandInfo.kind === "selected") {
+    if (direct?.partialStage) {
+      const summaryProgress = inferSelectedReportSummaryProgress(
+        output,
+        commandInfo,
+        tracker,
+        item.exit_code,
+      );
+      if (summaryProgress) {
+        return buildAgentTestProgressObservation(
+          record,
+          {
+            ...commandInfo,
+            stage: summaryProgress.stage,
+            stageNumber: stageNumber(summaryProgress.stage),
+          },
+          summaryProgress,
+        );
+      }
+    }
     const selectedProgress = (commandInfo.stages ?? [])
       .map((stage) => stageProgress.get(stage))
       .filter((progress) => progress?.total > 0);
@@ -5690,6 +5721,7 @@ function buildAgentTestProgressObservation(record, commandInfo, progress) {
     commandKind: commandInfo.kind,
     commandTarget: commandInfo.target,
     hasSubset: commandInfo.hasSubset === true,
+    partialStage: progress.partialStage === true,
     turn: displayTurnForRecord(record),
     recordedAt: record.recordedAt,
     status: progress.status,
@@ -5802,6 +5834,20 @@ function applyAgentTestProgressObservation(tracker, observation) {
   if (!target && turnHasConfiguredProgressTarget(tracker, observation.turn)) {
     return null;
   }
+  const anchoredStageTotal = target?.total ?? tracker.stageTotals.get(observation.stage) ?? 0;
+  if (
+    observation.partialStage &&
+    !observation.hasSubset &&
+    anchoredStageTotal > observation.total
+  ) {
+    const anchored = TEST_PROGRESS_EVIDENCE?.anchorPartialStageEvidence(
+      observation,
+      anchoredStageTotal,
+    );
+    if (anchored) {
+      observation = { ...observation, ...anchored };
+    }
+  }
   if (target && observation.total !== target.total) {
     const baselineTotal = target.configuredTotal ?? target.total;
     const expandedTotal = TEST_PROGRESS_EVIDENCE?.expandedProgressTargetTotal({
@@ -5817,6 +5863,17 @@ function applyAgentTestProgressObservation(tracker, observation) {
     target = { ...target, total: expandedTotal, configuredTotal: baselineTotal };
     tracker.turnTargets.set(targetKey, target);
     updateKnownStageTotal(tracker, observation.stage, expandedTotal);
+  } else if (!target && anchoredStageTotal > 0 && observation.total !== anchoredStageTotal) {
+    const expandedTotal = TEST_PROGRESS_EVIDENCE?.expandedProgressTargetTotal({
+      targetTotal: anchoredStageTotal,
+      baselineTotal: anchoredStageTotal,
+      observedTotal: observation.total,
+      priorStageTotal: knownPriorStageTotal(tracker, observation.stageNumber) ?? 0,
+      hasSubset: observation.hasSubset,
+    });
+    if (!expandedTotal) {
+      return null;
+    }
   }
   if (!target && !observation.hasSubset) {
     updateKnownStageTotal(tracker, observation.stage, observation.total);
@@ -5929,7 +5986,7 @@ function knownPriorStageTotal(tracker, stageNumber) {
   return total;
 }
 
-function parseStageProgressFromAgentOutput(output, fallbackStage) {
+function parseStageProgressFromAgentOutput(output, fallbackStage, options = {}) {
   const stages = new Map();
   let sectionStage = fallbackStage;
 
@@ -5977,7 +6034,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
-        mode: "exact",
+        mode: options.failFastFailures ? "fail-fast" : "exact",
       });
       continue;
     }
@@ -6009,6 +6066,7 @@ function parseStageProgressFromAgentOutput(output, fallbackStage) {
     progress.set(stage, {
       stage,
       ...aggregate,
+      partialStage: aggregateEntries.length === 0,
     });
   }
   return progress;

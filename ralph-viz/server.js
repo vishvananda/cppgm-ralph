@@ -52,7 +52,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 12;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 13;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -3650,7 +3650,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {
@@ -4699,9 +4699,9 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
     if (
       !line.includes("TEST SUMMARY") &&
       !line.includes("ALL TESTS PASSED SUCCESSFULLY") &&
-      !line.includes(" tests: PASS (") &&
-      !line.includes(" tests: FAIL (") &&
-      !line.includes(" tests: FAIL after ")
+      !line.includes(": PASS (") &&
+      !line.includes(": FAIL (") &&
+      !line.includes(": FAIL after ")
     ) {
       continue;
     }
@@ -4732,8 +4732,27 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
   const commandInfo = parseSingleStageProgressCommand(command);
   const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   const directProgress = stage
-    ? parseSingleStageProgressFromSessionOutput(output, stage)
+    ? parseSingleStageProgressFromSessionOutput(output, stage, {
+        allowPartialTargets: commandInfo?.kind === "stage",
+        failFastFailures: commandInfo?.failFast === true,
+      })
     : null;
+  const summary = commandInfo?.kind === "selected"
+    ? parseLastSessionTestSummary(output)
+    : parseSessionTestSummary(output);
+  if (directProgress?.partialStage && summary && stage) {
+    const progress = parseSingleStageSummaryProgressFromSessionOutput(summary, command, stage, output);
+    if (progress?.total > 0) {
+      return normalizeProgressObservation({
+        recordedAt,
+        stage,
+        passed: progress.passed,
+        total: progress.total,
+        status: summary.allTestsPassed && progress.status === "pass" ? "pass" : progress.status,
+        hasSubset: false,
+      });
+    }
+  }
   if (directProgress?.total > 0) {
     return normalizeProgressObservation({
       recordedAt,
@@ -4743,11 +4762,9 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
       total: directProgress.total,
       status: directProgress.status,
       hasSubset: commandInfo?.hasSubset === true,
+      partialStage: directProgress.partialStage === true,
     });
   }
-  const summary = commandInfo?.kind === "selected"
-    ? parseLastSessionTestSummary(output)
-    : parseSessionTestSummary(output);
   if (!summary) {
     return null;
   }
@@ -4768,7 +4785,7 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
   });
 }
 
-function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
+function parseSingleStageProgressFromSessionOutput(output, expectedStage, options = {}) {
   const section = parseStageSections(String(output ?? "")).find((candidate) => candidate.name === expectedStage);
   const targets = new Map();
   for (const line of (section?.body ?? String(output ?? "")).split(/\r?\n/)) {
@@ -4787,6 +4804,7 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
         passed: Number.parseInt(match[2], 10),
         total: Number.parseInt(match[3], 10),
         status: "fail",
+        mode: options.failFastFailures ? "fail-fast" : "exact",
       }));
       continue;
     }
@@ -4803,7 +4821,7 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   const entries = [...targets.entries()];
   const aggregateEntries = entries.filter(([target]) =>
     isStageAggregateProgressTarget(target, expectedStage));
-  if (!section && aggregateEntries.length === 0) {
+  if (!section && aggregateEntries.length === 0 && !options.allowPartialTargets) {
     return null;
   }
   const nonAggregateEntries = entries.filter(([target]) =>
@@ -4813,7 +4831,10 @@ function parseSingleStageProgressFromSessionOutput(output, expectedStage) {
   if (selectedTargets.length === 0) {
     return null;
   }
-  return TEST_PROGRESS_EVIDENCE.aggregateTargetEvidence(selectedTargets);
+  return {
+    ...TEST_PROGRESS_EVIDENCE.aggregateTargetEvidence(selectedTargets),
+    partialStage: aggregateEntries.length === 0,
+  };
 }
 
 function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expectedStage, output = "") {
@@ -4935,6 +4956,15 @@ function parseSingleStageProgressCommand(command) {
       hasSubset: false,
     };
   }
+  const direct = TEST_PROGRESS_EVIDENCE.directStageTestCommand(text);
+  if (direct) {
+    return {
+      kind: "stage",
+      stage: direct.stage,
+      hasSubset: direct.hasSubset,
+      failFast: direct.failFast,
+    };
+  }
   return null;
 }
 
@@ -5021,6 +5051,7 @@ function normalizeProgressObservation(raw) {
     total,
     status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
     hasSubset: raw?.hasSubset === true,
+    ...(raw?.partialStage === true ? { partialStage: true } : {}),
   };
 }
 
@@ -5043,6 +5074,7 @@ function progressObservationKey(observation) {
     observation.passed,
     observation.passedUpperBound,
     observation.total,
+    observation.partialStage ? "partial" : "complete",
     observation.status,
   ].join("|");
 }

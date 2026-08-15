@@ -4,6 +4,26 @@
     return Number.isFinite(number) && number >= 0 ? number : fallback;
   }
 
+  function directStageTestCommand(command) {
+    const text = String(command ?? "").replace(/\s+\(continued session \d+\)\s*$/, "");
+    if (!/\bmake\b/.test(text) || !/(?:^|\s)test(?=\s|$)/.test(text)) {
+      return null;
+    }
+    const directory = text.match(
+      /(?:^|\s)-C\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/,
+    );
+    const rawDirectory = directory?.[1] ?? directory?.[2] ?? directory?.[3] ?? "";
+    const stage = rawDirectory.replace(/\/+$/, "").split("/").at(-1);
+    if (!/^pa\d+$/.test(stage)) {
+      return null;
+    }
+    return {
+      stage,
+      hasSubset: /\b(?:GLOB|TEST)\s*=/.test(text),
+      failFast: !/\bKEEP_GOING\s*=\s*(?:1|true|yes|on)\b/i.test(text),
+    };
+  }
+
   function targetEvidence({ passed, total, status, mode = "exact" }) {
     const normalizedTotal = finiteCount(total);
     const normalizedPassed = Math.min(normalizedTotal, finiteCount(passed));
@@ -45,6 +65,32 @@
     };
   }
 
+  function anchorPartialStageEvidence(evidence, stageTotal) {
+    const observedTotal = finiteCount(evidence?.total);
+    const anchoredTotal = finiteCount(stageTotal);
+    if (!observedTotal || anchoredTotal <= observedTotal) {
+      return null;
+    }
+    const passed = Math.min(observedTotal, finiteCount(evidence?.passed));
+    const observedUpper = Number.isFinite(evidence?.passedUpperBound)
+      ? Math.max(passed, Math.min(observedTotal, evidence.passedUpperBound))
+      : passed;
+    const knownFailed = Math.max(0, observedTotal - observedUpper);
+    const passedUpperBound = Math.max(passed, anchoredTotal - knownFailed);
+    return {
+      passed,
+      passedUpperBound,
+      total: anchoredTotal,
+      unknown: Math.max(0, passedUpperBound - passed),
+      knownFailed,
+      status: evidence?.status === "pass"
+        ? "pass"
+        : evidence?.status === "running"
+          ? "running"
+          : "fail",
+    };
+  }
+
   function expandedProgressTargetTotal({
     targetTotal,
     baselineTotal,
@@ -73,6 +119,8 @@
 
   root.RALPH_TEST_PROGRESS_EVIDENCE = {
     aggregateTargetEvidence,
+    anchorPartialStageEvidence,
+    directStageTestCommand,
     expandedProgressTargetTotal,
     targetEvidence,
   };

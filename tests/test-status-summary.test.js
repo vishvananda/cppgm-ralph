@@ -113,6 +113,24 @@ test("turn progress renders fail-fast evidence as a bounded current range", () =
   });
 });
 
+test("turn progress shows unrun stage targets after a sub-suite failure", () => {
+  const model = buildTurnProgressModel({
+    start: { passed: 78, total: 78 },
+    current: { passed: 3, passedUpperBound: 77, total: 78 },
+    best: { passed: 78, total: 78 },
+  });
+
+  assert.equal(model.current, 3);
+  assert.equal(model.currentUpper, 77);
+  assert.equal(model.unknown, 74);
+  assert.equal(model.knownFailed, 1);
+  assert.deepEqual(model.rows[1].segments, [
+    { key: "current", label: "confirmed passing", value: 3, text: "3" },
+    { key: "lost", label: "confirmed failing", value: 1, text: "-1" },
+    { key: "unknown", label: "not run after fail-fast stop", value: 74, text: "74?" },
+  ]);
+});
+
 test("complete passing stage totals outrank unexplained through-run residuals", () => {
   assert.equal(hasAuthoritativePassingTotal({
     name: "pa16",

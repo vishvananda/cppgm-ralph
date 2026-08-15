@@ -31,7 +31,7 @@
         .split(/\r?\n/)
         .filter((line) =>
           /^(?:(?:pa\d+\/|pa\d+\/\.\.\/).+|(?:tests|course|cppgm\.tests)\/.+): /.test(line) &&
-          /ERROR:|TEST FAIL|FAIL after|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line)),
+          /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line)),
     }));
   }
 
