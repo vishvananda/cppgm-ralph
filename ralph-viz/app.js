@@ -5451,6 +5451,7 @@ function parseAgentTestCommandTarget(text) {
       stageNumber: number,
       target: `test-pa${number}`,
       hasSubset: false,
+      failFast: true,
     };
   }
 

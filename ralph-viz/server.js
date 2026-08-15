@@ -52,7 +52,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 13;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 14;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -4733,7 +4733,7 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
   const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   const directProgress = stage
     ? parseSingleStageProgressFromSessionOutput(output, stage, {
-        allowPartialTargets: commandInfo?.kind === "stage",
+        allowPartialTargets: commandInfo?.kind === "stage" || commandInfo?.kind === "single",
         failFastFailures: commandInfo?.failFast === true,
       })
     : null;
@@ -4954,6 +4954,7 @@ function parseSingleStageProgressCommand(command) {
       kind: "single",
       stage: `pa${Number.parseInt(single[1], 10)}`,
       hasSubset: false,
+      failFast: true,
     };
   }
   const direct = TEST_PROGRESS_EVIDENCE.directStageTestCommand(text);

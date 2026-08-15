@@ -6,7 +6,18 @@
 
   function directStageTestCommand(command) {
     const text = String(command ?? "").replace(/\s+\(continued session \d+\)\s*$/, "");
-    if (!/\bmake\b/.test(text) || !/(?:^|\s)test(?=\s|$)/.test(text)) {
+    if (!/\bmake\b/.test(text)) {
+      return null;
+    }
+    const wrapper = text.match(/\btest-pa(\d+)\b/);
+    if (wrapper) {
+      return {
+        stage: `pa${Number.parseInt(wrapper[1], 10)}`,
+        hasSubset: false,
+        failFast: true,
+      };
+    }
+    if (!/(?:^|\s)test(?=\s|$)/.test(text)) {
       return null;
     }
     const directory = text.match(

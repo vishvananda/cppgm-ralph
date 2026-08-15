@@ -92,6 +92,23 @@ test("direct stage test preserves a failing sub-suite as partial stage evidence"
   });
 });
 
+test("top-level test-pa wrapper preserves partial fail-fast stage evidence", () => {
+  const observation = progressObservationFromSessionOutput(
+    "pa37 object-roundtrip: running 7 tests\n" +
+      "tests/object-roundtrip/case.t: command failed with exit status 1:\n" +
+      "pa37 object-roundtrip: FAIL (3/7)\n" +
+      "make: *** [Makefile:481: test-pa37] Error 2\n",
+    "2026-08-15T12:00:00.000Z",
+    "make test-pa37",
+  );
+
+  assert.equal(observation.stage, "pa37");
+  assert.equal(observation.passed, 3);
+  assert.equal(observation.passedUpperBound, 6);
+  assert.equal(observation.total, 7);
+  assert.equal(observation.partialStage, true);
+});
+
 test("keep-going direct stage test retains exhaustive sub-suite counts", () => {
   const observation = progressObservationFromSessionOutput(
     "pa37 object-roundtrip: FAIL (3/7)\n",
