@@ -8229,7 +8229,24 @@ function renderCombinedRun(entry) {
 function latestCombinedEntries(records, limit = COMBINED_RUN_CARD_LIMIT) {
   const filtered = records.filter(shouldShow);
   const subagentEstimateModel = buildSubagentEstimateModel(records);
-  return buildDisplayEntries(filtered, { subagentEstimateModel }).slice(-limit);
+  return buildDisplayEntries(filtered, { subagentEstimateModel })
+    .map((entry, index) => ({
+      entry,
+      index,
+      // Keep an active child visible even after the supervisor emits newer
+      // planning/wait cards. Completed children sort at their completion time
+      // instead of where their merged start card was first inserted.
+      activityTime: entry.kind === "subagent" && !entry.endRecord
+        ? Number.POSITIVE_INFINITY
+        : displayEntryRecords(entry).reduce((latest, record) => {
+            const time = Date.parse(record?.recordedAt ?? "");
+            return Number.isFinite(time) ? Math.max(latest, time) : latest;
+          }, Number.NEGATIVE_INFINITY),
+    }))
+    .sort((left, right) =>
+      left.activityTime - right.activityTime || left.index - right.index)
+    .slice(-limit)
+    .map(({ entry }) => entry);
 }
 
 function combinedUsageSummary(entries) {
