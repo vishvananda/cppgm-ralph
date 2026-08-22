@@ -7742,12 +7742,14 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   const colors = series.map((run, index) => comparisonRunColor(run, index));
   const colorBySeries = new Map(series.map((run, index) => [run.label, colors[index]]));
   const chartEmpty = cssThemeColor("--chart-empty", "#111");
+  const responsiveLayout = comparisonEChartResponsiveLayout(el.clientWidth);
   chart.setOption({
     color: colors,
     backgroundColor: "transparent",
     animationDuration: 550,
     tooltip: {
       trigger: "axis",
+      confine: true,
       backgroundColor: cssThemeColor("--surface-raised", "#171717"),
       borderColor: cssThemeColor("--border", "#333"),
       textStyle: { color: cssThemeColor("--text", "#ddd"), fontSize: 12 },
@@ -7765,13 +7767,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         comparisonRunVisible(orderedRuns[index], index),
       ])),
     },
-    grid: {
-      left: 54,
-      right: 20,
-      top: 10,
-      bottom: 58,
-      containLabel: true,
-    },
+    grid: responsiveLayout.grid,
     xAxis: {
       type: "category",
       boundaryGap: false,
@@ -7780,9 +7776,12 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
       axisTick: { lineStyle: { color: "#444" } },
       axisLabel: {
         color: "#999",
-        interval: 0,
-        rotate: 45,
+        interval: "auto",
+        rotate: responsiveLayout.labelRotation,
         margin: 14,
+        hideOverlap: true,
+        showMinLabel: true,
+        showMaxLabel: true,
       },
     },
     yAxis: {
@@ -7877,7 +7876,14 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
     chart.on("updateAxisPointer", () => setTotalsVisible(true));
     chart.getZr().on("globalout", () => setTotalsVisible(false));
   }
-  const resize = () => chart.resize();
+  const resize = () => {
+    chart.resize();
+    const layout = comparisonEChartResponsiveLayout(el.clientWidth);
+    chart.setOption({
+      grid: layout.grid,
+      xAxis: { axisLabel: { rotate: layout.labelRotation } },
+    }, { lazyUpdate: true });
+  };
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(resize);
     observer.observe(el);
@@ -7885,6 +7891,20 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   } else {
     window.addEventListener("resize", resize, { passive: true });
   }
+}
+
+function comparisonEChartResponsiveLayout(width) {
+  const compact = Number(width) > 0 && Number(width) <= 480;
+  return {
+    grid: {
+      left: compact ? 8 : 54,
+      right: compact ? 6 : 20,
+      top: 10,
+      bottom: compact ? 50 : 58,
+      containLabel: true,
+    },
+    labelRotation: compact ? 35 : 45,
+  };
 }
 
 function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secondaryLabel = null) {
