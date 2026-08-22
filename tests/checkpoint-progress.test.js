@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   evaluatePendingCheckpointProgress,
+  evaluateStageProgress,
   normalizePendingCheckpoint,
   updatePendingCheckpoint,
 } from "../checkpoint-progress.js";
@@ -141,4 +142,112 @@ test("malformed and mismatched checkpoint state is ignored", () => {
     currentPassed: 46,
     currentTotal: 70,
   }).totalMatches, false);
+});
+
+test("adding passing tests does not count as implementation progress", () => {
+  const result = evaluateStageProgress({
+    baselineTestStatus: status(503, 505, "pa23"),
+    currentTestStatus: status(506, 508, "pa23"),
+    stage: "pa23",
+    mode: "improve",
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.reason, "failures-not-reduced");
+  assert.equal(result.baseline.knownFailed, 2);
+  assert.equal(result.current.knownFailed, 2);
+});
+
+test("progress requires fewer failures with nondecreasing test coverage", () => {
+  assert.equal(evaluateStageProgress({
+    baselineTestStatus: status(494, 496, "pa23"),
+    currentTestStatus: status(498, 499, "pa23"),
+    stage: "pa23",
+    mode: "improve",
+  }).passed, true);
+
+  const removedFailure = evaluateStageProgress({
+    baselineTestStatus: status(494, 496, "pa23"),
+    currentTestStatus: status(494, 495, "pa23"),
+    stage: "pa23",
+    mode: "improve",
+  });
+  assert.equal(removedFailure.passed, false);
+  assert.equal(removedFailure.reason, "coverage-reduced");
+
+  const incompletePass = evaluateStageProgress({
+    baselineTestStatus: status(494, 496, "pa23"),
+    currentTestStatus: status(495, 495, "pa23"),
+    stage: "pa23",
+    mode: "improve",
+  });
+  assert.equal(incompletePass.passed, false);
+  assert.equal(incompletePass.reason, "coverage-reduced");
+});
+
+test("preserve mode permits added passing tests but not new failures", () => {
+  assert.equal(evaluateStageProgress({
+    baselineTestStatus: status(494, 496, "pa23"),
+    currentTestStatus: status(497, 499, "pa23"),
+    stage: "pa23",
+    mode: "preserve",
+  }).passed, true);
+  assert.equal(evaluateStageProgress({
+    baselineTestStatus: status(494, 496, "pa23"),
+    currentTestStatus: status(496, 499, "pa23"),
+    stage: "pa23",
+    mode: "preserve",
+  }).passed, false);
+});
+
+test("bounded fail-fast evidence cannot satisfy a progress gate", () => {
+  const current = status(10, 45, "pa23");
+  current.stages[0].passedUpperBound = 44;
+  const result = evaluateStageProgress({
+    baselineTestStatus: status(40, 45, "pa23"),
+    currentTestStatus: current,
+    stage: "pa23",
+    mode: "improve",
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.reason, "inexact-counts");
+});
+
+test("bounded fail-fast evidence cannot establish or preserve a pending checkpoint", () => {
+  const baseline = status(10, 45, "pa23");
+  baseline.stages[0].passedUpperBound = 44;
+  const current = status(11, 45, "pa23");
+  current.stages[0].passedUpperBound = 44;
+  assert.equal(updatePendingCheckpoint({
+    phase: "implement",
+    stage: "pa23",
+    checkpointEnabled: true,
+    phaseAttempted: true,
+    primaryPassed: false,
+    baselineTestStatus: baseline,
+    currentTestStatus: current,
+    turnNumber: 1,
+  }), null);
+
+  const pending = updatePendingCheckpoint({
+    phase: "implement",
+    stage: "pa23",
+    checkpointEnabled: true,
+    phaseAttempted: true,
+    primaryPassed: false,
+    baselineTestStatus: status(40, 45, "pa23"),
+    currentTestStatus: status(41, 45, "pa23"),
+    turnNumber: 1,
+  });
+  const evaluation = evaluatePendingCheckpointProgress({
+    pendingCheckpoint: pending,
+    phase: "implement",
+    stage: "pa23",
+    currentPassed: 10,
+    currentPassedUpperBound: 44,
+    currentTotal: 45,
+  });
+  assert.equal(evaluation.passed, false);
+  assert.equal(evaluation.totalMatches, true);
+  assert.equal(evaluation.exact, false);
 });

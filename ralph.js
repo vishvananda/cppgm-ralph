@@ -22,6 +22,7 @@ import {
 } from "./claude-subagent-events.js";
 import {
   evaluatePendingCheckpointProgress,
+  evaluateStageProgress,
   normalizePendingCheckpoint,
   pendingCheckpointForTarget,
   updatePendingCheckpoint,
@@ -2324,8 +2325,8 @@ function isCurrentStageProgressCheck(check) {
 function currentStageProgressValidationDescription(check) {
   const mode = parseCurrentStageProgressOptions(check?.command ?? "").mode;
   return mode === "preserve"
-    ? "current PA tests must either pass fully or stay at or above the turn-start baseline while earlier PAs pass"
-    : "current PA tests must either pass fully or increase above the turn-start baseline while earlier PAs pass";
+    ? "current PA tests must either pass fully or preserve the turn-start failure count without reducing test coverage while earlier PAs pass"
+    : "current PA tests must either pass fully or reduce the turn-start failure count without reducing test coverage while earlier PAs pass";
 }
 
 function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
@@ -4086,6 +4087,12 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
   const currentPassed = currentStagePassedCount(currentStage);
   const baselinePassed = currentStagePassedCount(baselineStage);
   const currentTotal = Number.isFinite(currentStage?.total) ? currentStage.total : null;
+  const progress = evaluateStageProgress({
+    baselineTestStatus: baselineStatus,
+    currentTestStatus: currentStatus,
+    stage,
+    mode,
+  });
   const earlierStagesPass = testStatusStagesBeforeTargetPass(currentStatus, stage);
   const stageComplete = currentStage?.status === "pass" &&
     currentTotal != null &&
@@ -4096,6 +4103,7 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     stage,
     subset: checkState.targetSubset,
     currentPassed,
+    currentPassedUpperBound: currentStage?.passedUpperBound,
     currentTotal,
   });
 
@@ -4105,6 +4113,8 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     `Mode: ${mode}.`,
     `Baseline ${stage ?? "stage"}: ${formatCountPair(baselinePassed, Number.isFinite(baselineStage?.total) ? baselineStage.total : null)}.`,
     `Current ${stage ?? "stage"}: ${formatCountPair(currentPassed, currentTotal)}.`,
+    `Baseline failures: ${formatFailureEvidence(progress.baseline)}.`,
+    `Current failures: ${formatFailureEvidence(progress.current)}.`,
     `Earlier stages: ${earlierStagesPass ? "pass" : "fail or unknown"}.`,
   ];
   if (pendingProgress) {
@@ -4135,7 +4145,7 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     lines.push(`FAIL: a stage before ${stage} is not passing in the source test status.`);
     return { exitCode: 1, output: lines.join("\n") };
   }
-  if (stageComplete) {
+  if (stageComplete && (!baselineStage || progress.passed)) {
     lines.push(`PASS: ${stage} is complete.`);
     lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
     return { exitCode: 0, output: lines.join("\n") };
@@ -4143,6 +4153,10 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
   if (pendingProgress) {
     if (!pendingProgress.totalMatches) {
       lines.push("FAIL: current PA total differs from the pending checkpoint total.");
+      return { exitCode: 1, output: lines.join("\n") };
+    }
+    if (!pendingProgress.exact) {
+      lines.push("FAIL: current PA has a fail-fast unknown tail and cannot preserve a pending checkpoint.");
       return { exitCode: 1, output: lines.join("\n") };
     }
     if (pendingProgress.passed) {
@@ -4167,21 +4181,35 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     lines.push(`FAIL: no turn-start baseline for ${stage}; run a provider turn before accepting this gate.`);
     return { exitCode: 1, output: lines.join("\n") };
   }
-  if (mode === "preserve" && currentPassed >= baselinePassed) {
-    lines.push(`PASS: ${stage} passing tests stayed at or above the turn-start baseline.`);
-    lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
-    return { exitCode: 0, output: lines.join("\n") };
-  }
-  if (mode === "improve" && currentPassed > baselinePassed) {
-    lines.push(`PASS: ${stage} passing tests increased by ${currentPassed - baselinePassed}.`);
+  if (progress.passed) {
+    lines.push(mode === "preserve"
+      ? `PASS: ${stage} failure count was preserved without reducing test coverage.`
+      : `PASS: ${stage} failure count decreased by ${
+          progress.baseline.knownFailed - progress.current.knownFailed
+        } without reducing test coverage.`);
     lines.push("===== ALL TESTS PASSED SUCCESSFULLY! =====");
     return { exitCode: 0, output: lines.join("\n") };
   }
 
-  lines.push(mode === "preserve"
-    ? `FAIL: ${stage} passing tests dropped below the turn-start baseline.`
-    : `FAIL: ${stage} passing tests did not increase above the turn-start baseline.`);
+  if (progress.reason === "coverage-reduced") {
+    lines.push(`FAIL: ${stage} test coverage dropped below the turn-start total.`);
+  } else if (progress.reason === "inexact-counts" || progress.reason === "missing-counts") {
+    lines.push(`FAIL: ${stage} does not have exact failure counts for both runs.`);
+  } else {
+    lines.push(mode === "preserve"
+      ? `FAIL: ${stage} failure count increased above the turn-start baseline.`
+      : `FAIL: ${stage} failure count did not decrease below the turn-start baseline.`);
+  }
   return { exitCode: 1, output: lines.join("\n") };
+}
+
+function formatFailureEvidence(snapshot) {
+  if (!snapshot) {
+    return "unknown";
+  }
+  return snapshot.exact
+    ? String(snapshot.knownFailed)
+    : `at least ${snapshot.knownFailed} (${snapshot.unknown} tests unrun)`;
 }
 
 function parseCurrentStageProgressOptions(command) {

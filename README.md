@@ -503,9 +503,12 @@ that issue rather than deferring it because the visible checks pass.
 
 The internal `ralph:current-stage-progress` check accepts an optional source
 check name and `mode=improve` or `mode=preserve`. `improve` requires the current
-PA pass count to increase above the turn-start baseline unless the PA fully
-passes. `preserve` is useful for checkpoint audit phases and requires the pass
-count to stay at or above the baseline.
+PA failure count to decrease from the turn-start baseline without reducing the
+number of tests, unless the PA fully passes at the same or greater coverage.
+Adding passing tests while retaining every existing failure does not count as
+implementation progress. `preserve` is useful for checkpoint audit phases and
+requires the failure count not to increase, again without reducing coverage.
+Fail-fast results with an unrun tail cannot satisfy either gate.
 
 Example two-phase setup:
 

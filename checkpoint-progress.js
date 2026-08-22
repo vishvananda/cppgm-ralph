@@ -16,7 +16,58 @@ function stageSnapshot(testStatus, stage) {
   if (passed == null || total == null || passed > total) {
     return null;
   }
-  return { passed, total, complete: entry.status === "pass" && passed >= total };
+  const passedUpperBound = normalizedCount(entry.passedUpperBound) ?? passed;
+  if (passedUpperBound < passed || passedUpperBound > total) {
+    return null;
+  }
+  return {
+    passed,
+    passedUpperBound,
+    total,
+    unknown: passedUpperBound - passed,
+    knownFailed: total - passedUpperBound,
+    exact: passedUpperBound === passed,
+    complete: entry.status === "pass" && passed >= total,
+  };
+}
+
+export function evaluateStageProgress({
+  baselineTestStatus,
+  currentTestStatus,
+  stage,
+  mode = "improve",
+}) {
+  const normalizedStage = normalizedTargetPart(stage);
+  const baseline = stageSnapshot(baselineTestStatus, normalizedStage);
+  const current = stageSnapshot(currentTestStatus, normalizedStage);
+  if (!baseline || !current) {
+    return { passed: false, reason: "missing-counts", baseline, current };
+  }
+  if (current.total < baseline.total) {
+    return { passed: false, reason: "coverage-reduced", baseline, current };
+  }
+  if (current.complete) {
+    return { passed: true, reason: "complete", baseline, current };
+  }
+  if (!baseline.exact || !current.exact) {
+    return { passed: false, reason: "inexact-counts", baseline, current };
+  }
+  const failuresImproved = current.knownFailed < baseline.knownFailed;
+  const failuresPreserved = current.knownFailed <= baseline.knownFailed;
+  if (mode === "preserve") {
+    return {
+      passed: failuresPreserved,
+      reason: failuresPreserved ? "failures-preserved" : "failures-increased",
+      baseline,
+      current,
+    };
+  }
+  return {
+    passed: failuresImproved,
+    reason: failuresImproved ? "failures-reduced" : "failures-not-reduced",
+    baseline,
+    current,
+  };
 }
 
 export function normalizePendingCheckpoint(value) {
@@ -87,7 +138,7 @@ export function updatePendingCheckpoint({
   }
 
   const current = stageSnapshot(currentTestStatus, normalizedTargetPart(stage));
-  if (!current || current.complete) {
+  if (!current || !current.exact || current.complete) {
     return null;
   }
 
@@ -103,7 +154,7 @@ export function updatePendingCheckpoint({
   }
 
   const baseline = stageSnapshot(baselineTestStatus, normalizedTargetPart(stage));
-  if (!baseline || baseline.total !== current.total || current.passed <= baseline.passed) {
+  if (!baseline || !baseline.exact || baseline.total !== current.total || current.passed <= baseline.passed) {
     return null;
   }
   const normalizedTurn = normalizedCount(turnNumber);
@@ -125,6 +176,7 @@ export function evaluatePendingCheckpointProgress({
   stage,
   subset = null,
   currentPassed,
+  currentPassedUpperBound = currentPassed,
   currentTotal,
 }) {
   const pending = pendingCheckpointForTarget(pendingCheckpoint, { phase, stage, subset });
@@ -132,13 +184,26 @@ export function evaluatePendingCheckpointProgress({
     return null;
   }
   const passed = normalizedCount(currentPassed);
+  const passedUpperBound = normalizedCount(currentPassedUpperBound);
   const total = normalizedCount(currentTotal);
-  if (passed == null || total == null || total !== pending.total) {
-    return { pending, passed: false, totalMatches: false };
+  if (
+    passed == null ||
+    passedUpperBound == null ||
+    total == null ||
+    passedUpperBound !== passed ||
+    total !== pending.total
+  ) {
+    return {
+      pending,
+      passed: false,
+      totalMatches: total === pending.total,
+      exact: passedUpperBound === passed,
+    };
   }
   return {
     pending,
     passed: passed >= pending.achievedPassed,
     totalMatches: true,
+    exact: true,
   };
 }
