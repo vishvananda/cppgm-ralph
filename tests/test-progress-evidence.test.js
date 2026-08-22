@@ -7,6 +7,7 @@ const {
   anchorPartialStageEvidence,
   directStageTestCommand,
   expandedProgressTargetTotal,
+  selectCurrentStageEvidence,
   targetEvidence,
 } = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 
@@ -79,6 +80,28 @@ test("partial exhaustive sub-suite preserves all of its known failures", () => {
     knownFailed: 4,
     status: "fail",
   });
+});
+
+test("a passing focused subset does not displace an exact full-stage pass", () => {
+  const fullPass = { passed: 70, passedUpperBound: 70, total: 70 };
+  const focusedPass = { passed: 10, passedUpperBound: 70, total: 70 };
+
+  assert.equal(selectCurrentStageEvidence(fullPass, focusedPass, {
+    status: "pass",
+    hasSubset: true,
+    partialStage: true,
+  }), fullPass);
+});
+
+test("a failing focused subset displaces an earlier full-stage pass", () => {
+  const fullPass = { passed: 70, passedUpperBound: 70, total: 70 };
+  const focusedFailure = { passed: 10, passedUpperBound: 69, total: 70 };
+
+  assert.equal(selectCurrentStageEvidence(fullPass, focusedFailure, {
+    status: "fail",
+    hasSubset: true,
+    partialStage: true,
+  }), focusedFailure);
 });
 
 test("recognizes direct stage tests and their fail-fast semantics", () => {

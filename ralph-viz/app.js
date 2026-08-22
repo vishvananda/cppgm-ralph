@@ -1281,7 +1281,7 @@ function dockProgressBarHtml(phase, progress, model) {
   const context = [phase?.phase, phaseTargetText(phase) || progress?.stage]
     .filter(Boolean)
     .join(" / ");
-  const ariaLabel = dockProgressAriaLabel(context, model);
+  const ariaLabel = dockProgressAriaLabel(context, model, progress);
   const fallback = model.rows.map((row) => `
     <div class="dock-progress-fallback-row" aria-hidden="true">
       ${row.segments.map((segment) => `
@@ -1301,13 +1301,13 @@ function dockProgressBarHtml(phase, progress, model) {
         <div class="dock-progress-echart${singleRowClass}" role="img" aria-label="${escapeHtml(ariaLabel)}">
           <div class="dock-progress-fallback${singleRowClass}">${fallback}</div>
         </div>
-        ${dockProgressLegendHtml(model)}
+        ${dockProgressLegendHtml(model, progress)}
       </div>
     </div>
   `;
 }
 
-function dockProgressLegendHtml(model) {
+function dockProgressLegendHtml(model, progress) {
   const items = [];
   if (model.hasStart) {
     items.push({ key: "start", text: `start ${fmtInt(model.start)}` });
@@ -1321,17 +1321,20 @@ function dockProgressLegendHtml(model) {
       ? [{ key: "unknown", text: `unrun ${fmtInt(model.unknown)}` }]
       : []),
     { key: "best", text: `best ${fmtInt(model.best)}` },
+    ...(passingFocusedProgressText(progress, { plain: true })
+      ? [{ key: "focused", text: passingFocusedProgressText(progress, { plain: true }), noSwatch: true }]
+      : []),
     { key: "total", text: `${fmtInt(model.total)} total` },
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
     <span class="dock-progress-legend-item${item.key === "total" ? " dock-progress-legend-total" : ""}">
-      ${item.key === "total" ? "" : `<span class="dock-progress-swatch dock-progress-${escapeHtml(item.key)}"></span>`}
+      ${item.key === "total" || item.noSwatch ? "" : `<span class="dock-progress-swatch dock-progress-${escapeHtml(item.key)}"></span>`}
       ${escapeHtml(item.text)}
     </span>
   `).join("")}</div>`;
 }
 
-function dockProgressAriaLabel(context, model) {
+function dockProgressAriaLabel(context, model, progress = null) {
   const parts = [context || "Test progress"];
   if (model.hasStart) {
     parts.push(`started with ${model.start} passing`);
@@ -1350,6 +1353,8 @@ function dockProgressAriaLabel(context, model) {
     parts.push(`${model.remaining} remaining`);
   }
   parts.push(`${model.total} total`);
+  const focused = passingFocusedProgressText(progress, { plain: true });
+  if (focused) parts.push(`latest ${focused}`);
   return parts.join(", ");
 }
 
@@ -1402,6 +1407,7 @@ function renderDockProgressChart(el, phase, progress, model) {
       description: dockProgressAriaLabel(
         [phase?.phase, phaseTargetText(phase) || progress?.stage].filter(Boolean).join(" / "),
         model,
+        progress,
       ),
     },
     backgroundColor: "transparent",
@@ -6142,6 +6148,19 @@ function summaryProgressStatus(summary, exitCode) {
 }
 
 function applyAgentTestProgressObservation(tracker, observation) {
+  const focusedEvidence = observation.hasSubset === true
+    ? {
+        passed: Math.max(0, observation.passed ?? 0),
+        passedUpperBound: Math.max(
+          Math.max(0, observation.passed ?? 0),
+          observation.passedUpperBound ?? observation.passed ?? 0,
+        ),
+        total: Math.max(0, observation.total ?? 0),
+        status: observation.status,
+        target: observation.commandTarget,
+        recordedAt: observation.recordedAt,
+      }
+    : null;
   const targetKey = progressTargetKey(observation.turn, observation.stage);
   let target = tracker.turnTargets.get(targetKey);
   if (!target && turnHasConfiguredProgressTarget(tracker, observation.turn)) {
@@ -6214,7 +6233,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
     tracker.stageBaseline.set(bestKey, { ...observedCurrent, recordedAt: observation.recordedAt });
   }
   const previousCurrent = tracker.stageCurrent.get(bestKey);
-  const current =
+  const candidateCurrent =
     observation.isTurnStartBaseline && previousCurrent
       ? {
           passed: previousCurrent.passed,
@@ -6222,6 +6241,11 @@ function applyAgentTestProgressObservation(tracker, observation) {
           total: Math.max(previousCurrent.total ?? 0, knownTotal),
         }
       : observedCurrent;
+  const current = TEST_PROGRESS_EVIDENCE?.selectCurrentStageEvidence(
+    previousCurrent,
+    candidateCurrent,
+    observation,
+  ) ?? candidateCurrent;
   tracker.stageCurrent.set(bestKey, current);
   const previousBest = tracker.stageBest.get(bestKey);
   const best =
@@ -6239,6 +6263,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
     current,
     best: normalizedBest,
     start: tracker.stageBaseline.get(bestKey) ?? null,
+    latestFocused: focusedEvidence,
   };
   if (shouldReplaceLatestAgentTestProgress(tracker.latest, progress)) {
     tracker.latest = progress;
@@ -6524,8 +6549,9 @@ function latestProgressSummaryHtml(progress) {
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
   return [
     `<span class="summary-progress">${escapeHtml(turnText)} ${escapeHtml(progress.stage)} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}</span>`,
+    passingFocusedProgressText(progress),
     `<span class="muted">${escapeHtml(progress.commandTarget)}</span>`,
-  ].join(" ");
+  ].filter(Boolean).join(" ");
 }
 
 function dockProgressText(progress) {
@@ -6534,7 +6560,8 @@ function dockProgressText(progress) {
   }
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
   const runningText = progress.status === "running" ? " running" : "";
-  return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${runningText}`;
+  const focused = passingFocusedProgressText(progress, { plain: true });
+  return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${focused ? `; ${focused}` : ""}${runningText}`;
 }
 
 function dockPhaseProgressText(phase, progress) {
@@ -6548,6 +6575,8 @@ function dockPhaseProgressText(phase, progress) {
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
     }
+    const focused = passingFocusedProgressText(progress, { plain: true });
+    if (focused) parts.push(focused);
     if (progress.status === "running") parts.push("running");
   } else if (phase?.allRequiredPassed) {
     parts.push("pass");
@@ -6565,6 +6594,8 @@ function turnPhaseProgressText(phase, progress) {
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
     }
+    const focused = passingFocusedProgressText(progress, { plain: true });
+    if (focused) parts.push(focused);
     if (progress.status === "running") parts.push("running");
   }
   return parts.join(" / ");
@@ -6605,6 +6636,17 @@ function progressRatioText(value) {
     ? Math.max(lower, value.passedUpperBound)
     : lower;
   return `${upper > lower ? `${lower}-${upper}` : lower}/${total}`;
+}
+
+function passingFocusedProgressText(progress, options = {}) {
+  const focused = progress?.latestFocused;
+  if (focused?.status !== "pass" || !(focused.total > 0)) {
+    return "";
+  }
+  const text = `focused ${focused.passed ?? 0}/${focused.total}`;
+  return options.plain
+    ? text
+    : `<span class="muted">${escapeHtml(text)}</span>`;
 }
 
 function escapeHtml(value) {

@@ -129,11 +129,35 @@
     return observed;
   }
 
+  function selectCurrentStageEvidence(previous, candidate, observation = {}) {
+    if (!previous) {
+      return candidate;
+    }
+    const previousUpper = Number.isFinite(previous?.passedUpperBound)
+      ? previous.passedUpperBound
+      : previous?.passed;
+    const candidateUpper = Number.isFinite(candidate?.passedUpperBound)
+      ? candidate.passedUpperBound
+      : candidate?.passed;
+    const previousIsExactPass = previous?.total > 0 &&
+      previous.passed === previous.total &&
+      previousUpper === previous.total;
+    const candidateIsPassingSubset = observation?.status === "pass" &&
+      (observation?.hasSubset === true || observation?.partialStage === true) &&
+      candidate?.total > 0 &&
+      candidate.passed < candidate.total &&
+      candidateUpper === candidate.total;
+    return previousIsExactPass && candidateIsPassingSubset
+      ? previous
+      : candidate;
+  }
+
   root.RALPH_TEST_PROGRESS_EVIDENCE = {
     aggregateTargetEvidence,
     anchorPartialStageEvidence,
     directStageTestCommand,
     expandedProgressTargetTotal,
+    selectCurrentStageEvidence,
     targetEvidence,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);
