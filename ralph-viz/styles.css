@@ -140,6 +140,8 @@
 
 html {
   overflow-anchor: none;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 body {
@@ -150,6 +152,8 @@ body {
   line-height: 1.5;
   padding-bottom: calc(var(--progress-dock-space) + env(safe-area-inset-bottom));
   overflow-anchor: none;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .page {
@@ -1306,6 +1310,8 @@ body.is-static-viz .combined-view-toggle {
 .turn-subagent-list {
   border-top: 1px solid var(--border);
   margin-top: 0.65rem;
+  max-width: 100%;
+  min-width: 0;
   padding-top: 0.45rem;
 }
 
@@ -1333,7 +1339,15 @@ body.is-static-viz .combined-view-toggle {
   padding: 0.15rem 0;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.ev-subagent,
+.ev-subagent > .accordion-body {
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -1355,7 +1369,7 @@ body.is-static-viz .combined-view-toggle {
 }
 
 .subagent-title {
-  flex: 1;
+  flex: 1 1 20rem;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1390,8 +1404,10 @@ body.is-static-viz .combined-view-toggle {
 }
 
 .subagent-output {
+  max-width: calc(100% - 1rem);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .subagent-trajectory {
@@ -1412,6 +1428,7 @@ body.is-static-viz .combined-view-toggle {
   flex-direction: column;
   gap: 0.2rem;
   margin: 0.35rem 0 0 0.65rem;
+  max-width: calc(100% - 0.65rem);
   min-width: 0;
 }
 
