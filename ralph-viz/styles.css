@@ -156,6 +156,8 @@ body {
   padding: 0.75rem 1.5rem;
   display: grid;
   gap: 0.75rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 header h1 { font-size: 1rem; font-weight: 600; display: inline; }
@@ -408,6 +410,20 @@ button:hover { background: var(--control-hover); }
   gap: 0.2rem;
   min-width: 0;
   overflow-anchor: none;
+}
+
+.timeline-card,
+.turn,
+.turn-feed,
+.ev-msg,
+.ev-thought,
+.copyable-block,
+.msg-body,
+.thought-body,
+.subagent-trajectory,
+.subagent-trajectory-feed {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .timeline * {
@@ -1509,6 +1525,7 @@ body.is-static-viz .combined-view-toggle {
 .msg-body {
   font-size: 0.82rem;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   line-height: 1.55;
   color: var(--text);
@@ -1523,7 +1540,19 @@ body.is-static-viz .combined-view-toggle {
 
 .msg-body > :first-child { margin-top: 0; }
 .msg-body > :last-child { margin-bottom: 0; }
-.msg-body pre { white-space: pre-wrap; }
+.msg-body pre,
+.msg-body pre code,
+.msg-body pre code[class*="language-"] {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.msg-body code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 /* File changes */
 .ev-file > .accordion-header {
@@ -1783,6 +1812,7 @@ pre.file-diff .token.prefix {
 .thought-body {
   font-size: 0.78rem;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   line-height: 1.45;
   color: var(--muted);

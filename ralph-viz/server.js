@@ -283,11 +283,11 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
 }
 
 async function readTailRunWithCodexSession(filePath, detailOptions) {
-  let events = await readRecentRunTailEvents(filePath, detailOptions);
-  if (!events.length) {
+  const runEvents = await readRecentRunTailEvents(filePath, detailOptions);
+  if (!runEvents.length) {
     return null;
   }
-  events = await appendSubagentEvents(events);
+  let events = await appendSubagentEvents(runEvents);
   await augmentLatestTestStatusFromLog(events, filePath);
   const runProgressEvents = progressEventsFromRunEvents(events);
   const withRunProgress = runProgressEvents.length
@@ -310,7 +310,10 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // log. Still scan the bounded session window because patch_apply_end carries
   // unified diffs that streamed file_change summaries omit.
   const primaryItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
-  const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
+  // Child progress observations belong in the parent progress dock, but their
+  // thread ids must not become primary session-detail sources. The complete
+  // child transcript is available through /api/codex-subagent/:threadId.
+  const threadIds = inferThreadIdsForDetail(filePath, runEvents, selectedWindows, detailOptions);
   const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
     selectedWindows,
     buildSessionTurnResolver(events),
