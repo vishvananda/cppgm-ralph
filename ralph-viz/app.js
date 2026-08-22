@@ -2709,7 +2709,7 @@ function renderSubagentCard(entry) {
 
   const label = document.createElement("span");
   label.className = "pill";
-  label.textContent = item.subagent_type || item.provider || "agent";
+  label.textContent = item.model || item.subagent_type || item.provider || "agent";
   summary.append(label);
 
   const title = document.createElement("span");
@@ -2722,6 +2722,12 @@ function renderSubagentCard(entry) {
     entry.updateRecord,
     ...completions,
   ].filter(Boolean), entry.estimateModel);
+  if (item.reasoning_effort) {
+    const effort = document.createElement("span");
+    effort.className = "subagent-meta";
+    effort.textContent = item.reasoning_effort;
+    summary.append(effort);
+  }
   if (stats.runtimeMs > 0) {
     const duration = document.createElement("span");
     duration.className = "subagent-meta";
@@ -2733,6 +2739,12 @@ function renderSubagentCard(entry) {
     tokens.className = "subagent-meta";
     tokens.textContent = `${stats.estimatedTokenCount ? "~" : ""}${fmtInt(stats.tokens)} tok`;
     summary.append(tokens);
+  }
+  if (stats.pricedCostCount > 0) {
+    const cost = document.createElement("span");
+    cost.className = "subagent-meta";
+    cost.textContent = fmtUsd(stats.costUsd);
+    summary.append(cost);
   }
   if (stats.toolUses > 0) {
     const tools = document.createElement("span");
@@ -2862,6 +2874,9 @@ function buildSubagentStats(records, estimateModel = null) {
   let runtimeMs = 0;
   let tokens = 0;
   let toolUses = 0;
+  let costUsd = 0;
+  let pricedCostCount = 0;
+  const models = new Set();
   let estimatedRuntimeCount = 0;
   let estimatedTokenCount = 0;
   let missingRuntimeCount = 0;
@@ -2886,6 +2901,9 @@ function buildSubagentStats(records, estimateModel = null) {
     if (notifications.has(notificationKey)) continue;
     notifications.add(notificationKey);
     completedAgents.add(id);
+    if (item.model) {
+      models.add(item.model);
+    }
     const explicitDuration = Number(item.duration_ms);
     let durationMs = Number.isFinite(explicitDuration) && explicitDuration >= 0
       ? explicitDuration
@@ -2911,6 +2929,11 @@ function buildSubagentStats(records, estimateModel = null) {
       if (tokenCount > 0) estimatedTokenCount += 1;
     }
     tokens += tokenCount;
+    const itemCost = apiCostEstimate(item.usage, item.model);
+    if (Number.isFinite(itemCost)) {
+      costUsd += itemCost;
+      pricedCostCount += 1;
+    }
     toolUses += Math.max(0, Number(item.tool_uses) || 0);
     if (durationMs > 0) {
       intervals.push({ start: time - durationMs, end: time });
@@ -2948,6 +2971,9 @@ function buildSubagentStats(records, estimateModel = null) {
     runtimeMs,
     wallMs,
     tokens,
+    costUsd,
+    pricedCostCount,
+    models: [...models].sort(),
     toolUses,
     estimatedRuntimeCount,
     estimatedTokenCount,
@@ -2970,6 +2996,9 @@ function subagentStatsText(stats) {
   }
   if (stats.tokens > 0) {
     parts.push(`${stats.estimatedTokenCount ? "~" : ""}${fmtInt(stats.tokens)} child tok`);
+  }
+  if (stats.pricedCostCount > 0) {
+    parts.push(`${fmtUsd(stats.costUsd)} child cost`);
   }
   if (stats.missingRuntimeCount || stats.missingTokenCount) {
     const fields = [];
@@ -5451,7 +5480,7 @@ function parseAgentTestCommandTarget(text) {
       stageNumber: number,
       target: `test-pa${number}`,
       hasSubset: false,
-      failFast: true,
+      failFast: false,
     };
   }
 
@@ -5603,11 +5632,14 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
     failFastFailures: commandInfo.failFast === true,
   });
   const direct = stageProgress.get(commandInfo.stage);
-  if (direct?.total > 0 && !(commandInfo.kind === "selected" && direct.partialStage)) {
+  if (
+    direct?.total > 0 &&
+    !((commandInfo.kind === "selected" || commandInfo.kind === "single") && direct.partialStage)
+  ) {
     return buildAgentTestProgressObservation(record, commandInfo, direct);
   }
 
-  if (commandInfo.kind === "selected") {
+  if (commandInfo.kind === "selected" || commandInfo.kind === "single") {
     if (direct?.partialStage) {
       const summaryProgress = inferSelectedReportSummaryProgress(
         output,
@@ -5778,6 +5810,9 @@ function normalizeSelectedReportStages(output, commandInfo) {
   const configured = Array.isArray(commandInfo.stages) ? commandInfo.stages.filter(Boolean) : [];
   if (configured.length > 0) {
     return configured;
+  }
+  if (commandInfo.kind === "single" && commandInfo.stage) {
+    return [commandInfo.stage];
   }
   return parseStageSections(output).map((section) => section.name);
 }

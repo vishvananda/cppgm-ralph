@@ -13,6 +13,11 @@ If Ralph resumes the same thread later, it appends Ralph prompt events plus new
 streamed provider events to the same file so each run can be visualized from one
 timeline.
 
+The visualization also discovers native Codex child rollouts from their parent
+thread metadata. Codex subagents appear as subagent cards with their effective
+model and reasoning effort, while their tokens and model-priced cost remain
+separate from the supervising root thread's usage.
+
 Ralph now also enforces a clean repository handoff:
 
 - after each completed phase, the agent should commit its intended changes

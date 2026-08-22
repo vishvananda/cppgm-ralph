@@ -2340,7 +2340,7 @@ function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
     .filter(Boolean)
     .join(" ");
   return scopedSubsets
-    ? [`make test-report ACTIVE_TEST_REPORT_PAS=${shellEscape(stage)} GLOB=${shellEscape(scopedSubsets)}`]
+    ? [`make test-${stage} GLOB=${shellEscape(scopedSubsets)}`]
     : [];
 }
 
@@ -4319,7 +4319,7 @@ async function runPriorStageSubsetsCheck(context) {
     .map((priorSubset) => buildStageScopedTestSubset(stage, priorSubset))
     .filter(Boolean)
     .join(" ");
-  const command = `make test-report ACTIVE_TEST_REPORT_PAS=${shellEscape(stage)} GLOB=${shellEscape(scopedSubset)}`;
+  const command = `make test-${stage} GLOB=${shellEscape(scopedSubset)}`;
   outputs.push("", `===== Ralph prior subsets ${scopedSubset} =====`, `$ ${command}`);
   const run = await runCommand(command, CONFIG.workdir, { limitResources: true });
   outputs.push(sanitizePriorSubsetOutput(run.output));
@@ -4732,7 +4732,7 @@ function buildStagePrefixTestCommand(stageName, subsetName) {
   }
   const stagePrefixSubset = buildStagePrefixTestSubset(stage, subsetName);
   const globArg = stagePrefixSubset ? ` GLOB=${shellEscape(stagePrefixSubset)}` : "";
-  return `make test-report ACTIVE_TEST_REPORT_PAS=${shellEscape(stage)}${globArg}`;
+  return `make test-${stage}${globArg}`;
 }
 
 function splitTestSubsetPatterns(subsetName) {

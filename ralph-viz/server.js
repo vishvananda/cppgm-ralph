@@ -17,9 +17,9 @@ import {
   viewerAssetForPathname,
 } from "./viewer-assets.js";
 import {
-  collectClaudeSubagentEvents,
+  collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
-} from "../claude-subagent-events.js";
+} from "../subagent-events.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -52,7 +52,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 14;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 16;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -243,11 +243,10 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     detailOptions,
     selectedWindows,
   );
+  const responseEvents = await appendSubagentEvents(responseBaseEvents);
   if (detailOptions.mode === "none") {
-    return responseBaseEvents;
+    return responseEvents;
   }
-
-  const responseEvents = await appendClaudeSubagentEvents(responseBaseEvents);
 
   if (detailOptions.mode !== "all" && selectedWindows.length === 0) {
     return responseEvents;
@@ -268,7 +267,11 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
   const sessionEvents = sessionEventGroups.flat();
-  const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
+  const progressEvents = await readCodexSessionProgressEvents(
+    threadIds,
+    resolveTurnNumber,
+    readOptions,
+  );
   if (!sessionEvents.length && !progressEvents.length) {
     return responseEvents;
   }
@@ -281,7 +284,7 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   if (!events.length) {
     return null;
   }
-  events = await appendClaudeSubagentEvents(events);
+  events = await appendSubagentEvents(events);
   await augmentLatestTestStatusFromLog(events, filePath);
   const runProgressEvents = progressEventsFromRunEvents(events);
   const withRunProgress = runProgressEvents.length
@@ -304,10 +307,6 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   // log. Still scan the bounded session window because patch_apply_end carries
   // unified diffs that streamed file_change summaries omit.
   const primaryItemCardStreams = primaryItemCardStreamKeys(responseBaseEvents);
-  if (primaryItemCardStreams.size === 0) {
-    return appendLatestThreadUsageEvents(responseBaseEvents);
-  }
-
   const threadIds = inferThreadIdsForDetail(filePath, events, selectedWindows, detailOptions);
   const resolveTurnNumber = buildWindowBackedSessionTurnResolver(
     selectedWindows,
@@ -315,10 +314,27 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   );
   const readOptions = buildSessionReadOptions(selectedWindows, detailOptions);
   readOptions.suppressedItemCardStreams = suppressedItemCardStreams;
+  if (primaryItemCardStreams.size === 0) {
+    const progressEvents = await readCodexSessionProgressEvents(
+      threadIds,
+      resolveTurnNumber,
+      readOptions,
+    );
+    return appendLatestThreadUsageEvents(
+      progressEvents.length
+        ? mergeEventStreams(responseBaseEvents, progressEvents)
+        : responseBaseEvents,
+    );
+  }
+
   const sessionEventGroups = await Promise.all(
     threadIds.map((threadId) => readCodexSessionEvents(threadId, resolveTurnNumber, readOptions)),
   );
-  const progressEvents = await readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions);
+  const progressEvents = await readCodexSessionProgressEvents(
+    threadIds,
+    resolveTurnNumber,
+    readOptions,
+  );
   const merged = mergeEventStreams(
     mergeEventStreams(responseBaseEvents, sessionEventGroups.flat()),
     progressEvents,
@@ -327,12 +343,40 @@ async function readTailRunWithCodexSession(filePath, detailOptions) {
   return appendLatestThreadUsageEvents(limited);
 }
 
-async function appendClaudeSubagentEvents(events) {
-  const additions = await collectClaudeSubagentEvents(events, {
+async function appendSubagentEvents(events) {
+  const additions = await collectSubagentEvents(events, {
     claudeDir: CLAUDE_PROJECTS_DIR,
+    codexDir: CODEX_DIR,
     resultLimit: CODEX_SESSION_OUTPUT_LIMIT,
   });
-  return additions.length ? mergeEventStreams(events, additions) : events;
+  if (!additions.length) {
+    return events;
+  }
+  const childThreadIds = codexSubagentProgressThreadIds(additions);
+  const progressEvents = await readCodexSessionProgressEvents(
+    childThreadIds,
+    buildSessionTurnResolver(events),
+    { mode: "all" },
+  );
+  return mergeEventStreams(
+    mergeEventStreams(events, additions),
+    progressEvents,
+  );
+}
+
+export function codexSubagentProgressThreadIds(events, primaryThreadIds = []) {
+  const threadIds = new Set((primaryThreadIds ?? []).filter(Boolean));
+  for (const record of events ?? []) {
+    const item = record?.event?.item;
+    if (item?.type !== "subagent" || item.provider !== "codex") {
+      continue;
+    }
+    const threadId = item.agent_thread_id ?? item.id;
+    if (threadId) {
+      threadIds.add(threadId);
+    }
+  }
+  return [...threadIds];
 }
 
 async function appendLatestThreadUsageEvents(events) {
@@ -4530,7 +4574,7 @@ async function readCodexSessionWindowEvents(threadId, resolveTurnNumber, readOpt
   return limitSessionEventsByTurn(events, readOptions.maxEventsPerTurn);
 }
 
-async function readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions) {
+export async function readCodexSessionProgressEvents(threadIds, resolveTurnNumber, readOptions) {
   const events = [];
   for (const threadId of threadIds ?? []) {
     const files = await findCodexSessionFiles(threadId);
@@ -4640,7 +4684,7 @@ function codexSessionProgressCachePath(filePath) {
   return path.join(RALPH_DIR, CODEX_SESSION_PROGRESS_CACHE_DIR, `${key}.json`);
 }
 
-async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
+export async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
   const observations = [];
   const callsById = new Map();
   const commandsBySessionId = new Map();
@@ -4675,6 +4719,9 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
           name: payload.name,
           args,
           command: formatFunctionCall(payload, args, commandContext),
+          batchCommands: payload.name === "exec" && typeof args?.input === "string"
+            ? extractToolCommandBatch(args.input, commandContext)
+            : [],
         });
       }
       continue;
@@ -4705,12 +4752,16 @@ async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
     ) {
       continue;
     }
-    const command = parentCommand
-      ? `${parentCommand} (continued session ${parentSessionId})`
-      : call?.command ?? "";
-    const observation = progressObservationFromCodexOutputRecord(record, command);
-    if (observation) {
-      observations.push(observation);
+    const commands = call?.batchCommands?.length
+      ? call.batchCommands
+      : [parentCommand
+          ? `${parentCommand} (continued session ${parentSessionId})`
+          : call?.command ?? ""];
+    for (const command of commands) {
+      const observation = progressObservationFromCodexOutputRecord(record, command);
+      if (observation) {
+        observations.push(observation);
+      }
     }
   }
   return observations;
@@ -4730,6 +4781,12 @@ function progressObservationFromCodexOutputRecord(record, command = "") {
 
 export function progressObservationFromSessionOutput(output, recordedAt, command = "") {
   const commandInfo = parseSingleStageProgressCommand(command);
+  // A test summary printed by `cat`/`tail` is historical evidence, not a new
+  // test execution.  Require the associated command to identify a supported
+  // test target before allowing its output to move live progress.
+  if (!commandInfo) {
+    return null;
+  }
   const stage = inferSingleSessionProgressStage(output) ?? commandInfo?.stage ?? null;
   const directProgress = stage
     ? parseSingleStageProgressFromSessionOutput(output, stage, {
@@ -4737,7 +4794,7 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
         failFastFailures: commandInfo?.failFast === true,
       })
     : null;
-  const summary = commandInfo?.kind === "selected"
+  const summary = commandInfo?.kind === "selected" || commandInfo?.kind === "single"
     ? parseLastSessionTestSummary(output)
     : parseSessionTestSummary(output);
   if (directProgress?.partialStage && summary && stage) {
@@ -4852,7 +4909,7 @@ function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expe
   if (commandInfo.stage !== expectedStage || commandInfo.hasSubset) {
     return null;
   }
-  if (commandInfo.kind !== "selected") {
+  if (commandInfo.kind !== "selected" && commandInfo.kind !== "single") {
     return null;
   }
   const outputStages = [...new Set(parseStageSections(output).map((section) => section.name))];
@@ -4954,7 +5011,7 @@ function parseSingleStageProgressCommand(command) {
       kind: "single",
       stage: `pa${Number.parseInt(single[1], 10)}`,
       hasSubset: false,
-      failFast: true,
+      failFast: false,
     };
   }
   const direct = TEST_PROGRESS_EVIDENCE.directStageTestCommand(text);

@@ -3,6 +3,14 @@ import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import {
+  buildSubagentTurnResolver as buildTurnResolver,
+  compactSubagentText as compactText,
+  existingSubagentEventKeys,
+  subagentEventThreadId as eventThreadId,
+  subagentRunRecord as runRecord,
+  subagentTextValue as textValue,
+} from "./subagent-event-utils.js";
 
 const CLAUDE_INDEX_TTL_MS = 5_000;
 const DEFAULT_RESULT_LIMIT = 12_000;
@@ -403,33 +411,6 @@ async function readChildTranscriptCompletion(filePath, options) {
   };
 }
 
-function runRecord(recordedAt, threadId, turnNumber, eventType, item) {
-  return {
-    recordedAt,
-    threadId,
-    turnNumber,
-    eventType,
-    event: { type: eventType, item },
-  };
-}
-
-function existingSubagentEventKeys(events) {
-  const keys = new Set();
-  for (const record of events ?? []) {
-    const item = record?.event?.item;
-    if (item?.type !== "subagent" || !item.id) {
-      continue;
-    }
-    const threadId = eventThreadId(record) ?? "";
-    if (record.eventType === "item.started") {
-      keys.add(`start:${threadId}:${item.id}`);
-    } else if (record.eventType === "item.completed") {
-      keys.add(`complete:${threadId}:${item.notification_id ?? `${item.id}:${record.recordedAt ?? ""}`}`);
-    }
-  }
-  return keys;
-}
-
 async function findClaudeSessionFiles(root, threadIds) {
   const index = await claudeSessionIndex(root);
   const matches = new Map();
@@ -482,40 +463,6 @@ async function walkClaudeProjects(directory, index, depth) {
   }
 }
 
-function buildTurnResolver(events) {
-  const starts = (events ?? [])
-    .filter((record) =>
-      record?.eventType === "ralph.prompt" ||
-      (record?.eventType === "ralph.phase-status" && record.event?.action === "turn-start"))
-    .map((record) => ({
-      threadId: eventThreadId(record),
-      turnNumber: record.turnNumber,
-      time: Date.parse(record.recordedAt ?? ""),
-    }))
-    .filter((entry) => Number.isInteger(entry.turnNumber) && entry.turnNumber > 0 && Number.isFinite(entry.time))
-    .sort((left, right) => left.time - right.time);
-  return (timestamp, threadId) => {
-    const time = Date.parse(timestamp ?? "");
-    if (!Number.isFinite(time)) {
-      return null;
-    }
-    let selected = null;
-    for (const start of starts) {
-      if (start.time > time) {
-        break;
-      }
-      if (!threadId || !start.threadId || start.threadId === threadId) {
-        selected = start;
-      }
-    }
-    return selected?.turnNumber ?? null;
-  };
-}
-
-function eventThreadId(record) {
-  return record?.threadId ?? record?.event?.thread_id ?? record?.event?.threadId ?? null;
-}
-
 function xmlTag(text, name) {
   const match = String(text ?? "").match(new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, "i"));
   return decodeXml(match?.[1] ?? "").trim();
@@ -538,20 +485,6 @@ function decodeXml(value) {
 function agentDescription(summary) {
   const match = String(summary ?? "").match(/^Agent\s+["']([\s\S]*?)["']\s+finished$/i);
   return match?.[1] ?? String(summary ?? "");
-}
-
-function compactText(value, limit = DEFAULT_RESULT_LIMIT) {
-  const text = textValue(value);
-  const max = Number.isFinite(limit) ? Math.max(1_000, limit) : DEFAULT_RESULT_LIMIT;
-  if (text.length <= max) {
-    return text;
-  }
-  const edge = Math.floor((max - 80) / 2);
-  return `${text.slice(0, edge)}\n\n... subagent output omitted ...\n\n${text.slice(-edge)}`;
-}
-
-function textValue(value) {
-  return typeof value === "string" ? value : "";
 }
 
 function resumedAgentIdFromText(value) {

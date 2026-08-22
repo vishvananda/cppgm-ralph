@@ -90,7 +90,7 @@ test("recognizes direct stage tests and their fail-fast semantics", () => {
   assert.deepEqual(directStageTestCommand("make test-pa37"), {
     stage: "pa37",
     hasSubset: false,
-    failFast: true,
+    failFast: false,
   });
   assert.deepEqual(
     directStageTestCommand("KEEP_GOING=1 make -C /work/repo/pa37 test TEST=tests/a.t"),

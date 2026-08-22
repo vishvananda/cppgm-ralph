@@ -14,7 +14,7 @@
       return {
         stage: `pa${Number.parseInt(wrapper[1], 10)}`,
         hasSubset: false,
-        failFast: true,
+        failFast: false,
       };
     }
     if (!/(?:^|\s)test(?=\s|$)/.test(text)) {
