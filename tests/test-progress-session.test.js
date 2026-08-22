@@ -97,6 +97,28 @@ test("direct stage test preserves a failing sub-suite as partial stage evidence"
   });
 });
 
+test("focused local check reports child subset progress", () => {
+  const observation = progressObservationFromSessionOutput(
+    "make: Entering directory '/repo/pa1'\n" +
+      "pa1 check: running 8 tests\n" +
+      "pa1 check: PASS (8/8)\n" +
+      "make: Leaving directory '/repo/pa1'\n",
+    "2026-08-22T16:17:07.060Z",
+    "make -C pa1 check TEST='tests/a.t tests/b.t'",
+  );
+
+  assert.deepEqual(observation, {
+    recordedAt: "2026-08-22T16:17:07.060Z",
+    stage: "pa1",
+    passed: 8,
+    passedUpperBound: 8,
+    total: 8,
+    status: "pass",
+    hasSubset: true,
+    partialStage: true,
+  });
+});
+
 test("top-level test-pa wrapper treats completed sub-suites as exhaustive evidence", () => {
   const observation = progressObservationFromSessionOutput(
     "pa37 object-roundtrip: running 7 tests\n" +

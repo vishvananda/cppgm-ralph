@@ -1258,6 +1258,20 @@ body.is-static-viz .combined-view-toggle {
   color: var(--text);
 }
 
+.turn-subagent-list {
+  border-top: 1px solid var(--border);
+  margin-top: 0.65rem;
+  padding-top: 0.45rem;
+}
+
+.turn-subagent-list-heading {
+  color: var(--muted);
+  display: block;
+  font-size: 0.72rem;
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+}
+
 /* --- Event cards --- */
 .ev {
   min-width: 0;
@@ -1323,6 +1337,27 @@ body.is-static-viz .combined-view-toggle {
 .subagent-output {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.subagent-trajectory {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+
+.subagent-trajectory > summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  user-select: none;
+}
+
+.subagent-trajectory-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0.35rem 0 0 0.65rem;
+  min-width: 0;
 }
 
 .ev-cmd > .accordion-header {

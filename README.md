@@ -16,7 +16,9 @@ timeline.
 The visualization also discovers native Codex child rollouts from their parent
 thread metadata. Codex subagents appear as subagent cards with their effective
 model and reasoning effort, while their tokens and model-priced cost remain
-separate from the supervising root thread's usage.
+separate from the supervising root thread's usage. Each Codex child is listed
+at the bottom of its parent turn; expanding its Trajectory section loads the
+child's messages, commands, and file changes on demand.
 
 Ralph now also enforces a clean repository handoff:
 

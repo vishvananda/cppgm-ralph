@@ -52,7 +52,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 16;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 17;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -84,6 +84,7 @@ let PUBLISHED_COMPARISON_CACHE = null;
 let PUBLISHED_COMPARISON_READ = null;
 const LOCAL_COMPARISON_CACHE = new Map();
 const LOCAL_COMPARISON_READS = new Map();
+const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Scan .ralph/*/events/*.jsonl
 async function listFiles() {
@@ -7286,6 +7287,40 @@ async function requestHandler(req, res) {
       state: entry.state,
     }));
     return sendJson(res, { runs });
+  }
+
+  if (pathname.startsWith("/api/codex-subagent/")) {
+    const threadId = decodeURIComponent(pathname.slice("/api/codex-subagent/".length));
+    if (!CODEX_THREAD_ID_RE.test(threadId)) {
+      return sendJson(res, { error: "Invalid Codex subagent thread id" }, 400);
+    }
+    const files = await findCodexSessionFiles(threadId);
+    if (!files.length) {
+      return sendJson(res, { error: "Codex subagent trajectory not found" }, 404);
+    }
+    const maxEvents = parseOptionalBoundedInt(
+      url.searchParams.get("maxEvents"),
+      2_000,
+      50,
+      5_000,
+    );
+    const outputLimit = parseOptionalBoundedInt(
+      url.searchParams.get("outputLimit"),
+      CODEX_SESSION_OUTPUT_LIMIT,
+      1_000,
+      100_000,
+    );
+    const events = await readCodexSessionEvents(
+      threadId,
+      () => 1,
+      {
+        mode: "all",
+        maxEventsPerTurn: maxEvents,
+        outputLimit,
+        skipTokenCounts: true,
+      },
+    );
+    return sendJson(res, { threadId, events });
   }
 
   if (pathname.startsWith("/api/run-comparison/")) {

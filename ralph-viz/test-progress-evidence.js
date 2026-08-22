@@ -17,7 +17,8 @@
         failFast: false,
       };
     }
-    if (!/(?:^|\s)test(?=\s|$)/.test(text)) {
+    const localTarget = text.match(/(?:^|\s)(test|check)(?=\s|$)/)?.[1] ?? null;
+    if (!localTarget) {
       return null;
     }
     const directory = text.match(
@@ -30,7 +31,7 @@
     }
     return {
       stage,
-      hasSubset: /\b(?:GLOB|TEST)\s*=/.test(text),
+      hasSubset: localTarget === "check" || /\b(?:GLOB|TEST)\s*=/.test(text),
       failFast: !/\bKEEP_GOING\s*=\s*(?:1|true|yes|on)\b/i.test(text),
     };
   }

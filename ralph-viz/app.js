@@ -2786,7 +2786,65 @@ function renderSubagentCard(entry) {
       `${key}:result-${index + 1}`,
     );
   });
+  appendCodexSubagentTrajectory(body, item, key);
   return card;
+}
+
+function appendCodexSubagentTrajectory(container, item, key) {
+  const threadId = cleanText(item.agent_thread_id ?? item.id);
+  if (item.provider !== "codex" || !threadId) {
+    return;
+  }
+
+  const details = document.createElement("details");
+  details.className = "subagent-trajectory";
+  const summary = document.createElement("summary");
+  summary.textContent = "Trajectory";
+  const feed = document.createElement("div");
+  feed.className = "subagent-trajectory-feed";
+  details.append(summary, feed);
+  container.append(details);
+
+  let loaded = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loaded) {
+      return;
+    }
+    loaded = true;
+    feed.textContent = state.staticMode ? "Trajectory is available in the live visualization." : "Loading trajectory…";
+    if (state.staticMode) {
+      return;
+    }
+    try {
+      const data = await fetchJson(
+        `/api/codex-subagent/${encodeURIComponent(threadId)}?maxEvents=2000`,
+      );
+      const records = collapseMirroredCodexItems(data.events ?? []).filter(shouldShow);
+      const entries = buildDisplayEntries(records, {
+        subagentEstimateModel: buildSubagentEstimateModel(records),
+      });
+      feed.textContent = "";
+      summary.textContent = `Trajectory (${entries.length} cards)`;
+      if (!entries.length) {
+        feed.textContent = "No displayable trajectory events.";
+        return;
+      }
+      entries.forEach((entry, index) => {
+        const rendered = renderDisplayEntry(entry);
+        if (!rendered) {
+          return;
+        }
+        const scrollKey = scrollKeyForEntry(entry, index);
+        if (scrollKey) {
+          rendered.dataset.scrollKey = `${key}:trajectory:${scrollKey}`;
+        }
+        feed.append(rendered);
+      });
+    } catch (error) {
+      loaded = false;
+      feed.textContent = `Trajectory unavailable: ${error?.message ?? error}`;
+    }
+  });
 }
 
 function appendSubagentSection(container, label, value, key) {
@@ -5492,7 +5550,9 @@ function parseAgentTestCommandTarget(text) {
     kind: "stage",
     stage: direct.stage,
     stageNumber: stageNumber(direct.stage),
-    target: `make -C ${direct.stage} test`,
+    target: /(?:^|\s)check(?=\s|$)/.test(text)
+      ? `make -C ${direct.stage} check`
+      : `make -C ${direct.stage} test`,
     hasSubset: direct.hasSubset,
     failFast: direct.failFast,
   };
@@ -5873,7 +5933,6 @@ function applyAgentTestProgressObservation(tracker, observation) {
   const anchoredStageTotal = target?.total ?? tracker.stageTotals.get(observation.stage) ?? 0;
   if (
     observation.partialStage &&
-    !observation.hasSubset &&
     anchoredStageTotal > observation.total
   ) {
     const anchored = TEST_PROGRESS_EVIDENCE?.anchorPartialStageEvidence(
@@ -6650,7 +6709,9 @@ function renderTimeline(records) {
     }));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
     const displayEntries = buildDisplayEntries(items, { subagentEstimateModel });
-    const entryWindow = displayEntryWindow(displayEntries, turn);
+    const subagentEntries = displayEntries.filter((entry) => entry.kind === "subagent");
+    const parentEntries = displayEntries.filter((entry) => entry.kind !== "subagent");
+    const entryWindow = displayEntryWindow(parentEntries, turn);
     const cardWindowText = turnCardWindowText(entryWindow);
     const usageExpanded = state.expandedUsageTurns.has(turn);
     const usageHtml = usage
@@ -6714,6 +6775,28 @@ function renderTimeline(records) {
         feed.append(el);
       }
     });
+    if (subagentEntries.length) {
+      const section = document.createElement("section");
+      section.className = "turn-subagent-list";
+      const heading = document.createElement("strong");
+      heading.className = "turn-subagent-list-heading";
+      heading.textContent = `Subagents (${subagentEntries.length})`;
+      section.append(heading);
+      subagentEntries.forEach((entry, index) => {
+        const el = renderDisplayEntry(entry);
+        if (!el) {
+          return;
+        }
+        if (!el.dataset.scrollKey && !el.querySelector("[data-scroll-key]")) {
+          const key = scrollKeyForEntry(entry, index);
+          if (key) {
+            el.dataset.scrollKey = key;
+          }
+        }
+        section.append(el);
+      });
+      feed.append(section);
+    }
     fragment.append(turnEl);
   }
   const contentScrollPositions = captureContentScrollPositions();
