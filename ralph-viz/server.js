@@ -7223,14 +7223,26 @@ function comparisonSummaryForChart(summary, pa) {
       pa,
       turns: [],
       durationMs: 0,
+      activeDurationMs: 0,
+      totalDurationMs: 0,
       cost: 0,
       status: "not started",
     };
   }
+  const activeDurationMs = Math.max(
+    0,
+    Number(summary.activeDurationMs ?? summary.durationMs) || 0,
+  );
+  const totalDurationMs = Math.max(
+    activeDurationMs,
+    Number(summary.totalDurationMs ?? activeDurationMs) || 0,
+  );
   return {
     pa,
     turns: Array.isArray(summary.turns) && summary.turns.length ? [String(summary.turns.length)] : [],
-    durationMs: Math.max(0, Number(summary.durationMs) || 0),
+    durationMs: activeDurationMs,
+    activeDurationMs,
+    totalDurationMs,
     cost: Math.max(0, Number(summary.cost) || 0),
     status: summary.status === "partial" ? "partial" : "complete",
   };
@@ -7405,6 +7417,7 @@ async function buildLocalRunComparison(rawId, through) {
     "--through", through,
     "--ralph-dir", RALPH_DIR,
     "--codex-dir", codexSessionsDir,
+    "--claude-dir", CLAUDE_PROJECTS_DIR,
     rawId,
   ], {
     cwd: REPO_DIR,

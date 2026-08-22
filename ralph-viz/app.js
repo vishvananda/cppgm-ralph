@@ -2507,6 +2507,7 @@ function renderMessageCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-msg";
+  appendCornerTimestamp(card, record.recordedAt);
 
   const body = document.createElement("div");
   body.className = "msg-body";
@@ -2715,6 +2716,7 @@ function renderReasoningCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-thought";
+  appendCornerTimestamp(card, record.recordedAt);
 
   appendExpandableText(card, text, `out:${recordScrollKey(record, "reasoning")}`, "thought-body");
 
@@ -3371,6 +3373,7 @@ function renderGeminiMessageCard(entry) {
 
   const card = document.createElement("div");
   card.className = "ev ev-msg";
+  appendCornerTimestamp(card, entry.record?.recordedAt);
 
   const body = document.createElement("div");
   body.className = "msg-body";
@@ -3478,6 +3481,7 @@ function renderGeminiThoughtCard(record) {
 
   const card = document.createElement("div");
   card.className = "ev ev-thought";
+  appendCornerTimestamp(card, record.recordedAt);
 
   if (subject) {
     const subj = document.createElement("strong");
@@ -3493,6 +3497,17 @@ function renderGeminiThoughtCard(record) {
   }
 
   return card;
+}
+
+function appendCornerTimestamp(card, recordedAt) {
+  const time = fmtShort(recordedAt);
+  if (!time) {
+    return;
+  }
+  const timestamp = document.createElement("span");
+  timestamp.className = "ts card-corner-time";
+  timestamp.textContent = time;
+  card.append(timestamp);
 }
 
 function renderDisplayEntry(entry) {
@@ -7549,7 +7564,7 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
   if (window.echarts) {
     wrap.innerHTML = legend + [
       comparisonChartShellHtml("Accumulated Cost", "cost"),
-      comparisonChartShellHtml("Accumulated Runtime", "runtime"),
+      comparisonChartShellHtml("Accumulated Active Time", "runtime"),
     ].join("");
     return wrap;
   }
@@ -7559,8 +7574,9 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
       format: formatUsd,
       axis: formatCompactUsd,
     }),
-    comparisonAreaChartHtml("Accumulated Runtime", rows, runOrder, orderedRuns, {
+    comparisonAreaChartHtml("Accumulated Active Time", rows, runOrder, orderedRuns, {
       field: "durationMs",
+      secondaryField: "totalDurationMs",
       format: (value) => formatHhhMmSs(value),
       axis: formatCompactDuration,
     }),
@@ -7652,7 +7668,7 @@ function comparisonChartShellHtml(title, metric) {
     <section class="comparison-chart">
       <div class="comparison-chart-title">
         <strong>${escapeHtml(title)}</strong>
-        <span>${metric === "cost" ? "USD" : "HHH:MM:SS"}</span>
+        <span>${metric === "cost" ? "USD" : "HHH:MM:SS · hover for total agent time"}</span>
       </div>
       <div class="comparison-echart" data-comparison-chart="${escapeHtml(metric)}"></div>
     </section>
@@ -7675,8 +7691,10 @@ function hydrateComparisonCharts(container, rows, runOrder, orderedRuns) {
       });
     }
     if (runtimeEl) {
-      renderEChartArea(runtimeEl, "Accumulated Runtime", rows, runOrder, orderedRuns, {
+      renderEChartArea(runtimeEl, "Accumulated Active Time", rows, runOrder, orderedRuns, {
         field: "durationMs",
+        secondaryField: "totalDurationMs",
+        secondaryLabel: "total agent time",
         valueFormatter: formatHhhMmSs,
         axisFormatter: formatCompactDuration,
         tooltipFormatter: formatHhhMmSs,
@@ -7713,7 +7731,14 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   window.echarts.getInstanceByDom?.(el)?.dispose?.();
   const chart = window.echarts.init(el, null, { renderer: "canvas" });
   const labels = rows.map((row) => row.pa);
-  const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
+  const series = comparisonCumulativeSeries(
+    rows,
+    runOrder,
+    orderedRuns,
+    metric.field,
+    metric.secondaryField,
+  );
+  const hasSecondary = Boolean(metric.secondaryField);
   const colors = series.map((run, index) => comparisonRunColor(run, index));
   const colorBySeries = new Map(series.map((run, index) => [run.label, colors[index]]));
   const chartEmpty = cssThemeColor("--chart-empty", "#111");
@@ -7726,7 +7751,12 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
       backgroundColor: cssThemeColor("--surface-raised", "#171717"),
       borderColor: cssThemeColor("--border", "#333"),
       textStyle: { color: cssThemeColor("--text", "#ddd"), fontSize: 12 },
-      formatter: (params) => comparisonChartTooltipHtml(params, colorBySeries, metric.tooltipFormatter),
+      formatter: (params) => comparisonChartTooltipHtml(
+        params,
+        colorBySeries,
+        metric.tooltipFormatter,
+        metric.secondaryLabel,
+      ),
     },
     legend: {
       show: false,
@@ -7763,17 +7793,22 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         formatter: (value) => metric.axisFormatter(Number(value) || 0),
       },
     },
-    series: series.map((run, runIndex) => {
+    series: series.flatMap((run, runIndex) => {
       const color = colors[runIndex];
       const finalPoint = run.points.at(-1) ?? null;
-      return {
+      const active = {
+        id: `comparison-${metric.field}-${runIndex}-active`,
         name: run.label,
         type: "line",
         smooth: false,
         connectNulls: false,
         symbol: "none",
         showSymbol: true,
-        lineStyle: { width: run.highlighted ? 4 : 2.1, opacity: run.highlighted ? 1 : 0.72 },
+        lineStyle: {
+          color,
+          width: run.highlighted ? 4 : 2.1,
+          opacity: run.highlighted ? 1 : 0.72,
+        },
         areaStyle: { opacity: run.highlighted ? 0.26 : 0.1 },
         z: run.highlighted ? 10 : 2,
         emphasis: { focus: "series" },
@@ -7799,8 +7834,49 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
           };
         }),
       };
+      if (!hasSecondary) {
+        return [active];
+      }
+      return [active, {
+        id: `comparison-${metric.field}-${runIndex}-total`,
+        name: run.label,
+        type: "line",
+        smooth: false,
+        connectNulls: false,
+        symbol: "none",
+        silent: true,
+        lineStyle: {
+          color,
+          type: "dashed",
+          width: run.highlighted ? 2.4 : 1.6,
+          opacity: 0,
+        },
+        emphasis: { disabled: true },
+        z: run.highlighted ? 9 : 3,
+        data: rows.map((_, index) => {
+          const point = run.points.find((candidate) => candidate.index === index);
+          return point ? { value: Number(point.secondaryValue) || 0 } : null;
+        }),
+      }];
     }),
   });
+  if (hasSecondary) {
+    let totalsVisible = false;
+    const setTotalsVisible = (visible) => {
+      if (totalsVisible === visible) {
+        return;
+      }
+      totalsVisible = visible;
+      chart.setOption({
+        series: series.map((run, runIndex) => ({
+          id: `comparison-${metric.field}-${runIndex}-total`,
+          lineStyle: { opacity: visible ? (run.highlighted ? 0.9 : 0.58) : 0 },
+        })),
+      });
+    };
+    chart.on("updateAxisPointer", () => setTotalsVisible(true));
+    chart.getZr().on("globalout", () => setTotalsVisible(false));
+  }
   const resize = () => chart.resize();
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(resize);
@@ -7811,18 +7887,33 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   }
 }
 
-function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter) {
+function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secondaryLabel = null) {
   const list = Array.isArray(params) ? params : [params];
   const axisLabel = list.find(Boolean)?.axisValueLabel ?? "";
-  const rows = list
-    .filter((param) => param?.value != null)
-    .map((param) => {
-      const color = colorBySeries.get(param.seriesName) ?? param.color ?? "#999";
+  const grouped = new Map();
+  for (const param of list.filter((candidate) => candidate?.value != null)) {
+    const key = param.seriesName ?? "";
+    const entry = grouped.get(key) ?? { active: null, total: null, param };
+    if (String(param.seriesId ?? "").endsWith("-total")) {
+      entry.total = Number(param.value) || 0;
+    } else {
+      entry.active = Number(param.value) || 0;
+    }
+    grouped.set(key, entry);
+  }
+  const rows = [...grouped.entries()]
+    .map(([seriesName, entry]) => {
+      const color = colorBySeries.get(seriesName) ?? entry.param?.color ?? "#999";
+      const active = entry.active ?? entry.total ?? 0;
+      const total = entry.total ?? active;
+      const values = secondaryLabel
+        ? `<strong>active ${escapeHtml(valueFormatter(active))}</strong><span>${escapeHtml(secondaryLabel)} ${escapeHtml(valueFormatter(total))}</span>`
+        : `<strong>${escapeHtml(valueFormatter(active))}</strong>`;
       return `
         <div class="comparison-tooltip-row">
           <span class="comparison-tooltip-dot" style="background:${escapeHtml(color)}"></span>
-          <span>${escapeHtml(param.seriesName ?? "")}</span>
-          <strong>${escapeHtml(valueFormatter(Number(param.value) || 0))}</strong>
+          <span>${escapeHtml(seriesName)}</span>
+          <span class="comparison-tooltip-values">${values}</span>
         </div>
       `;
     })
@@ -7841,8 +7932,17 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
   const pad = { left: 54, right: 20, top: 28, bottom: 42 };
   const plotWidth = width - pad.left - pad.right;
   const plotHeight = height - pad.top - pad.bottom;
-  const series = comparisonCumulativeSeries(rows, runOrder, orderedRuns, metric.field);
-  const maxValue = Math.max(1, ...series.flatMap((run) => run.points.map((point) => point.value)));
+  const series = comparisonCumulativeSeries(
+    rows,
+    runOrder,
+    orderedRuns,
+    metric.field,
+    metric.secondaryField,
+  );
+  const maxValue = Math.max(1, ...series.flatMap((run) => run.points.flatMap((point) => [
+    point.value,
+    point.secondaryValue ?? point.value,
+  ])));
   const xFor = (index) => pad.left + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * plotWidth);
   const yFor = (value) => pad.top + plotHeight - (value / maxValue) * plotHeight;
   const ticks = comparisonChartTicks(maxValue, 4);
@@ -7854,12 +7954,16 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
     }
     const color = comparisonRunColor(run, runIndex);
     const line = run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.value).toFixed(1)}`).join(" ");
+    const totalLine = metric.secondaryField
+      ? run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.secondaryValue ?? point.value).toFixed(1)}`).join(" ")
+      : "";
     const firstPoint = run.points[0];
     const finalPoint = run.points.at(-1);
     const complete = finalPoint.status === "complete";
     const area = `${line} L ${xFor(finalPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(firstPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} Z`;
     return `
       <g data-comparison-series="${runIndex}"${comparisonRunVisible(orderedRuns[runIndex], runIndex) ? "" : ' style="display:none"'}>
+        ${totalLine ? `<path class="comparison-total-line" d="${totalLine}" stroke="${color}" />` : ""}
         <path class="comparison-area-fill" d="${area}" fill="${color}" style="--series-color:${color};fill-opacity:${run.highlighted ? "0.25" : "0.1"}" />
         <path class="comparison-area-line" d="${line}" stroke="${color}" style="stroke-width:${run.highlighted ? "4" : "2.1"};opacity:${run.highlighted ? "1" : "0.72"}" />
         <circle cx="${xFor(finalPoint.index).toFixed(1)}" cy="${yFor(finalPoint.value).toFixed(1)}" r="4.8" fill="${complete ? color : chartEmpty}" stroke="${color}" stroke-width="${complete ? "1.5" : "2.4"}" />
@@ -7869,14 +7973,16 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
   const latest = series.map((run, runIndex) => {
     const color = comparisonRunColor(run, runIndex);
     const value = run.points.at(-1)?.value ?? 0;
+    const totalValue = run.points.at(-1)?.secondaryValue ?? value;
     const display = comparisonRunVisible(orderedRuns[runIndex], runIndex) ? "" : ' style="display:none"';
-    return `<span data-comparison-series="${runIndex}"${display}><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}</span>`;
+    const total = metric.secondaryField ? ` active / ${escapeHtml(metric.format(totalValue))} total` : "";
+    return `<span data-comparison-series="${runIndex}"${display}><i style="background:${color}"></i>${escapeHtml(run.label)} ${escapeHtml(metric.format(value))}${total}</span>`;
   }).join("");
   return `
     <section class="comparison-chart">
       <div class="comparison-chart-title">
         <strong>${escapeHtml(title)}</strong>
-        <span>${escapeHtml(metric.format(maxValue))} max</span>
+        <span>${escapeHtml(metric.format(maxValue))}${metric.secondaryField ? " total scale · hover" : " max"}</span>
       </div>
       <svg class="comparison-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} by PA">
         ${ticks.map((tick) => {
@@ -7907,9 +8013,10 @@ function cssThemeColor(name, fallback) {
   return value || fallback;
 }
 
-function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field) {
+function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field, secondaryField = null) {
   return runOrder.map((runIndex, position) => {
     let value = 0;
+    let secondaryValue = 0;
     return {
       label: orderedRuns[position]?.label ?? `run ${position + 1}`,
       highlighted: orderedRuns[position]?.highlighted === true,
@@ -7919,10 +8026,14 @@ function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field) {
           return [];
         }
         value += Number(summary?.[field] ?? 0) || 0;
+        secondaryValue += secondaryField
+          ? Number(summary?.[secondaryField] ?? summary?.[field] ?? 0) || 0
+          : Number(summary?.[field] ?? 0) || 0;
         return [{
           pa: row.pa,
           index,
           value,
+          secondaryValue,
           status: summary?.status ?? "complete",
         }];
       }),
@@ -7936,6 +8047,7 @@ function comparisonSummaryStarted(summary) {
   }
   return (Array.isArray(summary.turns) && summary.turns.length > 0) ||
     (Number(summary.durationMs ?? 0) || 0) > 0 ||
+    (Number(summary.totalDurationMs ?? 0) || 0) > 0 ||
     (Number(summary.cost ?? 0) || 0) > 0 ||
     summary.status === "partial" ||
     summary.status === "complete";
@@ -7984,17 +8096,25 @@ function comparisonTotalForRows(rows, runIndex) {
     return {
       turns: [...total.turns, ...(summary?.turns ?? [])],
       durationMs: total.durationMs + (summary?.durationMs ?? 0),
+      totalDurationMs: total.totalDurationMs + (
+        summary?.totalDurationMs ?? summary?.durationMs ?? 0
+      ),
       cost: total.cost + (summary?.cost ?? 0),
       status: total.status === "partial" || summary?.status === "partial" ? "partial" : "complete",
     };
-  }, { turns: [], durationMs: 0, cost: 0, status: "complete" });
+  }, { turns: [], durationMs: 0, totalDurationMs: 0, cost: 0, status: "complete" });
 }
 
 function comparisonCellHtml(summary) {
   const turns = Array.isArray(summary?.turns) ? summary.turns.length : 0;
   const status = summary?.status ?? "n/a";
+  const activeDurationMs = summary?.activeDurationMs ?? summary?.durationMs ?? 0;
+  const totalDurationMs = Math.max(
+    activeDurationMs,
+    summary?.totalDurationMs ?? activeDurationMs,
+  );
   return `
-    <div>${escapeHtml(formatHhhMmSs(summary?.durationMs ?? 0))} / ${escapeHtml(formatUsd(summary?.cost ?? 0))}</div>
+    <div>${escapeHtml(formatHhhMmSs(activeDurationMs))} active / ${escapeHtml(formatHhhMmSs(totalDurationMs))} total / ${escapeHtml(formatUsd(summary?.cost ?? 0))}</div>
     <div class="comparison-meta">${fmtInt(turns)} turn${turns === 1 ? "" : "s"} / ${escapeHtml(status)}</div>
   `;
 }

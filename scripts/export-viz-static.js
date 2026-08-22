@@ -432,6 +432,7 @@ async function buildComparison(options, runs) {
     "--through", options.through,
     "--ralph-dir", options.ralphDir,
     "--codex-dir", options.codexDir,
+    "--claude-dir", options.claudeDir,
     ...runs.map((run) => run.spec),
   ];
   try {
@@ -485,6 +486,7 @@ function comparisonSeries(comparison) {
   return runs.map((run, runIndex) => {
     let cost = 0;
     let durationMs = 0;
+    let totalDurationMs = 0;
     return {
       label: run.label,
       model: run.model ?? null,
@@ -495,12 +497,14 @@ function comparisonSeries(comparison) {
         }
         cost += Number(summary.cost ?? 0) || 0;
         durationMs += Number(summary.durationMs ?? 0) || 0;
+        totalDurationMs += Number(summary.totalDurationMs ?? summary.durationMs ?? 0) || 0;
         return [{
           pa: row.pa,
           index,
           status: summary.status ?? "complete",
           cost,
           durationMs,
+          totalDurationMs,
         }];
       }),
     };
@@ -513,6 +517,7 @@ function comparisonSummaryStarted(summary) {
   }
   return (Array.isArray(summary.turns) && summary.turns.length > 0) ||
     (Number(summary.durationMs ?? 0) || 0) > 0 ||
+    (Number(summary.totalDurationMs ?? 0) || 0) > 0 ||
     (Number(summary.cost ?? 0) || 0) > 0 ||
     summary.status === "partial" ||
     summary.status === "complete";

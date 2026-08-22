@@ -6,6 +6,8 @@ function summary(cost, status = "complete") {
   return {
     turns: ["turn"],
     durationMs: cost * 1000,
+    activeDurationMs: cost * 1000,
+    totalDurationMs: cost * 1500,
     cost,
     status,
   };
@@ -45,6 +47,7 @@ test("live comparison replaces the matching published partial run", () => {
   ]);
   assert.equal(merged.localRunIndex, 2);
   assert.deepEqual(merged.rows[0].runs.map((run) => run.cost), [1, 3, 20]);
+  assert.deepEqual(merged.rows[0].runs.map((run) => run.totalDurationMs), [1500, 4500, 30000]);
   assert.equal(merged.rows[0].runs[2].status, "partial");
 });
 

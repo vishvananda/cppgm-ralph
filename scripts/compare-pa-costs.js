@@ -6,6 +6,10 @@ import path from "path";
 import readline from "readline";
 import "../ralph-viz/model-pricing.js";
 import "../ralph-viz/assignment-layouts.js";
+import {
+  collectSubagentEvents,
+  DEFAULT_CLAUDE_PROJECTS_DIR,
+} from "../subagent-events.js";
 
 const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
@@ -23,6 +27,7 @@ const DEFAULTS = {
   ralphDir: path.join(os.homedir(), "work", ".ralph"),
   workDir: path.join(os.homedir(), "work"),
   codexDir: path.join(os.homedir(), ".codex", "sessions"),
+  claudeDir: DEFAULT_CLAUDE_PROJECTS_DIR,
   format: "markdown",
 };
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
@@ -49,6 +54,7 @@ Options:
   --ralph-dir <path>    Ralph state dir (default: ~/work/.ralph)
   --work-dir <path>     Ralph config dir (default: ~/work)
   --codex-dir <path>    Codex sessions dir (default: ~/.codex/sessions)
+  --claude-dir <path>   Claude projects dir (default: ~/.claude/projects)
   --format <md|json>    Output format (default: md)
   --help                Show this help
 
@@ -85,6 +91,7 @@ function parseArgs(argv) {
     else if (arg === "--ralph-dir") options.ralphDir = next();
     else if (arg === "--work-dir") options.workDir = next();
     else if (arg === "--codex-dir") options.codexDir = next();
+    else if (arg === "--claude-dir") options.claudeDir = next();
     else if (arg === "--format") options.format = next();
     else if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
     else positional.push(arg);
@@ -390,6 +397,10 @@ function buildTurnMeta(events) {
         subset: null,
         usage: emptyUsage(),
         durationMs: 0,
+        activeDurationMs: 0,
+        totalDurationMs: 0,
+        subagentDurations: new Map(),
+        subagentStarts: new Map(),
         sessionFirstMs: null,
         sessionLastMs: null,
         sessionActiveMs: 0,
@@ -800,12 +811,18 @@ function fillDurationFallbacks(events, byTurn) {
     }
     if (bestDurationMs > 0) {
       slot.durationMs = Math.max(0, bestDurationMs - (subtractWait ? limitWaitOverlapMs(slot) : 0));
-      continue;
+    } else {
+      const nextTime = starts[index + 1]?.startTime;
+      if (Number.isFinite(nextTime) && nextTime > starts[index].startTime) {
+        slot.durationMs = Math.max(0, nextTime - starts[index].startTime - limitWaitOverlapMs(slot));
+      }
     }
-    const nextTime = starts[index + 1]?.startTime;
-    if (Number.isFinite(nextTime) && nextTime > starts[index].startTime) {
-      slot.durationMs = Math.max(0, nextTime - starts[index].startTime - limitWaitOverlapMs(slot));
-    }
+    // The provider/root duration is the active runtime. Child agents are
+    // nested inside that span in normal Ralph runs, while their durations are
+    // additive work and belong only in total agent time.
+    slot.activeDurationMs = slot.durationMs;
+    slot.totalDurationMs = slot.activeDurationMs + [...slot.subagentDurations.values()]
+      .reduce((sum, durationMs) => sum + durationMs, 0);
   }
 }
 
@@ -855,6 +872,30 @@ function readRunEventUsageIntoTurns(events, byTurn) {
     }
     slot.eventFirstMs = slot.eventFirstMs == null ? time : Math.min(slot.eventFirstMs, time);
     slot.eventLastMs = slot.eventLastMs == null ? time : Math.max(slot.eventLastMs, time);
+
+    const item = record.event?.item;
+    if (item?.type === "subagent") {
+      const key = subagentDurationKey(record);
+      if (record.eventType === "item.started") {
+        slot.subagentStarts.set(key, time);
+      } else if (record.eventType === "item.completed") {
+        const explicitDurationMs = Number(item.duration_ms);
+        const startedAtMs = slot.subagentStarts.get(key);
+        const durationMs = Number.isFinite(explicitDurationMs) && explicitDurationMs >= 0
+          ? explicitDurationMs
+          : Number.isFinite(startedAtMs)
+            ? Math.max(0, time - startedAtMs)
+            : 0;
+        if (durationMs > 0) {
+          // Resumed Codex child notifications carry a cumulative duration for
+          // one thread. Retaining the largest observation avoids double-count.
+          slot.subagentDurations.set(
+            key,
+            Math.max(slot.subagentDurations.get(key) ?? 0, durationMs),
+          );
+        }
+      }
+    }
   }
 
   // Live token_count records in the run log (Claude runs) carry cumulative
@@ -899,6 +940,14 @@ function readRunEventUsageIntoTurns(events, byTurn) {
       slot.usage = addUsage(slot.usage, usage);
     }
   }
+}
+
+function subagentDurationKey(record) {
+  const item = record?.event?.item ?? {};
+  return [
+    item.provider ?? "agent",
+    item.agent_thread_id ?? item.task_id ?? item.id ?? record?.recordedAt ?? "unknown",
+  ].join(":");
 }
 
 function usageWithCompletedCost(liveUsage, completedUsage) {
@@ -1195,7 +1244,15 @@ async function summarizeRun(run, options) {
   const spec = run.spec;
   const filePath = resolveRunFile(spec, options.ralphDir);
   const state = readRunState(filePath);
-  const events = await readJsonl(filePath);
+  const rawEvents = await readJsonl(filePath);
+  const subagentEvents = await collectSubagentEvents(rawEvents, {
+    claudeDir: options.claudeDir,
+    codexDir: path.basename(options.codexDir) === "sessions"
+      ? path.dirname(options.codexDir)
+      : options.codexDir,
+  });
+  const events = [...rawEvents, ...subagentEvents].sort((left, right) =>
+    String(left.recordedAt ?? "").localeCompare(String(right.recordedAt ?? "")));
   const byTurn = buildTurnMeta(events);
   const resolveTurn = buildSessionTurnResolver(events);
   const threadIds = [...new Set(events.map(eventThreadId).filter(Boolean))];
@@ -1244,6 +1301,8 @@ async function summarizeRun(run, options) {
         phases: new Map(),
         usage: emptyUsage(),
         durationMs: 0,
+        activeDurationMs: 0,
+        totalDurationMs: 0,
         cost: 0,
         activeTurns: 0,
         incompleteTurns: 0,
@@ -1253,7 +1312,9 @@ async function summarizeRun(run, options) {
     const row = byPa.get(pa);
     row.turns.push(turnInfo.key ?? String(turnInfo.turn));
     row.usage = addUsage(row.usage, turnInfo.usage);
-    row.durationMs += turnInfo.durationMs;
+    row.durationMs += turnInfo.activeDurationMs;
+    row.activeDurationMs += turnInfo.activeDurationMs;
+    row.totalDurationMs += turnInfo.totalDurationMs;
     row.cost += estimateCost(turnInfo.usage, model);
     row.phases.set(turnInfo.phase ?? "unknown", (row.phases.get(turnInfo.phase ?? "unknown") ?? 0) + 1);
     if (turnInfo.hasSessionActivity && !turnInfo.hasTaskComplete) {
@@ -1294,6 +1355,8 @@ function paSummary(run, pa) {
       pa,
       turns: [],
       durationMs: 0,
+      activeDurationMs: 0,
+      totalDurationMs: 0,
       cost: 0,
       usage: emptyUsage(),
       status: "not started",
@@ -1338,13 +1401,25 @@ function totalSummary(rows) {
     (total, row) => ({
       turns: total.turns + row.turns.length,
       durationMs: total.durationMs + row.durationMs,
+      activeDurationMs: total.activeDurationMs + (row.activeDurationMs ?? row.durationMs),
+      totalDurationMs: total.totalDurationMs + (row.totalDurationMs ?? row.durationMs),
       cost: total.cost + row.cost,
       usage: addUsage(total.usage, row.usage),
       activeTurns: total.activeTurns + (row.activeTurns ?? 0),
       incompleteTurns: total.incompleteTurns + (row.incompleteTurns ?? 0),
       partialRows: total.partialRows + (row.status === "partial" ? 1 : 0),
     }),
-    { turns: 0, durationMs: 0, cost: 0, usage: emptyUsage(), activeTurns: 0, incompleteTurns: 0, partialRows: 0 },
+    {
+      turns: 0,
+      durationMs: 0,
+      activeDurationMs: 0,
+      totalDurationMs: 0,
+      cost: 0,
+      usage: emptyUsage(),
+      activeTurns: 0,
+      incompleteTurns: 0,
+      partialRows: 0,
+    },
   );
 }
 
@@ -1358,6 +1433,8 @@ function turnDurationSummaries(run) {
       turnNumber: turn.turn,
       attemptIndex: turn.attemptIndex,
       durationMs: turn.durationMs,
+      activeDurationMs: turn.activeDurationMs,
+      totalDurationMs: turn.totalDurationMs,
       phase: turn.phase ?? null,
       stage: turn.stage ?? null,
       key: turn.key ?? String(turn.turn),
@@ -1440,8 +1517,8 @@ function renderMarkdown(comparison) {
   const lines = [];
   lines.push(`Compared through ${comparison.through} in ${String(comparison.displayLayout ?? "v3").toUpperCase()} order. Times are HHH:MM:SS.`);
   lines.push("");
-  lines.push("| Run | Turns | Time | Cost | Status |");
-  lines.push("|---|---:|---:|---:|---|");
+  lines.push("| Run | Turns | Active time | Total agent time | Cost | Status |");
+  lines.push("|---|---:|---:|---:|---:|---|");
   for (const run of comparison.runs) {
     lines.push(summaryRow(run));
   }
@@ -1449,8 +1526,14 @@ function renderMarkdown(comparison) {
   const header = ["PA"];
   const separators = ["---"];
   for (const run of comparison.runs) {
-    header.push(`${run.label} turns`, `${run.label} time`, `${run.label} cost`, `${run.label} status`);
-    separators.push("---:", "---:", "---:", "---");
+    header.push(
+      `${run.label} turns`,
+      `${run.label} active`,
+      `${run.label} agent time`,
+      `${run.label} cost`,
+      `${run.label} status`,
+    );
+    separators.push("---:", "---:", "---:", "---:", "---");
   }
   lines.push(`| ${header.join(" | ")} |`);
   lines.push(`|${separators.join("|")}|`);
@@ -1460,6 +1543,7 @@ function renderMarkdown(comparison) {
       cells.push(
         summary.turns.length,
         hhhmmss(summary.durationMs),
+        hhhmmss(summary.totalDurationMs ?? summary.durationMs),
         money(summary.cost),
         summary.status,
       );
@@ -1479,7 +1563,7 @@ function renderMarkdown(comparison) {
 
 function summaryRow(run) {
   const status = run.total.partialRows > 0 ? "partial" : "complete";
-  return `| ${run.label} | ${run.total.turns} | ${hhhmmss(run.total.durationMs)} | ${money(run.total.cost)} | ${status} |`;
+  return `| ${run.label} | ${run.total.turns} | ${hhhmmss(run.total.durationMs)} | ${hhhmmss(run.total.totalDurationMs ?? run.total.durationMs)} | ${money(run.total.cost)} | ${status} |`;
 }
 
 async function main() {
