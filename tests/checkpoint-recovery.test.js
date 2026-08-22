@@ -76,7 +76,7 @@ test("a blocked implementation checkpoint enters audit after recovery preserves 
       useExistingWorkdir: true,
       stateBaseDir,
       claudePath: fakeClaude,
-      loopGoalsEnabled: false,
+      loopGoalsEnabled: true,
       freshThreadPerTurn: true,
       maxTurns: 4,
       initialStage: "pa1",
@@ -134,8 +134,14 @@ test("a blocked implementation checkpoint enters audit after recovery preserves 
   });
   assert.equal(run.status, 0, `Ralph failed\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
 
-  const prompts = readJsonLines(tracePath).map((entry) => entry.input);
+  const invocations = readJsonLines(tracePath);
+  const goalPrompts = invocations.map((entry) => entry.input);
+  const prompts = invocations.map((entry) => entry.systemPrompt ?? entry.input);
   assert.equal(prompts.length, 3, `unexpected provider turns:\n${prompts.join("\n---\n")}`);
+  assert.match(
+    goalPrompts[0],
+    /adding passing tests while retaining every existing failure does not count as checkpoint progress/i,
+  );
   assert.match(prompts[1], /pending checkpoint: 2\/3 passing from baseline 1\/3/i);
   assert.match(prompts[2], /Current phase: `checkpointAudit`/);
 
@@ -153,10 +159,17 @@ const paths = ${JSON.stringify(paths)};
 let input = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) input += chunk;
+const args = process.argv.slice(2);
+const systemPromptIndex = args.indexOf("--append-system-prompt-file");
+const systemPromptPath = systemPromptIndex >= 0 ? args[systemPromptIndex + 1] : null;
+const systemPromptFd = /^\\/dev\\/fd\\/(\\d+)$/.exec(systemPromptPath ?? "");
+const systemPrompt = systemPromptIndex >= 0
+  ? fs.readFileSync(systemPromptFd ? Number(systemPromptFd[1]) : systemPromptPath, "utf8")
+  : null;
 const previous = fs.existsSync(paths.tracePath)
   ? fs.readFileSync(paths.tracePath, "utf8").trim().split("\\n").filter(Boolean).length
   : 0;
-fs.appendFileSync(paths.tracePath, JSON.stringify({ input }) + "\\n");
+fs.appendFileSync(paths.tracePath, JSON.stringify({ input, args, systemPrompt }) + "\\n");
 if (previous === 0) {
   fs.writeFileSync(paths.progressMarker, "yes\\n");
   fs.writeFileSync(paths.regressionMarker, "yes\\n");

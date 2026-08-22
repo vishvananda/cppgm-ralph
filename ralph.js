@@ -2325,8 +2325,8 @@ function isCurrentStageProgressCheck(check) {
 function currentStageProgressValidationDescription(check) {
   const mode = parseCurrentStageProgressOptions(check?.command ?? "").mode;
   return mode === "preserve"
-    ? "current PA tests must either pass fully or preserve the turn-start failure count without reducing test coverage while earlier PAs pass"
-    : "current PA tests must either pass fully or reduce the turn-start failure count without reducing test coverage while earlier PAs pass";
+    ? "current PA tests must either pass fully or not exceed the turn-start failure count without reducing test coverage; additional passing tests cannot compensate for additional failures; earlier PAs must pass"
+    : "current PA tests must either pass fully or reduce the turn-start failure count without reducing test coverage; adding passing tests while retaining every existing failure does not count as checkpoint progress; earlier PAs must pass";
 }
 
 function buildPriorStageSubsetValidationCommands(stageName, subsetName) {
@@ -5337,22 +5337,14 @@ class ClaudeThread {
           workingDirectory: this.threadOptions.workingDirectory,
           signal: turnOptions.signal,
         };
-        if (turnOptions.continueSession && (await this.exec.goalIsActive(execArgs))) {
-          // The interrupted session still has its loop goal installed, so skip
-          // re-sending the goal: a short nudge continues it with the session's
-          // existing context, while the appended system instructions carry the
-          // refreshed turn instructions and current state.
-          log(`Continuing active loop goal in session ${this._id}`);
-          message =
-            "Ralph restarted after an interruption. Your previous loop goal is " +
-            "still active; continue it from where you left off. Refreshed turn " +
-            "instructions and current state are in the system instructions.";
-        } else {
-          // Mirror the Codex flow: clear any leftover loop goal before
-          // installing a fresh one. Claude auto-clears satisfied goals, so this
-          // only matters when the previous turn ended with its goal still active.
-          await this.exec.clearGoal(execArgs);
+        if (turnOptions.continueSession) {
+          log(`Replacing interrupted loop goal in session ${this._id} with refreshed criteria`);
         }
+        // Clear any leftover loop goal before installing the freshly rendered
+        // one. This is also required on --continue: prompt templates, checks,
+        // and baselines may have changed while Ralph was stopped, so retaining
+        // the session's old goal could contradict the refreshed instructions.
+        await this.exec.clearGoal(execArgs);
       }
     }
 
@@ -6202,18 +6194,6 @@ class ClaudeExec {
       usage: result?.usage ?? null,
       totalCostUsd: Number.isFinite(result?.total_cost_usd) ? result.total_cost_usd : null,
     };
-  }
-
-  async goalIsActive(args) {
-    const commandArgs = [...this.buildCommonArgs(args), "--output-format", "json"];
-    try {
-      const stdout = await this.runToCompletion(commandArgs, "/goal", args);
-      const result = JSON.parse(stdout)?.result ?? "";
-      return /^Goal active/i.test(String(result));
-    } catch (error) {
-      log(`Failed to query Claude loop goal status: ${formatErrorMessage(error)}`);
-      return false;
-    }
   }
 
   async runToCompletion(commandArgs, input, args) {
