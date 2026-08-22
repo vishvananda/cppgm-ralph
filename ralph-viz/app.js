@@ -8680,6 +8680,7 @@ function captureScrollSnapshot(options = {}) {
 }
 
 function restoreScrollAfterRender(snapshot, options = {}) {
+  resetPageHorizontalScroll();
   if (!snapshot) {
     return;
   }
@@ -8828,9 +8829,10 @@ function setScrollTop(value, reason = "setScrollTop") {
   state.lastProgrammaticScrollReason = reason;
   scrollDebug("set-scroll-top-before", { reason, requested: value, top, before, maxTop });
   if (typeof root.scrollTo === "function") {
-    root.scrollTo({ top, behavior: "auto" });
+    root.scrollTo({ top, left: 0, behavior: "auto" });
   } else {
     root.scrollTop = top;
+    root.scrollLeft = 0;
   }
   state.lastObservedScrollTop = top;
   window.setTimeout(() => {
@@ -8844,6 +8846,16 @@ function setScrollTop(value, reason = "setScrollTop") {
   }, 0);
 }
 
+function resetPageHorizontalScroll() {
+  const root = scrollingRoot();
+  if (root.scrollLeft !== 0) {
+    root.scrollLeft = 0;
+  }
+  if (document.body && document.body !== root && document.body.scrollLeft !== 0) {
+    document.body.scrollLeft = 0;
+  }
+}
+
 function getScrollMetrics() {
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
@@ -8852,6 +8864,8 @@ function getScrollMetrics() {
     scrollTop,
     maxTop,
     distanceFromBottom: Math.max(0, maxTop - scrollTop),
+    scrollLeft: Math.max(0, root.scrollLeft || 0),
+    maxLeft: Math.max(0, root.scrollWidth - root.clientWidth),
   };
 }
 
@@ -8978,8 +8992,11 @@ function scrollDebug(label, extra = {}) {
     metrics,
     rawScrollTop: root.scrollTop,
     viewport: {
+      innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
+      clientWidth: root.clientWidth,
       clientHeight: root.clientHeight,
+      scrollWidth: root.scrollWidth,
       scrollHeight: root.scrollHeight,
     },
     activeElement: active ? {
