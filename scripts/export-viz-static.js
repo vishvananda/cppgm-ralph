@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -11,20 +12,24 @@ import readline from "node:readline";
 import "../ralph-viz/assignment-layouts.js";
 import { VIEWER_ASSET_NAMES } from "../ralph-viz/viewer-assets.js";
 import {
-  collectClaudeSubagentEvents,
+  collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
-} from "../claude-subagent-events.js";
+} from "../subagent-events.js";
 
 const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
-const DEFAULT_RUNS = [
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+export const DEFAULT_RUNS = [
   "trusted-gpt-5.5-xhigh",
   "opus-opus-xhigh",
   "mini-gpt-5.6-sol-xhigh",
   "fable-claude-fable-5-xhigh",
   "luna-gpt-5.6-luna-ultra",
+  "v3opus-claude-opus-5-xhigh",
+  "v3codex-gpt-5.6-sol-xhigh",
+  "v3multi-gpt-5.6-sol-xhigh",
 ];
 const RUN_REPOSITORIES = new Map([
   ["trusted", "https://github.com/vishvananda/cppgm-run-trusted"],
@@ -34,8 +39,11 @@ const RUN_REPOSITORIES = new Map([
   ["luna", "https://github.com/vishvananda/cppgm-run-luna"],
   ["v3opus", "https://github.com/vishvananda/cppgm-run-v3opus"],
   ["v3codex", "https://github.com/vishvananda/cppgm-run-v3codex"],
+  ["v3multi", "https://github.com/vishvananda/cppgm-run-v3multi"],
 ]);
 const FORMAT_VERSION = 1;
+const EXPORT_CACHE_VERSION = 1;
+const COMPARISON_MAX_OLD_SPACE_MB = 16384;
 
 function usage() {
   return `Usage: node scripts/export-viz-static.js [options]
@@ -44,14 +52,15 @@ Export Ralph run viewer data as static files.
 
 Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
-  --run <spec>          Run to export; repeatable. Defaults to trusted/opus/mini/fable/luna
+  --run <spec>          Run to export; repeatable. Defaults to all published runs
   --runs <a,b,c>        Comma-separated run specs
   --through <paN|N>     Last PA for comparison data (default: pa39)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
   --claude-dir <dir>    Claude projects dir (default: ~/.claude/projects)
   --work-dir <dir>      Run prompt/config dir (default: ~/work)
-  --no-clean            Do not remove output dir before exporting
+  --clean               Force a full rebuild (exports are incremental by default)
+  --no-clean            Retained alias for the incremental default
   --no-compare          Skip comparison generation
   --help                Show this help
 `;
@@ -66,7 +75,7 @@ function parseArgs(argv) {
     workDir: path.join(os.homedir(), "work"),
     through: "pa39",
     runs: [],
-    clean: true,
+    clean: false,
     compare: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -97,6 +106,8 @@ function parseArgs(argv) {
       options.claudeDir = expandHome(next());
     } else if (arg === "--work-dir") {
       options.workDir = expandHome(next());
+    } else if (arg === "--clean") {
+      options.clean = true;
     } else if (arg === "--no-clean") {
       options.clean = false;
     } else if (arg === "--no-compare") {
@@ -320,38 +331,45 @@ async function copyViewerAssets(outDir) {
   }
 }
 
-async function collectDocs(run, options, outRunDir) {
-  const docsDir = path.join(outRunDir, "docs");
-  await fs.mkdir(docsDir, { recursive: true });
-  const docs = [];
+async function runDocCandidatePaths(run, options) {
   const prefix = inferDocPrefix(run.shape);
-  const candidates = [];
-
+  const candidates = [
+    path.join(options.workDir, `${prefix}.config.json`),
+    path.join(options.ralphDir, run.shape, "state.json"),
+    path.join(options.ralphDir, run.shape, "current-goal.json"),
+  ];
   try {
     const entries = await fs.readdir(options.workDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      if (entry.name === `${prefix}.config.json` || entry.name.startsWith(`${prefix}.`) && entry.name.endsWith(".md")) {
+      if (entry.name.startsWith(`${prefix}.`) && entry.name.endsWith(".md")) {
         candidates.push(path.join(options.workDir, entry.name));
       }
     }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
+  return [...new Set(candidates.map((filePath) => path.resolve(filePath)))].sort();
+}
 
-  for (const extra of ["state.json", "current-goal.json"]) {
-    const filePath = path.join(options.ralphDir, run.shape, extra);
-    if (fsSync.existsSync(filePath)) {
-      candidates.push(filePath);
-    }
-  }
+async function collectDocs(run, options, outRunDir) {
+  const docsDir = path.join(outRunDir, "docs");
+  await fs.mkdir(docsDir, { recursive: true });
+  const docs = [];
+  const candidates = await runDocCandidatePaths(run, options);
 
   const seen = new Set();
   for (const sourcePath of candidates.sort()) {
     const resolved = path.resolve(sourcePath);
     if (seen.has(resolved)) continue;
     seen.add(resolved);
-    const stat = await fs.stat(resolved);
+    let stat;
+    try {
+      stat = await fs.stat(resolved);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
     const name = sanitizeDocFileName(path.basename(sourcePath));
     const relativePath = `runs/${run.safeId}/docs/${name}`;
     await fs.copyFile(resolved, path.join(docsDir, name));
@@ -408,6 +426,117 @@ async function collectAssignmentTitles(run, options) {
   return titles;
 }
 
+function assignmentReadmePaths(run, options) {
+  const worktree = inferRunWorktree(run, options);
+  return Array.from({ length: 60 }, (_, index) =>
+    path.join(worktree, `pa${index + 1}`, "README.md"));
+}
+
+async function staticRunSourcePaths(run, options) {
+  return [
+    run.filePath,
+    ...await runDocCandidatePaths(run, options),
+    ...assignmentReadmePaths(run, options),
+  ];
+}
+
+async function sourceFileSnapshot(filePaths) {
+  const unique = [...new Set(filePaths.filter(Boolean).map((filePath) => path.resolve(filePath)))].sort();
+  return Promise.all(unique.map(async (filePath) => {
+    try {
+      const stat = await fs.stat(filePath);
+      return {
+        path: filePath,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      };
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return { path: filePath, missing: true };
+      }
+      throw error;
+    }
+  }));
+}
+
+function sourceFileSnapshotSync(filePath) {
+  const resolved = path.resolve(filePath);
+  try {
+    const stat = fsSync.statSync(resolved);
+    return {
+      path: resolved,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { path: resolved, missing: true };
+    }
+    throw error;
+  }
+}
+
+function fingerprint(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+async function exportImplementationFingerprint() {
+  const sources = [
+    SCRIPT_FILE,
+    path.join(REPO_ROOT, "scripts", "compare-pa-costs.js"),
+    path.join(REPO_ROOT, "subagent-events.js"),
+    path.join(REPO_ROOT, "subagent-event-utils.js"),
+    path.join(REPO_ROOT, "codex-subagent-events.js"),
+    path.join(REPO_ROOT, "claude-subagent-events.js"),
+    path.join(REPO_ROOT, "ralph-viz", "assignment-layouts.js"),
+    path.join(REPO_ROOT, "ralph-viz", "model-pricing.js"),
+  ];
+  const hash = createHash("sha256");
+  hash.update(String(EXPORT_CACHE_VERSION));
+  for (const sourcePath of sources) {
+    hash.update(sourcePath);
+    hash.update(await fs.readFile(sourcePath));
+  }
+  return hash.digest("hex");
+}
+
+function sourceFingerprint(snapshot, implementation) {
+  return fingerprint({ version: EXPORT_CACHE_VERSION, implementation, snapshot });
+}
+
+async function prepareRunExport(run, options, previous, implementation) {
+  const priorSources = Array.isArray(previous?.exportSources)
+    ? previous.exportSources.map((entry) => entry?.path).filter(Boolean)
+    : [];
+  const sourcePaths = [
+    ...await staticRunSourcePaths(run, options),
+    ...priorSources,
+  ];
+  const snapshot = await sourceFileSnapshot(sourcePaths);
+  const exportSourceFingerprint = fingerprint(snapshot);
+  const exportFingerprint = sourceFingerprint(snapshot, implementation);
+  const summaryPath = path.join(options.outDir, "data", "runs", run.safeId, "summary.json");
+  const previousSourceFingerprint = previous?.exportSourceFingerprint ?? (
+    Array.isArray(previous?.exportSources) ? fingerprint(previous.exportSources) : null
+  );
+  const reusable = !options.clean &&
+    previous?.exportCacheVersion === EXPORT_CACHE_VERSION &&
+    previous?.exportSettled === true &&
+    previousSourceFingerprint === exportSourceFingerprint &&
+    fsSync.existsSync(summaryPath);
+  return {
+    run,
+    previous,
+    sourcePaths,
+    snapshot,
+    exportSourceFingerprint,
+    exportFingerprint,
+    reusable,
+  };
+}
+
 function assignmentTitleFromReadme(raw) {
   for (const line of String(raw ?? "").split(/\r?\n/).slice(0, 20)) {
     const text = line.trim();
@@ -427,6 +556,7 @@ async function buildComparison(options, runs) {
   }
   const scriptPath = path.join(REPO_ROOT, "scripts", "compare-pa-costs.js");
   const args = [
+    `--max-old-space-size=${COMPARISON_MAX_OLD_SPACE_MB}`,
     scriptPath,
     "--format", "json",
     "--through", options.through,
@@ -531,18 +661,79 @@ function comparisonRunForExport(comparison, run) {
     path.resolve(candidate.filePath ?? "") === path.resolve(run.filePath)) ?? null;
 }
 
-async function exportRun(run, options, comparison) {
+function comparisonRunIndex(comparison, run) {
+  return (comparison?.runs ?? []).findIndex((candidate) =>
+    candidate.spec === run.spec ||
+    candidate.label === run.spec ||
+    candidate.label === run.label ||
+    path.resolve(candidate.filePath ?? "") === path.resolve(run.filePath));
+}
+
+export function mergeComparisonUpdates(previous, updated, runs) {
+  if (!previous || !updated) {
+    return updated ?? previous ?? null;
+  }
+  const previousRows = new Map((previous.rows ?? []).map((row) => [row.pa, row]));
+  const updatedRows = new Map((updated.rows ?? []).map((row) => [row.pa, row]));
+  const selected = runs.map((run) => {
+    const updatedIndex = comparisonRunIndex(updated, run);
+    if (updatedIndex >= 0) {
+      return { comparison: updated, index: updatedIndex, run };
+    }
+    const previousIndex = comparisonRunIndex(previous, run);
+    if (previousIndex >= 0) {
+      return { comparison: previous, index: previousIndex, run };
+    }
+    throw new Error(`comparison is missing run ${run.spec}`);
+  });
+  const paNames = [...new Set([
+    ...(previous.rows ?? []).map((row) => row.pa),
+    ...(updated.rows ?? []).map((row) => row.pa),
+  ])].sort((left, right) => paNumber(left) - paNumber(right));
+  return {
+    ...previous,
+    ...updated,
+    runs: selected.map(({ comparison, index, run }) => ({
+      ...comparison.runs[index],
+      label: run.label,
+      spec: run.spec,
+      filePath: run.filePath,
+    })),
+    rows: paNames.map((pa) => ({
+      pa,
+      runs: selected.map(({ comparison, index }) => {
+        const row = comparison === updated ? updatedRows.get(pa) : previousRows.get(pa);
+        return row?.runs?.[index] ?? null;
+      }),
+    })),
+  };
+}
+
+async function exportRun(run, options, comparison, prepared, implementation) {
   const outRunDir = path.join(options.outDir, "data", "runs", run.safeId);
   const turnsDir = path.join(outRunDir, "turns");
   await fs.mkdir(turnsDir, { recursive: true });
+  const sourcePaths = new Set(prepared.sourcePaths.map((filePath) => path.resolve(filePath)));
+  const initialSources = new Map(prepared.snapshot.map((entry) => [entry.path, entry]));
+  const onSourceFile = (filePath) => {
+    const resolved = path.resolve(filePath);
+    sourcePaths.add(resolved);
+    if (!initialSources.has(resolved)) {
+      initialSources.set(resolved, sourceFileSnapshotSync(resolved));
+    }
+  };
   const runEvents = await readJsonl(run.filePath);
-  const codexUsageEvents = await collectCodexUsageEvents(runEvents, options);
-  const claudeSubagentEvents = await collectClaudeSubagentEvents(runEvents, {
+  const codexUsageEvents = await collectCodexUsageEvents(runEvents, options, onSourceFile);
+  const subagentEvents = await collectSubagentEvents(runEvents, {
     claudeDir: options.claudeDir,
+    codexDir: path.basename(options.codexDir) === "sessions"
+      ? path.dirname(options.codexDir)
+      : options.codexDir,
+    onSourceFile,
   });
   const events = mergeEventsByTime(
     mergeEventsByTime(runEvents, codexUsageEvents),
-    claudeSubagentEvents,
+    subagentEvents,
   );
   const grouped = groupEventsByTurn(events);
   const turns = [];
@@ -588,6 +779,11 @@ async function exportRun(run, options, comparison) {
         }],
       }
     : null;
+  const exportSources = await sourceFileSnapshot([...sourcePaths]);
+  const initialExportSources = [...initialSources.values()]
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const initialExportFingerprint = sourceFingerprint(initialExportSources, implementation);
+  const finalExportFingerprint = sourceFingerprint(exportSources, implementation);
   const runMeta = {
     id: run.id,
     label: run.label,
@@ -604,11 +800,16 @@ async function exportRun(run, options, comparison) {
     eventMtime: run.eventMtime,
     eventCount: events.length,
     syntheticUsageEventCount: codexUsageEvents.length,
-    syntheticSubagentEventCount: claudeSubagentEvents.length,
+    syntheticSubagentEventCount: subagentEvents.length,
     turnCount: turns.length,
     first: bounds.first,
     last: bounds.last,
     state,
+    exportCacheVersion: EXPORT_CACHE_VERSION,
+    exportSourceFingerprint: fingerprint(exportSources),
+    exportFingerprint: finalExportFingerprint,
+    exportSettled: finalExportFingerprint === initialExportFingerprint,
+    exportSources,
   };
   await writeJson(path.join(outRunDir, "summary.json"), {
     formatVersion: FORMAT_VERSION,
@@ -620,13 +821,13 @@ async function exportRun(run, options, comparison) {
     docs,
     eventCount: events.length,
     syntheticUsageEventCount: codexUsageEvents.length,
-    syntheticSubagentEventCount: claudeSubagentEvents.length,
+    syntheticSubagentEventCount: subagentEvents.length,
     ...bounds,
   });
   return runMeta;
 }
 
-async function collectCodexUsageEvents(events, options) {
+async function collectCodexUsageEvents(events, options, onSourceFile = null) {
   const threadIds = [...new Set(events.map(eventThreadId).filter(Boolean))]
     .filter(Boolean);
   if (!threadIds.length) {
@@ -643,6 +844,7 @@ async function collectCodexUsageEvents(events, options) {
   const usageEvents = [];
   for (const threadId of threadIds) {
     for (const filePath of (filesByThread.get(threadId) ?? []).sort()) {
+      onSourceFile?.(filePath);
       usageEvents.push(...await readCodexUsageEvents(filePath, threadId, resolveTurn, existingUsageKeys));
     }
   }
@@ -790,6 +992,39 @@ async function cleanOutput(options) {
   await fs.mkdir(path.join(options.outDir, "data"), { recursive: true });
 }
 
+function comparisonExportFingerprint(options, preparedRuns, implementation) {
+  return fingerprint({
+    version: EXPORT_CACHE_VERSION,
+    implementation,
+    through: options.through,
+    runs: preparedRuns.map((prepared) => ({
+      id: prepared.run.id,
+      spec: prepared.run.spec,
+      fingerprint: prepared.exportFingerprint,
+    })),
+  });
+}
+
+async function readPreviousComparisonArtifact(previousManifest, options) {
+  if (options.clean || !previousManifest) {
+    return null;
+  }
+  const entry = previousManifest.comparisons?.[0];
+  if (!entry?.path) {
+    return null;
+  }
+  const filePath = path.join(options.outDir, "data", entry.path);
+  const comparison = await readJsonIfExists(filePath);
+  return comparison ? { comparison, entries: previousManifest.comparisons } : null;
+}
+
+async function previousComparison(previousManifest, options, expectedFingerprint) {
+  if (previousManifest?.source?.comparisonFingerprint !== expectedFingerprint) {
+    return null;
+  }
+  return readPreviousComparisonArtifact(previousManifest, options);
+}
+
 async function writeComparison(options, comparison) {
   if (!comparison) {
     return [];
@@ -804,8 +1039,10 @@ async function writeComparison(options, comparison) {
   }];
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  const manifestPath = path.join(options.outDir, "data", "runs.json");
+  const previousManifest = options.clean ? null : await readJsonIfExists(manifestPath);
   await cleanOutput(options);
   await copyViewerAssets(options.outDir);
 
@@ -821,15 +1058,92 @@ async function main() {
     throw new Error("no runs resolved");
   }
 
-  const comparison = await buildComparison(options, runs);
-  const runMetas = [];
+  const implementation = await exportImplementationFingerprint();
+  const previousRuns = new Map((previousManifest?.runs ?? []).map((run) => [run.id, run]));
+  const preparedRuns = [];
   for (const run of runs) {
-    console.error(`exporting ${run.id}`);
-    runMetas.push(await exportRun(run, options, comparison));
+    preparedRuns.push(await prepareRunExport(
+      run,
+      options,
+      previousRuns.get(run.id) ?? null,
+      implementation,
+    ));
   }
-  annotateComparison(comparison, runMetas);
-  const comparisons = await writeComparison(options, comparison);
-  await writeJson(path.join(options.outDir, "data", "runs.json"), {
+
+  const expectedComparisonFingerprint = comparisonExportFingerprint(
+    options,
+    preparedRuns,
+    implementation,
+  );
+  const reusedComparison = options.compare
+    ? await previousComparison(previousManifest, options, expectedComparisonFingerprint)
+    : null;
+  const priorComparison = options.compare && !reusedComparison
+    ? await readPreviousComparisonArtifact(previousManifest, options)
+    : null;
+  let comparison = reusedComparison?.comparison ?? null;
+  if (reusedComparison) {
+    console.error("reusing unchanged comparison");
+  } else if (options.compare) {
+    const canUpdateIncrementally = priorComparison &&
+      previousManifest?.source?.through === options.through;
+    const comparisonRuns = canUpdateIncrementally
+      ? preparedRuns.filter((prepared) => !prepared.reusable).map((prepared) => prepared.run)
+      : runs;
+    if (canUpdateIncrementally && comparisonRuns.length < runs.length) {
+      console.error(
+        `updating comparison from ${comparisonRuns.length} changed run` +
+        `${comparisonRuns.length === 1 ? "" : "s"}`,
+      );
+    }
+    const updates = comparisonRuns.length
+      ? await buildComparison(options, comparisonRuns)
+      : null;
+    comparison = canUpdateIncrementally && !comparisonRuns.length
+      ? priorComparison.comparison
+      : canUpdateIncrementally && updates
+        ? mergeComparisonUpdates(priorComparison.comparison, updates, runs)
+        : updates;
+  }
+
+  const runMetas = [];
+  let reusedRunCount = 0;
+  for (const prepared of preparedRuns) {
+    if (prepared.reusable) {
+      console.error(`reusing unchanged ${prepared.run.id}`);
+      runMetas.push(prepared.previous);
+      reusedRunCount += 1;
+      continue;
+    }
+    console.error(`exporting ${prepared.run.id}`);
+    runMetas.push(await exportRun(
+      prepared.run,
+      options,
+      comparison,
+      prepared,
+      implementation,
+    ));
+  }
+
+  let comparisons = [];
+  if (reusedComparison) {
+    comparisons = reusedComparison.entries;
+  } else {
+    annotateComparison(comparison, runMetas);
+    comparisons = await writeComparison(options, comparison);
+  }
+  const allExportsSettled = runMetas.every((run) => run.exportSettled === true);
+  const finalComparisonFingerprint = comparison && allExportsSettled
+    ? comparisonExportFingerprint(
+        options,
+        runMetas.map((run, index) => ({
+          run: runs[index],
+          exportFingerprint: run.exportFingerprint,
+        })),
+        implementation,
+      )
+    : null;
+  await writeJson(manifestPath, {
     formatVersion: FORMAT_VERSION,
     generatedAt: new Date().toISOString(),
     source: {
@@ -838,14 +1152,25 @@ async function main() {
       claudeDir: options.claudeDir,
       workDir: options.workDir,
       through: options.through,
+      exportCacheVersion: EXPORT_CACHE_VERSION,
+      implementationFingerprint: implementation,
+      comparisonFingerprint: finalComparisonFingerprint,
+      reusedRuns: reusedRunCount,
+      exportedRuns: runMetas.length - reusedRunCount,
+      comparisonReused: Boolean(reusedComparison),
     },
     runs: runMetas,
     comparisons,
   });
-  console.log(`Exported ${runMetas.length} runs to ${options.outDir}`);
+  console.log(
+    `Exported ${runMetas.length} runs to ${options.outDir} ` +
+    `(${reusedRunCount} reused, ${runMetas.length - reusedRunCount} rebuilt)`,
+  );
 }
 
-main().catch((error) => {
-  console.error(error?.stack ?? error?.message ?? String(error));
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_FILE) {
+  main().catch((error) => {
+    console.error(error?.stack ?? error?.message ?? String(error));
+    process.exit(1);
+  });
+}

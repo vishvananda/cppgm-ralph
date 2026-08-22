@@ -4,6 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import readline from "readline";
+import { fileURLToPath } from "url";
 import "../ralph-viz/model-pricing.js";
 import "../ralph-viz/assignment-layouts.js";
 import {
@@ -13,6 +14,7 @@ import {
 
 const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
 
 const MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -171,12 +173,29 @@ async function readJsonl(filePath) {
       continue;
     }
     try {
-      records.push(JSON.parse(line));
+      const record = JSON.parse(line);
+      if (comparisonEventRelevant(record)) {
+        records.push(record);
+      }
     } catch (error) {
       throw new Error(`${filePath}:${index}: ${error.message}`);
     }
   }
   return records;
+}
+
+function comparisonEventRelevant(record) {
+  const type = String(record?.eventType ?? "");
+  return type === "ralph.phase-status" ||
+    type === "ralph.prompt" ||
+    type === "ralph.goal" ||
+    type === "ralph.turn-restart" ||
+    type === "ralph.limit_wait" ||
+    type === "claude.limit_wait" ||
+    type === "thread.started" ||
+    type === "codex.session.token_count" ||
+    type.startsWith("item.") ||
+    type.startsWith("turn.");
 }
 
 function resolveRunFile(spec, ralphDir) {
@@ -1568,7 +1587,10 @@ function summaryRow(run) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const summaries = await Promise.all(options.runs.map((run) => summarizeRun(run, options)));
+  const summaries = await summarizeRunsSequentially(
+    options.runs,
+    (run) => summarizeRun(run, options),
+  );
   const comparison = buildComparison(options, summaries);
   const format = String(options.format).toLowerCase();
   if (format === "json") {
@@ -1580,7 +1602,17 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+export async function summarizeRunsSequentially(runs, summarize) {
+  const summaries = [];
+  for (const run of runs) {
+    summaries.push(await summarize(run));
+  }
+  return summaries;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_FILE) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

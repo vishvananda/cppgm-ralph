@@ -24,6 +24,7 @@ const prismThemeDark = document.getElementById("prismThemeDark");
 const prismThemeLight = document.getElementById("prismThemeLight");
 
 const AUTO_REFRESH_MS = 2500;
+const SUBAGENT_TRAJECTORY_REFRESH_MS = 2500;
 const BOTTOM_STICKY_PX = 32;
 const COMPACT_TURN_CARD_LIMIT = 50;
 const COMBINED_RUN_CARD_LIMIT = 3;
@@ -143,6 +144,7 @@ const state = {
   runComparisons: new Map(),
   runComparisonThrough: new Map(),
   comparisonRunVisibility: new Map(),
+  subagentTrajectories: new Map(),
   runComparisonRequestId: 0,
   loadRequestId: 0,
   compareThrough: null,
@@ -2734,7 +2736,13 @@ function renderSubagentCard(entry) {
   const key = subagentEntryKey(entry);
   const card = document.createElement("div");
   card.className = `ev ev-subagent${failed ? " ev-subagent-fail" : ""}`;
-  const { header: summary, body } = createAccordion(card, { key });
+  let loadTrajectory = null;
+  const { header: summary, body } = createAccordion(card, {
+    key,
+    onToggle: (open) => {
+      if (open) loadTrajectory?.();
+    },
+  });
 
   const label = document.createElement("span");
   label.className = "pill";
@@ -2815,75 +2823,130 @@ function renderSubagentCard(entry) {
       `${key}:result-${index + 1}`,
     );
   });
-  appendCodexSubagentTrajectory(body, item, key);
+  loadTrajectory = appendCodexSubagentTrajectory(body, item, key);
+  if (card.classList.contains("is-open")) {
+    loadTrajectory?.();
+  }
   return card;
 }
 
 function appendCodexSubagentTrajectory(container, item, key) {
   const threadId = cleanText(item.agent_thread_id ?? item.id);
   if (item.provider !== "codex" || !threadId) {
-    return;
+    return null;
   }
 
-  const details = document.createElement("details");
-  details.className = "subagent-trajectory";
-  const summary = document.createElement("summary");
-  summary.textContent = "Trajectory";
   const feed = document.createElement("div");
   feed.className = "subagent-trajectory-feed";
-  details.append(summary, feed);
-  container.append(details);
+  container.append(feed);
 
-  let loaded = false;
-  details.addEventListener("toggle", async () => {
-    if (!details.open || loaded) {
+  const render = (records) => {
+    const entries = buildDisplayEntries(records, {
+      subagentEstimateModel: buildSubagentEstimateModel(records),
+    });
+    const trajectoryKey = `${key}:trajectory`;
+    const entryWindow = displayEntryWindow(entries, trajectoryKey);
+    feed.textContent = "";
+    if (!entries.length) {
+      feed.textContent = "No displayable trajectory events.";
       return;
     }
-    loaded = true;
-    feed.textContent = state.staticMode ? "Trajectory is available in the live visualization." : "Loading trajectory…";
-    if (state.staticMode) {
-      return;
-    }
-    try {
-      const data = await fetchJson(
-        `/api/codex-subagent/${encodeURIComponent(threadId)}?maxEvents=2000`,
-      );
-      const records = collapseMirroredCodexItems(data.events ?? []).filter(shouldShow);
-      const entries = buildDisplayEntries(records, {
-        subagentEstimateModel: buildSubagentEstimateModel(records),
+    if (entryWindow.hidden > 0) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "turn-more subagent-more";
+      more.textContent = `Show all ${entryWindow.total} cards (${entryWindow.hidden} earlier hidden)`;
+      more.addEventListener("click", () => {
+        const snapshot = captureScrollSnapshot();
+        state.fullCardTurns.add(trajectoryKey);
+        rerenderCurrentViewPreservingScroll();
+        markLayoutScrollIntent(snapshot);
       });
-      feed.textContent = "";
-      summary.textContent = `Trajectory (${entries.length} cards)`;
-      if (!entries.length) {
-        feed.textContent = "No displayable trajectory events.";
+      feed.append(more);
+    }
+    entryWindow.entries.forEach((entry, offset) => {
+      const rendered = renderDisplayEntry(entry);
+      if (!rendered) {
         return;
       }
-      entries.forEach((entry, index) => {
-        const rendered = renderDisplayEntry(entry);
-        if (!rendered) {
-          return;
-        }
-        const scrollKey = scrollKeyForEntry(entry, index);
-        if (scrollKey) {
-          rendered.dataset.scrollKey = `${key}:trajectory:${scrollKey}`;
-        }
-        feed.append(rendered);
+      const entryIndex = entryWindow.indices?.[offset] ?? entryWindow.startIndex + offset;
+      const scrollKey = scrollKeyForEntry(entry, entryIndex);
+      if (scrollKey) {
+        rendered.dataset.scrollKey = `${trajectoryKey}:${scrollKey}`;
+      }
+      feed.append(rendered);
+    });
+  };
+
+  return async () => {
+    if (state.staticMode) {
+      feed.textContent = "Trajectory is available in the live visualization.";
+      return;
+    }
+    const now = Date.now();
+    const cached = state.subagentTrajectories.get(threadId);
+    if (cached?.records) {
+      render(cached.records);
+      if (now - cached.loadedAt < SUBAGENT_TRAJECTORY_REFRESH_MS) {
+        return;
+      }
+    } else {
+      feed.textContent = "Loading trajectory…";
+    }
+    if (cached?.promise) {
+      try {
+        render(await cached.promise);
+      } catch (error) {
+        feed.textContent = `Trajectory unavailable: ${error?.message ?? error}`;
+      }
+      return;
+    }
+
+    const promise = fetchJson(
+      `/api/codex-subagent/${encodeURIComponent(threadId)}?maxEvents=2000`,
+    ).then((data) =>
+      collapseMirroredCodexItems(data.events ?? []).filter(shouldShow));
+    state.subagentTrajectories.set(threadId, {
+      records: cached?.records ?? null,
+      loadedAt: cached?.loadedAt ?? 0,
+      promise,
+    });
+    try {
+      const records = await promise;
+      state.subagentTrajectories.set(threadId, {
+        records,
+        loadedAt: Date.now(),
+        promise: null,
       });
+      render(records);
     } catch (error) {
-      loaded = false;
+      state.subagentTrajectories.delete(threadId);
       feed.textContent = `Trajectory unavailable: ${error?.message ?? error}`;
     }
-  });
+  };
 }
 
 function appendSubagentSection(container, label, value, key) {
   const text = cleanText(value);
   if (!text) return;
-  const heading = document.createElement("strong");
-  heading.className = "subagent-section-label";
-  heading.textContent = label;
-  container.append(heading);
-  appendExpandableText(container, text, key, "cmd-output subagent-output");
+
+  const section = document.createElement("div");
+  section.className = "subagent-section";
+  const { header, body } = createAccordion(section, {
+    key: `subagent-section:${key}`,
+    headerClass: "subagent-section-header",
+    bodyClass: "accordion-body subagent-section-body",
+  });
+  header.textContent = label;
+
+  const markdown = document.createElement("div");
+  markdown.className = "msg-body subagent-output";
+  markdown.dataset.contentScrollKey = key;
+  markdown.innerHTML = SAFE_MARKDOWN.renderMarkdown(text);
+  markdown.querySelectorAll("pre code").forEach(highlightCodeBlock);
+  appendCopyableBlock(body, markdown, text, `Copy subagent ${label.toLowerCase()}`, "Copy MD");
+
+  container.append(section);
 }
 
 function subagentRecordKey(record) {
@@ -7584,7 +7647,16 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
   return wrap;
 }
 
-const COMPARISON_CHART_PALETTE = ["#7aa2f7", "#9ece6a", "#f7768e", "#e0af68", "#bb9af7", "#73daca"];
+const COMPARISON_CHART_PALETTE = [
+  "#7aa2f7",
+  "#9ece6a",
+  "#f7768e",
+  "#e0af68",
+  "#bb9af7",
+  "#73daca",
+  "#e5c07b",
+  "#ff79c6",
+];
 
 function comparisonRunKey(run, index) {
   const parts = [run?.spec, run?.dataPath, run?.label, run?.model]
@@ -7594,8 +7666,15 @@ function comparisonRunKey(run, index) {
 }
 
 function comparisonRunDefaultVisible(run) {
+  const shared = globalThis.RALPH_COMPARISON_RUN_VISIBILITY?.defaultVisible;
+  if (typeof shared === "function") {
+    return shared(run);
+  }
+  if (run?.highlighted === true) {
+    return true;
+  }
   return ![run?.label, run?.spec, run?.model, run?.dataPath]
-    .some((value) => cleanText(value).toLowerCase().includes("luna"));
+    .some((value) => /(?:^|[^a-z0-9])(?:luna|v3opus)(?:[^a-z0-9]|$)/i.test(cleanText(value)));
 }
 
 function comparisonRunVisible(run, index) {
@@ -8240,7 +8319,14 @@ function scheduleRunComparisonPanel(run) {
       state.runComparisons.set(run.id, entry);
       if (state.selectedRun === run.id && requestId === state.runComparisonRequestId) {
         renderRunComparisonPanel(run, data, entry.loadedAt)
-          .catch((error) => console.error("run comparison render failed", error));
+          .catch((error) => {
+            console.error("run comparison render failed", error);
+            if (state.selectedRun === run.id) {
+              runComparisonCard.hidden = false;
+              runComparisonEl.innerHTML = `<div class="run-comparison-status muted">Comparison render failed: ${escapeHtml(error.message)}</div>`;
+              runComparisonThrough.disabled = true;
+            }
+          });
       }
       return data;
     })

@@ -133,6 +133,7 @@ export async function collectClaudeSubagentEvents(events, options = {}) {
     if (!filePath) {
       continue;
     }
+    options.onSourceFile?.(filePath);
     const threadAdditions = await readClaudeSubagentEvents(
       filePath,
       threadId,
@@ -305,6 +306,7 @@ async function childTranscriptCompletionFallbacks(
     const files = childByPrompt.get(start.item.prompt) ?? [];
     const childFile = files.shift();
     if (!childFile) continue;
+    options.onSourceFile?.(childFile);
     const completion = await readChildTranscriptCompletion(childFile, options);
     if (!completion) continue;
     const notificationId = `child:${completion.agentId || path.basename(childFile, ".jsonl")}`;

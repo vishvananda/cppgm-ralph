@@ -4,6 +4,7 @@ export const VIEWER_ASSETS = Object.freeze([
   { name: "assignment-layouts.js", pathname: "/assignment-layouts.js", contentType: "application/javascript; charset=utf-8" },
   { name: "command-status.js", pathname: "/command-status.js", contentType: "application/javascript; charset=utf-8" },
   { name: "entry-dedupe.js", pathname: "/entry-dedupe.js", contentType: "application/javascript; charset=utf-8" },
+  { name: "comparison-run-visibility.js", pathname: "/comparison-run-visibility.js", contentType: "application/javascript; charset=utf-8" },
   { name: "model-pricing.js", pathname: "/model-pricing.js", contentType: "application/javascript; charset=utf-8" },
   { name: "safe-markdown.js", pathname: "/safe-markdown.js", contentType: "application/javascript; charset=utf-8" },
   { name: "test-progress-evidence.js", pathname: "/test-progress-evidence.js", contentType: "application/javascript; charset=utf-8" },

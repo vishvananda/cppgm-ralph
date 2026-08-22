@@ -38,6 +38,7 @@ export async function collectCodexSubagentEvents(events, options = {}) {
   while (queue.length) {
     const parent = queue.shift();
     const parentFiles = index.get(parent.threadId) ?? [];
+    parentFiles.forEach((filePath) => options.onSourceFile?.(filePath));
     const childRefs = await readChildReferences(parentFiles);
     for (const childRef of childRefs.values()) {
       if (!childRef.threadId || discovered.has(childRef.threadId)) {
@@ -47,6 +48,7 @@ export async function collectCodexSubagentEvents(events, options = {}) {
       queue.push({ threadId: childRef.threadId, rootThreadId: parent.rootThreadId });
 
       const childFiles = index.get(childRef.threadId) ?? [];
+      childFiles.forEach((filePath) => options.onSourceFile?.(filePath));
       const child = await readCodexSubagent(childFiles, childRef, options);
       if (!child) {
         continue;

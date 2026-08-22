@@ -138,6 +138,17 @@ refreshes local comparison accounting once per minute. Override the baseline
 artifact with `RALPH_VIZ_PUBLISHED_COMPARISON_URL`; by default it uses the
 public `ralph-run-viewer-zippy-960` export.
 
+Build the static viewer with:
+
+```bash
+npm run export-viz -- --out /dev/shm/ralph-viz-static-qol --through pa39
+```
+
+The default export includes the published trusted, Opus, mini, Fable, Luna,
+v3opus, v3codex, and v3multi runs. Exports are incremental: unchanged run
+artifacts are reused and only changed comparison columns are rebuilt. Pass
+`--clean` when a full rebuild is required.
+
 Set `"assignmentLayout": "v3"` in runs using the V3 assignment order. Runs
 without this field default to V2 (with `v3*` run names recognized as a
 compatibility fallback). Comparisons use V3 order globally and the selected
