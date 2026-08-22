@@ -884,13 +884,18 @@ body.is-static-viz .combined-view-toggle {
 }
 
 .turn > .turn-header::before {
-  content: "\25B8";
-  font-size: 0.7rem;
+  content: "";
+  box-sizing: border-box;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
   color: var(--dim);
+  flex: 0 0 0.42rem;
+  height: 0.42rem;
   transition: transform 0.15s;
-  width: 0.7rem;
+  transform: rotate(-45deg);
+  width: 0.42rem;
 }
-.turn.is-open > .turn-header::before { transform: rotate(90deg); }
+.turn.is-open > .turn-header::before { transform: rotate(45deg); }
 .turn > .turn-header:hover { color: var(--text); }
 
 .turn-info { color: var(--muted); font-size: 0.78rem; }
@@ -1293,10 +1298,20 @@ body.is-static-viz .combined-view-toggle {
 }
 
 .ev-subagent > .accordion-header::before {
-  content: ">";
+  content: "";
+  box-sizing: border-box;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
   color: #7fa6d8;
-  font-family: monospace;
-  font-size: 0.75rem;
+  flex: 0 0 0.38rem;
+  height: 0.38rem;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+  width: 0.38rem;
+}
+
+.ev-subagent.is-open > .accordion-header::before {
+  transform: rotate(45deg);
 }
 
 .subagent-title {
@@ -1592,15 +1607,21 @@ pre.file-diff .token.prefix {
 
 .ev-prompt > .accordion-header::before,
 .ev-goal > .accordion-header::before {
-  content: "\25B8";
+  content: "";
+  box-sizing: border-box;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
   color: var(--dim);
-  font-size: 0.65rem;
+  flex: 0 0 0.38rem;
+  height: 0.38rem;
   transition: transform 0.15s;
+  transform: rotate(-45deg);
+  width: 0.38rem;
 }
 
 .ev-prompt.is-open > .accordion-header::before,
 .ev-goal.is-open > .accordion-header::before {
-  transform: rotate(90deg);
+  transform: rotate(45deg);
 }
 
 .ev-prompt {
@@ -1792,16 +1813,39 @@ pre { margin: 0; }
 
   .ev-cmd > .accordion-header,
   .ev-file > .accordion-header,
-  .ev-todo > .accordion-header {
+  .ev-todo > .accordion-header,
+  .ev-subagent > .accordion-header {
     align-items: flex-start;
     flex-wrap: wrap;
   }
 
+  .ev-cmd > .accordion-header,
+  .ev-file > .accordion-header,
+  .ev-todo > .accordion-header,
+  .ev-subagent > .accordion-header,
+  .ev-prompt > .accordion-header,
+  .ev-goal > .accordion-header {
+    position: relative;
+    padding-left: 1rem;
+  }
+
+  .ev-cmd > .accordion-header::before,
+  .ev-file > .accordion-header::before,
+  .ev-todo > .accordion-header::before,
+  .ev-subagent > .accordion-header::before,
+  .ev-prompt > .accordion-header::before,
+  .ev-goal > .accordion-header::before {
+    position: absolute;
+    left: 0.1rem;
+    top: 0.42rem;
+  }
+
   .cmd-inline,
-  .file-title {
+  .file-title,
+  .subagent-title {
     flex: 1 1 100%;
     white-space: normal;
-    word-break: break-word;
+    overflow-wrap: anywhere;
   }
 
   .cmd-output,
