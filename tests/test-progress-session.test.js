@@ -15,6 +15,7 @@ test("viewer serves shared browser helpers as JavaScript", async () => {
   for (const [url, marker] of [
     ["/test-progress-evidence.js", /RALPH_TEST_PROGRESS_EVIDENCE/],
     ["/command-status.js", /RALPH_COMMAND_STATUS/],
+    ["/model-pricing.js", /RALPH_MODEL_PRICING/],
   ]) {
     const response = {
       status: null,

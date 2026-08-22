@@ -45,6 +45,7 @@ const RUN_COMPARISON_REFRESH_MS = 60 * 1000;
 let echartsLoadPromise = null;
 
 const API_PRICE_RATES = new Map(Object.entries(globalThis.RALPH_MODEL_PRICE_RATES ?? {}));
+const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const COMMAND_STATUS = globalThis.RALPH_COMMAND_STATUS;
 const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
@@ -831,7 +832,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
     turns: turnSet.size,
     first, last,
     activeDurationMs: activeEventDurationMs(events),
-    tokenUsage: latestCumulativeUsage(events),
+    tokenUsage: latestCumulativeUsage(events, priceModel),
     shapeUsage: normalizedShapeUsage,
     priceModel,
     latestTurn: latestTurnOverview(events, priceModel, normalizedShapeUsage, run),
@@ -853,7 +854,7 @@ function latestTurnOverview(events, priceModel, shapeUsage = null, run = null) {
     activeCurrentTurn: isActiveCurrentRunTurn(run, turn),
     activeStartMs: activeCurrentRunTurnStartMs(run, turn, events),
   }));
-  const usage = bestTurnUsage(shapeUsage, turn, buildUsageMap(events).get(turn));
+  const usage = bestTurnUsage(shapeUsage, turn, buildUsageMap(events, priceModel).get(turn));
   const cost = usage ? costEstimateText(usage, priceModel) : "n/a";
   return { turn, duration, cost };
 }
@@ -968,6 +969,12 @@ function bestTurnUsage(shapeUsage, turn, liveUsage = null) {
   }
   if (!liveUsage) {
     return cached;
+  }
+  if (
+    normalizeUsage(liveUsage)?.model_usage?.length &&
+    usageMagnitude(liveUsage) >= usageMagnitude(cached)
+  ) {
+    return liveUsage;
   }
   return usageMagnitude(liveUsage) > usageMagnitude(cached) ? liveUsage : cached;
 }
@@ -1130,6 +1137,7 @@ function renderSummary(events) {
     ? usageSummaryText(usage.usage, s.priceModel, {
         durationMs: usage.durationMs,
         includeModel: true,
+        includeModelBreakdown: true,
         suffix: usage.suffix,
         costUsd: usage.costUsd,
       })
@@ -1523,6 +1531,24 @@ function dockTurnText(turn) {
 }
 
 function preferredUsageSummary(summary) {
+  const attributedShapeUsage = normalizeUsage(summary?.shapeUsage?.usage);
+  if (attributedShapeUsage?.model_usage?.length) {
+    return {
+      usage: attributedShapeUsage,
+      durationMs: summary.shapeUsage.durationMs,
+      suffix: `${fmtInt(summary.shapeUsage.runCount)} runs`,
+      costUsd: attributedShapeUsage.cost_usd,
+    };
+  }
+  const attributedUsage = normalizeUsage(summary?.tokenUsage);
+  if (attributedUsage?.model_usage?.length && (summary?.shapeUsage?.runCount ?? 1) <= 1) {
+    return {
+      usage: attributedUsage,
+      durationMs: summary?.shapeUsage?.durationMs ?? summary.activeDurationMs,
+      suffix: summary?.shapeUsage ? `${fmtInt(summary.shapeUsage.runCount)} runs` : "selected thread",
+      costUsd: attributedUsage.cost_usd,
+    };
+  }
   if (summary?.shapeUsage?.usage) {
     return {
       usage: summary.shapeUsage.usage,
@@ -1586,7 +1612,8 @@ function compactDockUsageText(usageSummary, priceModel) {
 function detailedDockUsageText(usageSummary) {
   const usage = normalizeUsage(usageSummary?.usage);
   if (!usage) return "usage n/a";
-  const details = fullUsageText(usage);
+  const breakdown = modelUsageBreakdownText(usage, null, { detailed: true });
+  const details = [fullUsageText(usage), breakdown].filter(Boolean).join(" / ");
   return usageSummary?.suffix ? `${details} / ${usageSummary.suffix}` : details;
 }
 
@@ -4049,6 +4076,9 @@ function inferPriceModel(run = null) {
 }
 
 function normalizeUsage(usage) {
+  if (MODEL_PRICING?.normalizeUsage) {
+    return MODEL_PRICING.normalizeUsage(usage);
+  }
   if (!usage || typeof usage !== "object") return null;
   const input = usage.input_tokens ?? usage.promptTokenCount ?? 0;
   const cached = usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? 0;
@@ -4095,6 +4125,9 @@ function hasTokenUsage(usage) {
 }
 
 function addUsage(left, right) {
+  if (MODEL_PRICING?.addUsage) {
+    return MODEL_PRICING.addUsage(left, right);
+  }
   const a = normalizeUsage(left) ?? emptyUsage();
   const b = normalizeUsage(right) ?? emptyUsage();
   return {
@@ -4206,17 +4239,20 @@ function isUsageBaselineRecord(record) {
     (record?.event?.baseline === true || record?._usageBaseline === true);
 }
 
-function latestCumulativeUsage(records) {
+function latestCumulativeUsage(records, rootModel = null) {
   // buildUsageMap merges token_count-derived turns with turn.completed
   // fallback turns, so summing it covers mixed-provenance runs.
   let total = emptyUsage();
-  for (const usage of buildUsageMap(records).values()) {
+  for (const usage of buildUsageMap(records, rootModel).values()) {
     total = addUsage(total, usage);
   }
   return hasTokenUsage(total) ? total : null;
 }
 
 function apiCostEstimate(usage, model) {
+  if (MODEL_PRICING?.estimateCost) {
+    return MODEL_PRICING.estimateCost(usage, model);
+  }
   const normalized = normalizeUsage(usage);
   if (!normalized) return null;
   const rates = model ? API_PRICE_RATES.get(model) : null;
@@ -4245,6 +4281,38 @@ function costEstimateText(usage, model, options = {}) {
   return `${prefix}${fmtUsd(estimate)}`;
 }
 
+function shortModelName(model) {
+  const match = String(model ?? "").match(/^gpt-[\d.]+-(sol|terra|luna)$/i);
+  if (match) {
+    return match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
+  }
+  return String(model ?? "model");
+}
+
+function modelUsageBreakdown(usage, fallbackModel = null) {
+  const entries = MODEL_PRICING?.costBreakdown?.(usage, fallbackModel) ?? [];
+  return entries
+    .filter((entry) => Number.isFinite(entry?.cost_usd))
+    .sort((left, right) => {
+      if (left.model === fallbackModel) return -1;
+      if (right.model === fallbackModel) return 1;
+      return String(left.model).localeCompare(String(right.model));
+    });
+}
+
+function modelUsageBreakdownText(usage, fallbackModel = null, options = {}) {
+  const entries = modelUsageBreakdown(usage, fallbackModel);
+  if (entries.length < 2) return "";
+  return entries.map((entry) => {
+    const label = shortModelName(entry.model);
+    const cost = fmtUsd(entry.cost_usd);
+    if (!options.detailed) return `${label} ${cost}`;
+    const cached = Math.min(entry.cached_input_tokens, entry.input_tokens);
+    const uncached = Math.max(0, entry.input_tokens - cached);
+    return `${label} ${cost} (${fmtInt(uncached)} in, ${fmtInt(cached)} cached, ${fmtInt(entry.output_tokens)} out)`;
+  }).join(options.detailed ? " / " : " + ");
+}
+
 function usageSummaryText(usage, model, options = {}) {
   const normalized = normalizeUsage(usage);
   if (!normalized) return "";
@@ -4255,9 +4323,15 @@ function usageSummaryText(usage, model, options = {}) {
     ? durationText({ durationMs: options.durationMs })
     : "";
   const explicitCost = Number(options.costUsd);
-  const cost = Number.isFinite(explicitCost)
+  let cost = Number.isFinite(explicitCost)
     ? `${options.includeModel && model ? `${model} ` : ""}${fmtUsd(explicitCost)}`
     : costEstimateText(normalized, model, { includeModel: options.includeModel });
+  const breakdown = options.includeModelBreakdown
+    ? modelUsageBreakdownText(normalized, model)
+    : "";
+  if (breakdown && cost !== "n/a") {
+    cost = `${fmtUsd(Number.isFinite(explicitCost) ? explicitCost : apiCostEstimate(normalized, model))} (${breakdown})`;
+  }
   const parts = [];
   if (duration) {
     parts.push(duration);
@@ -4311,9 +4385,11 @@ function fullUsageText(usage, options = {}) {
   return parts.join(" / ");
 }
 
-function buildUsageMap(records) {
+function buildUsageMap(records, rootModel = null) {
   const map = new Map();
   const tokenRecords = tokenCountRecords(records);
+  const threadModels = usageThreadModels(records, rootModel);
+  const coveredThreadTurns = new Set();
   // Turns covered by token_count records; other turns (e.g. recorded before a
   // provider emitted live token counts) fall back to turn.completed usage.
   const tokenTurns = new Set();
@@ -4327,12 +4403,16 @@ function buildUsageMap(records) {
         continue;
       }
       const previous = previousByThread.get(threadId) ?? null;
-      const delta = usageDelta(current, previous);
+      const delta = attributeUsageToModel(
+        usageDelta(current, previous),
+        threadModels.get(threadId) ?? rootModel,
+      );
       previousByThread.set(threadId, current);
       if (!hasTokenUsage(delta)) continue;
       const turn = displayTurnForRecord(record);
       map.set(turn, addUsage(map.get(turn), delta));
       tokenTurns.add(turn);
+      coveredThreadTurns.add(`${turn}\u0000${threadId}`);
     }
   }
 
@@ -4340,7 +4420,11 @@ function buildUsageMap(records) {
     // turn.completed has usage (and, for Claude, the exact turn cost)
     if (r.eventType === "turn.completed" && r.event?.usage) {
       const turn = displayTurnForRecord(r);
-      const usage = normalizeUsage(r.event.usage);
+      const threadId = eventThreadId(r) ?? "";
+      const usage = attributeUsageToModel(
+        r.event.usage,
+        threadModels.get(threadId) ?? rootModel,
+      );
       if (tokenTurns.has(turn)) {
         map.set(turn, usageWithCompletedCost(map.get(turn), usage));
         continue;
@@ -4353,7 +4437,7 @@ function buildUsageMap(records) {
       if (tokenTurns.has(turn)) continue;
       const gm = r.event.value.usageMetadata;
       const prev = map.get(turn);
-      const usage = normalizeUsage(gm);
+      const usage = attributeUsageToModel(gm, rootModel);
       if (prev && prev._gemini) {
         // Accumulate across multiple finished events in same turn
         map.set(turn, { ...addUsage(prev, usage), _gemini: true });
@@ -4365,7 +4449,62 @@ function buildUsageMap(records) {
       }
     }
   }
+
+  // Native Codex child token counters live in the child rollout, not the Ralph
+  // event log. The synthesized completion carries the same cumulative usage and
+  // its actual model. Include it unless detailed trajectory loading already
+  // supplied token_count records for that child and turn.
+  const completedChildren = new Set();
+  for (const record of records) {
+    const item = record.event?.item;
+    if (
+      record.eventType !== "item.completed" ||
+      item?.type !== "subagent" ||
+      !item.usage
+    ) {
+      continue;
+    }
+    const turn = displayTurnForRecord(record);
+    const threadId = String(item.agent_thread_id ?? item.id ?? "");
+    const childKey = `${turn}\u0000${threadId}`;
+    if (!threadId || completedChildren.has(childKey) || coveredThreadTurns.has(childKey)) {
+      continue;
+    }
+    completedChildren.add(childKey);
+    map.set(
+      turn,
+      addUsage(map.get(turn), attributeUsageToModel(item.usage, item.model)),
+    );
+  }
   return map;
+}
+
+function usageThreadModels(records, rootModel = null) {
+  const models = new Map();
+  for (const record of records ?? []) {
+    const item = record.event?.item;
+    if (item?.type === "subagent") {
+      const threadId = String(item.agent_thread_id ?? item.id ?? "");
+      if (threadId && item.model) models.set(threadId, item.model);
+      const parentThreadId = String(item.parent_thread_id ?? record.threadId ?? "");
+      if (parentThreadId && rootModel && !models.has(parentThreadId)) {
+        models.set(parentThreadId, rootModel);
+      }
+      continue;
+    }
+    const threadId = eventThreadId(record);
+    if (threadId && rootModel && !models.has(threadId)) {
+      models.set(threadId, rootModel);
+    }
+  }
+  return models;
+}
+
+function attributeUsageToModel(usage, model) {
+  if (MODEL_PRICING?.attributeUsage) {
+    return MODEL_PRICING.attributeUsage(usage, model);
+  }
+  return normalizeUsage(usage);
 }
 
 function buildTestStatusMap(records) {
@@ -6613,12 +6752,15 @@ function turnUsageComponentText(usage) {
   if (!normalized) return "";
   const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
   const uncached = Math.max(0, normalized.input_tokens - cached);
-  return [
+  const parts = [
     `${fmtInt(uncached)} input`,
     `${fmtInt(cached)} cached`,
     `${fmtInt(normalized.output_tokens)} output`,
     `${fmtInt(normalized.reasoning_output_tokens)} reasoning`,
-  ].join(" / ");
+  ];
+  const breakdown = modelUsageBreakdownText(normalized, null, { detailed: true });
+  if (breakdown) parts.push(breakdown);
+  return parts.join(" / ");
 }
 
 function renderTimeline(records) {
@@ -6629,7 +6771,7 @@ function renderTimeline(records) {
   const options = renderTimeline.pendingOptions ?? {};
   renderTimeline.pendingOptions = {};
   rememberOpenEntryKeys();
-  const usageMap = buildUsageMap(records);
+  const usageMap = buildUsageMap(records, inferPriceModel());
   const testMap = buildTestStatusMap(records);
   const phaseMap = buildPhaseStatusMap(records);
   const durationMap = buildTurnDurationMap(records);

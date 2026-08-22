@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import "./assignment-layouts.js";
+import "./model-pricing.js";
 import "./test-progress-evidence.js";
 import {
   VIEWER_ASSET_NAMES,
@@ -32,6 +33,7 @@ const SPA_DIR = path.dirname(SERVER_FILE);
 const REPO_DIR = path.dirname(SPA_DIR);
 const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -46,7 +48,7 @@ const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 25;
+const RUN_USAGE_CACHE_VERSION = 26;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
@@ -363,6 +365,15 @@ async function appendSubagentEvents(events) {
     mergeEventStreams(events, additions),
     progressEvents,
   );
+}
+
+async function appendSubagentUsageEvents(events) {
+  const additions = await collectSubagentEvents(events, {
+    claudeDir: CLAUDE_PROJECTS_DIR,
+    codexDir: CODEX_DIR,
+    resultLimit: CODEX_SESSION_OUTPUT_LIMIT,
+  });
+  return additions.length ? mergeEventStreams(events, additions) : events;
 }
 
 export function codexSubagentProgressThreadIds(events, primaryThreadIds = []) {
@@ -1021,6 +1032,8 @@ async function readShapeUsage(shape, selected = {}) {
       id: `${shape}/${fileBase}`,
       threadId: summary.threadIds[0] ?? fileBase,
       threadIds: summary.threadIds,
+      threadUsages: summary.threadUsages,
+      unthreadedUsage: summary.unthreadedUsage,
       firstAt: summary.firstAt,
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
@@ -1257,7 +1270,8 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
       // Finalize completed turns from the complete Ralph log. Incremental
       // fragments cannot safely bridge a long reasoning interval or distinguish
       // it from a recorded restart/quota wait without the preceding boundary.
-      summary = buildRunLogUsageSummary(fileBase, stat, await readRunFile(filePath), usageMode);
+      const fullEvents = await appendSubagentUsageEvents(await readRunFile(filePath));
+      summary = buildRunLogUsageSummary(fileBase, stat, fullEvents, usageMode);
     } else {
       extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
     }
@@ -1523,6 +1537,8 @@ function shapeUsageFromRunSummaries(shape, entries) {
       id: `${shape}/${fileBase}`,
       threadId: summary.threadIds[0] ?? fileBase,
       threadIds: summary.threadIds,
+      threadUsages: summary.threadUsages,
+      unthreadedUsage: summary.unthreadedUsage,
       firstAt: summary.firstAt,
       lastAt: summary.lastAt,
       durationMs: summary.durationMs,
@@ -1543,6 +1559,174 @@ function shapeUsageFromRunSummaries(shape, entries) {
     usage: hasTokenUsage(total) ? total : null,
     runs,
   };
+}
+
+export function attributeShapeUsageModels(shapeUsage, events, rootModel = null) {
+  if (!shapeUsage || !MODEL_PRICING?.attributeUsage) {
+    return shapeUsage;
+  }
+  const threadMeta = usageThreadAttribution(events, rootModel);
+  const shapeThreadIds = new Set();
+  let attributedShapeThreads = null;
+  const runs = (shapeUsage.runs ?? []).map((run) => {
+    let attributedRunThreads = null;
+    const attributedByTurn = new Map();
+    const usageByThread = new Map(
+      (run.threadUsages ?? []).map((entry) => [entry.threadId, entry.usage]),
+    );
+    for (const [threadId, meta] of threadMeta.entries()) {
+      if (!hasTokenUsage(meta.usage)) continue;
+      if (meta.parentThreadId && !(run.threadIds ?? []).includes(meta.parentThreadId)) continue;
+      const current = usageByThread.get(threadId);
+      if (!hasTokenUsage(current) || usageMagnitude(meta.usage) > usageMagnitude(current)) {
+        usageByThread.set(threadId, meta.usage);
+      }
+    }
+    const threadUsages = [...usageByThread.entries()].map(([threadId, rawUsage]) => {
+      const entry = { threadId, usage: rawUsage };
+      const meta = threadMeta.get(entry.threadId);
+      const embeddedModels = normalizeUsage(entry.usage)?.model_usage ?? [];
+      const model = meta?.model ?? (embeddedModels.length === 1 ? embeddedModels[0].model : rootModel);
+      const usage = !meta?.model && embeddedModels.length
+        ? normalizeUsage(entry.usage)
+        : MODEL_PRICING.attributeUsage(entry.usage, model);
+      attributedRunThreads = addUsage(attributedRunThreads, usage);
+      if (!shapeThreadIds.has(entry.threadId)) {
+        shapeThreadIds.add(entry.threadId);
+        attributedShapeThreads = addUsage(attributedShapeThreads, usage);
+      }
+      const attributedTurn = dominantUsageThreadTurn(meta);
+      if (attributedTurn != null) {
+        const turn = attributedTurn;
+        attributedByTurn.set(turn, addUsage(attributedByTurn.get(turn), usage));
+      }
+      return { ...entry, model, usage };
+    });
+    const unthreadedUsage = hasTokenUsage(run.unthreadedUsage)
+      ? MODEL_PRICING.attributeUsage(run.unthreadedUsage, rootModel)
+      : null;
+    if (unthreadedUsage) {
+      attributedRunThreads = addUsage(attributedRunThreads, unthreadedUsage);
+      attributedShapeThreads = addUsage(attributedShapeThreads, unthreadedUsage);
+    }
+    const turnUsages = (run.turnUsages ?? []).map((entry) => ({
+      ...entry,
+      usage: pricedUsageCoveringAggregate(
+        entry.usage,
+        attributedByTurn.get(entry.turnNumber),
+        rootModel,
+        attributedByTurn.has(entry.turnNumber),
+      ),
+    }));
+    return {
+      ...run,
+      threadUsages,
+      unthreadedUsage,
+      turnUsages,
+      usage: pricedUsageCoveringAggregate(run.usage, attributedRunThreads, rootModel, true),
+    };
+  });
+  return {
+    ...shapeUsage,
+    runs,
+    usage: pricedUsageCoveringAggregate(shapeUsage.usage, attributedShapeThreads, rootModel, true),
+  };
+}
+
+function usageThreadAttribution(events, rootModel = null) {
+  const byThread = new Map();
+  const ensure = (threadId) => {
+    if (!byThread.has(threadId)) {
+      byThread.set(threadId, { model: rootModel, turnCounts: new Map(), preferredTurn: null });
+    }
+    return byThread.get(threadId);
+  };
+  for (const record of events ?? []) {
+    const turn = eventTurnNumber(record);
+    const threadId = eventThreadId(record);
+    if (threadId) {
+      const meta = ensure(threadId);
+      if (Number.isInteger(turn) && turn > 0) {
+        meta.turnCounts.set(turn, (meta.turnCounts.get(turn) ?? 0) + 1);
+      }
+    }
+    const item = record.event?.item;
+    if (item?.type !== "subagent") continue;
+    const childThreadId = String(item.agent_thread_id ?? item.id ?? "");
+    if (!childThreadId) continue;
+    const child = ensure(childThreadId);
+    if (item.model) child.model = item.model;
+    child.parentThreadId = item.parent_thread_id ?? record.threadId ?? child.parentThreadId ?? null;
+    if (hasTokenUsage(item.usage) && (!hasTokenUsage(child.usage) || usageMagnitude(item.usage) > usageMagnitude(child.usage))) {
+      child.usage = item.usage;
+    }
+    if (Number.isInteger(turn) && turn > 0) child.preferredTurn = turn;
+  }
+  return byThread;
+}
+
+function dominantUsageThreadTurn(meta) {
+  if (Number.isInteger(meta?.preferredTurn) && meta.preferredTurn > 0) {
+    return meta.preferredTurn;
+  }
+  let selected = null;
+  let selectedCount = 0;
+  for (const [turn, count] of meta?.turnCounts ?? []) {
+    if (count > selectedCount || (count === selectedCount && turn > selected)) {
+      selected = turn;
+      selectedCount = count;
+    }
+  }
+  return selected;
+}
+
+function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = null, preferAttributed = false) {
+  const normalizedAggregate = normalizeUsage(aggregate);
+  let normalizedAttributed = normalizeUsage(attributed);
+  if (preferAttributed && hasTokenUsage(normalizedAttributed)) {
+    return normalizedAttributed;
+  }
+  const embedded = usageFromModelComponents(normalizedAggregate);
+  if (hasTokenUsage(embedded)) {
+    normalizedAttributed = mergeAttributedUsageMax(normalizedAttributed, embedded);
+  }
+  if (!hasTokenUsage(normalizedAggregate)) return normalizedAttributed;
+  if (!hasTokenUsage(normalizedAttributed)) {
+    return MODEL_PRICING.attributeUsage(normalizedAggregate, fallbackModel);
+  }
+  if (usageMagnitude(normalizedAttributed) >= usageMagnitude(normalizedAggregate)) {
+    return normalizedAttributed;
+  }
+  const remainder = subtractUsage(normalizedAggregate, normalizedAttributed);
+  return addUsage(
+    normalizedAttributed,
+    MODEL_PRICING.attributeUsage(remainder, fallbackModel),
+  );
+}
+
+function usageFromModelComponents(usage) {
+  let total = null;
+  for (const entry of normalizeUsage(usage)?.model_usage ?? []) {
+    total = addUsage(total, MODEL_PRICING.attributeUsage(entry, entry.model));
+  }
+  return total;
+}
+
+function mergeAttributedUsageMax(left, right) {
+  const byModel = new Map();
+  for (const usage of [left, right]) {
+    for (const entry of normalizeUsage(usage)?.model_usage ?? []) {
+      const current = byModel.get(entry.model);
+      if (!current || usageMagnitude(entry) > usageMagnitude(current)) {
+        byModel.set(entry.model, entry);
+      }
+    }
+  }
+  let total = null;
+  for (const [model, usage] of byModel.entries()) {
+    total = addUsage(total, MODEL_PRICING.attributeUsage(usage, model));
+  }
+  return total;
 }
 
 async function augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary) {
@@ -1639,12 +1823,13 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
   const stat = await fs.stat(filePath);
   const precision = runUsagePrecision(usageMode);
   const events = await readRunFile(filePath);
+  const usageEvents = precision ? await appendSubagentUsageEvents(events) : events;
   if (precision === "fast") {
-    const summary = buildRunLogUsageSummary(fileBase, stat, events, usageMode);
+    const summary = buildRunLogUsageSummary(fileBase, stat, usageEvents, usageMode);
     await writeRunUsageCache(shape, fileBase, stat, precision, [], summary);
     return summary;
   }
-  const threadIds = precision ? inferThreadIdsFromRun(filePath, events) : [];
+  const threadIds = precision ? inferThreadIdsFromRun(filePath, usageEvents) : [];
   const sessionStats = precision ? await codexSessionStatsForThreadIds(threadIds) : [];
   if (precision) {
     const cacheEntry = await readRunUsageCacheEntry(shape, fileBase, stat, precision);
@@ -1665,7 +1850,7 @@ async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
     }
   }
 
-  const summary = await buildRunUsageSummary(filePath, fileBase, stat, events, precision);
+  const summary = await buildRunUsageSummary(filePath, fileBase, stat, usageEvents, precision);
   if (precision) {
     const latestSessionStats = await codexSessionStatsForThreadIds(threadIds);
     await writeRunUsageCache(shape, fileBase, stat, precision, latestSessionStats, summary);
@@ -1735,7 +1920,7 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
   return normalizeRunUsageSummary({
     fileBase,
     threadIds,
-    threadUsages,
+    threadUsages: attributeSubagentThreadUsages(threadUsages, events),
     unthreadedUsage,
     firstAt: bounds.firstAt,
     lastAt: bounds.lastAt,
@@ -1746,6 +1931,34 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
   }, stat, fileBase);
 }
 
+function attributeSubagentThreadUsages(threadUsages, events) {
+  const byThread = new Map(
+    (threadUsages ?? []).map((entry) => [entry.threadId, normalizeUsage(entry.usage)]),
+  );
+  const models = new Map();
+  for (const event of events ?? []) {
+    const item = event.event?.item;
+    if (item?.type !== "subagent") continue;
+    const threadId = String(item.agent_thread_id ?? item.id ?? "");
+    if (!threadId) continue;
+    if (item.model) models.set(threadId, item.model);
+    if (event.eventType !== "item.completed" || !hasTokenUsage(item.usage)) continue;
+    const current = byThread.get(threadId);
+    if (!hasTokenUsage(current) || usageMagnitude(item.usage) > usageMagnitude(current)) {
+      byThread.set(threadId, normalizeUsage(item.usage));
+    }
+  }
+  return [...byThread.entries()]
+    .filter(([, usage]) => hasTokenUsage(usage))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([threadId, usage]) => ({
+      threadId,
+      usage: models.has(threadId)
+        ? MODEL_PRICING.attributeUsage(usage, models.get(threadId))
+        : usage,
+    }));
+}
+
 function buildRunLogUsageSummary(fileBase, stat, events, usageMode) {
   const bounds = eventTimeBounds(events, { includeOpenCommandTail: true });
   const threadIds = inferThreadIdsFromRun("", events);
@@ -1754,7 +1967,10 @@ function buildRunLogUsageSummary(fileBase, stat, events, usageMode) {
   const tokenUsage = usageMode === "skip"
     ? { threadUsages: [], unthreadedUsage: null }
     : usageFromTokenEventsByThread(events);
-  const hasThreadUsage = tokenUsage.threadUsages.some((entry) => hasTokenUsage(entry.usage));
+  const threadUsages = usageMode === "skip"
+    ? []
+    : attributeSubagentThreadUsages(tokenUsage.threadUsages, events);
+  const hasThreadUsage = threadUsages.some((entry) => hasTokenUsage(entry.usage));
   const fallbackUsage =
     usageMode === "skip" || hasThreadUsage || hasTokenUsage(tokenUsage.unthreadedUsage)
       ? null
@@ -1763,7 +1979,7 @@ function buildRunLogUsageSummary(fileBase, stat, events, usageMode) {
   return normalizeRunUsageSummary({
     fileBase,
     threadIds,
-    threadUsages: tokenUsage.threadUsages,
+    threadUsages,
     unthreadedUsage: hasTokenUsage(tokenUsage.unthreadedUsage)
       ? tokenUsage.unthreadedUsage
       : fallbackUsage,
@@ -1973,6 +2189,29 @@ function usageFromEventsByTurn(events) {
         map.set(turn, addUsage(map.get(turn), usage));
       }
     }
+  }
+
+  const completedChildren = new Set();
+  for (const event of events) {
+    const item = event.event?.item;
+    if (
+      event.eventType !== "item.completed" ||
+      item?.type !== "subagent" ||
+      !hasTokenUsage(item.usage)
+    ) {
+      continue;
+    }
+    const turn = eventTurnNumber(event);
+    const threadId = String(item.agent_thread_id ?? item.id ?? "");
+    const key = `${turn}\u0000${threadId}`;
+    if (!Number.isInteger(turn) || turn <= 0 || !threadId || completedChildren.has(key)) {
+      continue;
+    }
+    completedChildren.add(key);
+    map.set(
+      turn,
+      addUsage(map.get(turn), MODEL_PRICING.attributeUsage(item.usage, item.model)),
+    );
   }
 
   return map;
@@ -2855,6 +3094,9 @@ function usageFromVizEvents(events) {
 }
 
 function normalizeUsage(usage) {
+  if (MODEL_PRICING?.normalizeUsage) {
+    return MODEL_PRICING.normalizeUsage(usage);
+  }
   if (!usage || typeof usage !== "object") {
     return null;
   }
@@ -2903,6 +3145,9 @@ function hasTokenUsage(usage) {
 }
 
 function addUsage(left, right) {
+  if (MODEL_PRICING?.addUsage) {
+    return MODEL_PRICING.addUsage(left, right);
+  }
   const a = normalizeUsage(left) ?? emptyUsage();
   const b = normalizeUsage(right) ?? emptyUsage();
   return {
@@ -3805,6 +4050,10 @@ function inferThreadIdsFromRun(filePath, events) {
 
   for (const event of events) {
     add(eventThreadId(event));
+    const item = event.event?.item;
+    if (item?.type === "subagent") {
+      add(item.agent_thread_id ?? item.id);
+    }
   }
   add(inferThreadIdFromRun(filePath, events));
   return ids;
@@ -7366,6 +7615,8 @@ async function requestHandler(req, res) {
             usageMode,
           })
         : await readFastShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
+      const configured = await configuredRunMetadataForShape(runRef.shape);
+      shapeUsage = attributeShapeUsageModels(shapeUsage, events, configured.model);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return sendJson(res, { error: "Run not found" }, 404);
