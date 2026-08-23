@@ -13,6 +13,7 @@ import {
 } from "../subagent-events.js";
 
 const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
+const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
 
@@ -294,23 +295,7 @@ function emptyUsage() {
 }
 
 function normalizeUsage(usage) {
-  if (!usage || typeof usage !== "object") {
-    return null;
-  }
-  return {
-    input_tokens: Math.max(0, usage.input_tokens ?? usage.promptTokenCount ?? 0),
-    cached_input_tokens: Math.max(0, usage.cached_input_tokens ?? usage.cachedContentTokenCount ?? 0),
-    output_tokens: Math.max(
-      0,
-      usage.output_tokens ?? ((usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0)),
-    ),
-    reasoning_output_tokens: Math.max(
-      0,
-      usage.reasoning_output_tokens ?? usage.thinking_output_tokens ?? usage.thoughtsTokenCount ?? 0,
-    ),
-    total_tokens: Math.max(0, usage.total_tokens ?? usage.totalTokenCount ?? 0),
-    cost_usd: Math.max(0, Number(usage.cost_usd ?? usage.total_cost_usd) || 0),
-  };
+  return MODEL_PRICING.normalizeUsage(usage);
 }
 
 function hasUsage(usage) {
@@ -325,16 +310,7 @@ function hasUsage(usage) {
 }
 
 function addUsage(left, right) {
-  const a = normalizeUsage(left) ?? emptyUsage();
-  const b = normalizeUsage(right) ?? emptyUsage();
-  return {
-    input_tokens: a.input_tokens + b.input_tokens,
-    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
-    output_tokens: a.output_tokens + b.output_tokens,
-    reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
-    total_tokens: a.total_tokens + b.total_tokens,
-    cost_usd: (a.cost_usd ?? 0) + (b.cost_usd ?? 0),
-  };
+  return MODEL_PRICING.addUsage(left, right);
 }
 
 function subtractUsage(current, previous) {
@@ -420,6 +396,7 @@ function buildTurnMeta(events) {
         totalDurationMs: 0,
         subagentDurations: new Map(),
         subagentStarts: new Map(),
+        subagentUsages: new Map(),
         sessionFirstMs: null,
         sessionLastMs: null,
         sessionActiveMs: 0,
@@ -913,6 +890,15 @@ function readRunEventUsageIntoTurns(events, byTurn) {
             Math.max(slot.subagentDurations.get(key) ?? 0, durationMs),
           );
         }
+        const usage = normalizeUsage(item.usage);
+        if (hasUsage(usage)) {
+          const previous = slot.subagentUsages.get(key);
+          if (!previous || usageMagnitude(usage) > usageMagnitude(previous.usage)) {
+            slot.subagentUsages.set(key, { usage, model: item.model ?? null });
+          } else if (!previous.model && item.model) {
+            previous.model = item.model;
+          }
+        }
       }
     }
   }
@@ -967,6 +953,21 @@ function subagentDurationKey(record) {
     item.provider ?? "agent",
     item.agent_thread_id ?? item.task_id ?? item.id ?? record?.recordedAt ?? "unknown",
   ].join(":");
+}
+
+function usageMagnitude(usage) {
+  const normalized = normalizeUsage(usage) ?? emptyUsage();
+  return normalized.total_tokens || normalized.input_tokens + normalized.output_tokens;
+}
+
+function attributeTurnUsage(turnInfo, rootModel) {
+  let usage = hasUsage(turnInfo.usage)
+    ? MODEL_PRICING.attributeUsage(turnInfo.usage, rootModel)
+    : emptyUsage();
+  for (const child of turnInfo.subagentUsages.values()) {
+    usage = addUsage(usage, MODEL_PRICING.attributeUsage(child.usage, child.model));
+  }
+  return usage;
 }
 
 function usageWithCompletedCost(liveUsage, completedUsage) {
@@ -1301,6 +1302,9 @@ async function summarizeRun(run, options) {
   fillDurationFallbacks(events, byTurn);
 
   const model = run.model;
+  for (const turnInfo of byTurn.values()) {
+    turnInfo.usage = attributeTurnUsage(turnInfo, model);
+  }
   const byPa = new Map();
   const turnInfos = [...byTurn.values()].sort((a, b) =>
     (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0) ||

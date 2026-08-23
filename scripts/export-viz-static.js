@@ -1086,7 +1086,8 @@ export async function main(argv = process.argv.slice(2)) {
     console.error("reusing unchanged comparison");
   } else if (options.compare) {
     const canUpdateIncrementally = priorComparison &&
-      previousManifest?.source?.through === options.through;
+      previousManifest?.source?.through === options.through &&
+      previousManifest?.source?.implementationFingerprint === implementation;
     const comparisonRuns = canUpdateIncrementally
       ? preparedRuns.filter((prepared) => !prepared.reusable).map((prepared) => prepared.run)
       : runs;
