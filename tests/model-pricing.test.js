@@ -108,3 +108,60 @@ test("shape usage preserves child pricing in the aggregate and turn", () => {
     ["gpt-5.6-luna", "gpt-5.6-sol"],
   );
 });
+
+test("shape usage prices mixed root phase agents with their own models", () => {
+  const fableUsage = {
+    input_tokens: 1000,
+    cached_input_tokens: 500,
+    output_tokens: 100,
+    total_tokens: 1100,
+  };
+  const lunaUsage = {
+    input_tokens: 1000,
+    cached_input_tokens: 500,
+    output_tokens: 100,
+    total_tokens: 1100,
+  };
+  const aggregate = pricing.addUsage(fableUsage, lunaUsage);
+  const shapeUsage = {
+    runCount: 1,
+    usage: aggregate,
+    runs: [{
+      threadIds: ["fable-root", "luna-root"],
+      threadUsages: [
+        { threadId: "fable-root", usage: fableUsage },
+        { threadId: "luna-root", usage: lunaUsage },
+      ],
+      turnUsages: [
+        { turnNumber: 1, usage: fableUsage },
+        { turnNumber: 2, usage: lunaUsage },
+      ],
+      usage: aggregate,
+    }],
+  };
+  const phaseStatus = (threadId, turnNumber, provider, model) => ({
+    eventType: "ralph.phase-status",
+    threadId,
+    turnNumber,
+    event: {
+      agentProfile: { provider, model, reasoningEffort: "max" },
+    },
+  });
+  const events = [
+    phaseStatus("fable-root", 1, "claude", "claude-fable-5"),
+    phaseStatus("luna-root", 2, "codex", "gpt-5.6-luna"),
+  ];
+
+  const priced = attributeShapeUsageModels(shapeUsage, events, "claude-fable-5");
+
+  assert.ok(Math.abs(priced.usage.cost_usd - 0.01073) < 1e-12);
+  assert.deepEqual(
+    priced.usage.model_usage.map(({ model, cost_usd }) => ({ model, cost_usd })),
+    [
+      { model: "claude-fable-5", cost_usd: 0.0105 },
+      { model: "gpt-5.6-luna", cost_usd: 0.00023 },
+    ],
+  );
+  assert.equal(priced.runs[0].turnUsages[0].usage.cost_usd, 0.0105);
+  assert.equal(priced.runs[0].turnUsages[1].usage.cost_usd, 0.00023);
+});

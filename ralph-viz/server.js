@@ -1649,6 +1649,12 @@ function usageThreadAttribution(events, rootModel = null) {
     const threadId = eventThreadId(record);
     if (threadId) {
       const meta = ensure(threadId);
+      const phaseAgent = record.eventType === "ralph.phase-status"
+        ? record.event?.agentProfile
+        : null;
+      if (typeof phaseAgent?.model === "string" && phaseAgent.model) {
+        meta.model = phaseAgent.model;
+      }
       if (Number.isInteger(turn) && turn > 0) {
         meta.turnCounts.set(turn, (meta.turnCounts.get(turn) ?? 0) + 1);
       }
