@@ -19,6 +19,7 @@ const SCRIPT_FILE = fileURLToPath(import.meta.url);
 
 const MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
+  [/(\b|-)fable(?:[- .]?5[- .]?1)(\b|-)/, "claude-fable-5-1"],
   [/(\b|-)fable(\b|-)/, "claude-fable-5"],
   [/(\b|-)haiku(\b|-)/, "claude-haiku-4-5"],
 ];

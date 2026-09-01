@@ -9,6 +9,18 @@ import {
 
 const pricing = globalThis.RALPH_MODEL_PRICING;
 
+test("Fable 5.1 uses its reduced cache-read price without repricing Fable 5", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 750_000,
+    output_tokens: 1_000_000,
+    total_tokens: 2_000_000,
+  };
+
+  assert.equal(pricing.estimateCost(usage, "claude-fable-5-1"), 52.6875);
+  assert.equal(pricing.estimateCost(usage, "claude-fable-5"), 53.25);
+});
+
 test("mixed-model usage is priced before aggregation", () => {
   const sol = pricing.attributeUsage({
     input_tokens: 2_546_390,
