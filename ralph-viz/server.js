@@ -48,7 +48,7 @@ const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 26;
+const RUN_USAGE_CACHE_VERSION = 27;
 const COMPARE_PA_COSTS_CACHE_VERSION = 2;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
@@ -1366,10 +1366,8 @@ async function extendRunUsageSummaryFromEvents(summary, filePath, events, usageM
   let unthreadedUsage = summary.unthreadedUsage;
   if (usageMode !== "skip") {
     const tokenUsage = usageFromTokenEventsByThread(events);
-    for (const entry of tokenUsage.threadUsages) {
-      threadUsageById.set(entry.threadId, addUsage(threadUsageById.get(entry.threadId), entry.usage));
-      mergedThreadIds.add(entry.threadId);
-    }
+    mergeCumulativeThreadUsageEntries(threadUsageById, tokenUsage.threadUsages);
+    for (const entry of tokenUsage.threadUsages) mergedThreadIds.add(entry.threadId);
     if (hasTokenUsage(tokenUsage.unthreadedUsage)) {
       unthreadedUsage = addUsage(unthreadedUsage, tokenUsage.unthreadedUsage);
     }
@@ -1612,28 +1610,52 @@ export function attributeShapeUsageModels(shapeUsage, events, rootModel = null) 
       attributedRunThreads = addUsage(attributedRunThreads, unthreadedUsage);
       attributedShapeThreads = addUsage(attributedShapeThreads, unthreadedUsage);
     }
-    const turnUsages = (run.turnUsages ?? []).map((entry) => ({
-      ...entry,
-      usage: pricedUsageCoveringAggregate(
+    let attributedTurnTotal = null;
+    const turnUsages = (run.turnUsages ?? []).map((entry) => {
+      const turnModel = usageRootModelForTurn(threadMeta, entry.turnNumber, rootModel);
+      const usage = pricedUsageCoveringAggregate(
         entry.usage,
         attributedByTurn.get(entry.turnNumber),
-        rootModel,
+        turnModel,
         attributedByTurn.has(entry.turnNumber),
-      ),
-    }));
+      );
+      attributedTurnTotal = addUsage(attributedTurnTotal, usage);
+      return { ...entry, usage };
+    });
+    const attributedRunUsage = hasTokenUsage(attributedTurnTotal)
+      ? attributedTurnTotal
+      : attributedRunThreads;
     return {
       ...run,
       threadUsages,
       unthreadedUsage,
       turnUsages,
-      usage: pricedUsageCoveringAggregate(run.usage, attributedRunThreads, rootModel, true),
+      usage: pricedUsageCoveringAggregate(run.usage, attributedRunUsage, rootModel, true),
     };
   });
+  let attributedRunTotal = null;
+  for (const run of runs) {
+    attributedRunTotal = addUsage(attributedRunTotal, run.usage);
+  }
   return {
     ...shapeUsage,
     runs,
-    usage: pricedUsageCoveringAggregate(shapeUsage.usage, attributedShapeThreads, rootModel, true),
+    usage: pricedUsageCoveringAggregate(
+      shapeUsage.usage,
+      hasTokenUsage(attributedRunTotal) ? attributedRunTotal : attributedShapeThreads,
+      rootModel,
+      true,
+    ),
   };
+}
+
+function usageRootModelForTurn(threadMeta, turnNumber, fallbackModel) {
+  for (const meta of threadMeta.values()) {
+    if (!meta.parentThreadId && dominantUsageThreadTurn(meta) === turnNumber && meta.model) {
+      return meta.model;
+    }
+  }
+  return fallbackModel;
 }
 
 function usageThreadAttribution(events, rootModel = null) {
@@ -1692,8 +1714,19 @@ function dominantUsageThreadTurn(meta) {
 function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = null, preferAttributed = false) {
   const normalizedAggregate = normalizeUsage(aggregate);
   let normalizedAttributed = normalizeUsage(attributed);
-  if (preferAttributed && hasTokenUsage(normalizedAttributed)) {
-    return normalizedAttributed;
+  if (
+    preferAttributed &&
+    hasTokenUsage(normalizedAggregate) &&
+    usageMagnitude(normalizedAttributed) > usageMagnitude(normalizedAggregate)
+  ) {
+    normalizedAttributed = null;
+  }
+  if (
+    preferAttributed &&
+    hasTokenUsage(normalizedAttributed) &&
+    (!hasTokenUsage(normalizedAggregate) || usageMagnitude(normalizedAttributed) <= usageMagnitude(normalizedAggregate))
+  ) {
+    return usageWithProviderCost(normalizedAttributed, normalizedAggregate);
   }
   const embedded = usageFromModelComponents(normalizedAggregate);
   if (hasTokenUsage(embedded)) {
@@ -1711,6 +1744,24 @@ function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = nul
     normalizedAttributed,
     MODEL_PRICING.attributeUsage(remainder, fallbackModel),
   );
+}
+
+function usageWithProviderCost(attributed, aggregate) {
+  const normalizedAttributed = normalizeUsage(attributed);
+  const normalizedAggregate = normalizeUsage(aggregate);
+  if (
+    !(normalizedAggregate?.cost_usd > 0) ||
+    !sameTokenUsage(normalizedAttributed, normalizedAggregate) ||
+    normalizedAttributed?.model_usage?.length !== 1
+  ) {
+    return normalizedAttributed;
+  }
+  const [component] = normalizedAttributed.model_usage;
+  return {
+    ...normalizedAttributed,
+    cost_usd: normalizedAggregate.cost_usd,
+    model_usage: [{ ...component, cost_usd: normalizedAggregate.cost_usd }],
+  };
 }
 
 function usageFromModelComponents(usage) {
@@ -2028,9 +2079,7 @@ function extendRunLogUsageSummaryFromEvents(summary, events, usageMode) {
 
   const tokenUsage = usageFromTokenEventsByThread(events);
   const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
-  for (const entry of tokenUsage.threadUsages) {
-    threadUsageById.set(entry.threadId, addUsage(threadUsageById.get(entry.threadId), entry.usage));
-  }
+  mergeCumulativeThreadUsageEntries(threadUsageById, tokenUsage.threadUsages);
   summary.threadUsages = [...threadUsageById.entries()]
     .filter(([, usage]) => hasTokenUsage(usage))
     .sort((left, right) => left[0].localeCompare(right[0]))
@@ -2039,6 +2088,17 @@ function extendRunLogUsageSummaryFromEvents(summary, events, usageMode) {
     summary.unthreadedUsage = addUsage(summary.unthreadedUsage, tokenUsage.unthreadedUsage);
   }
   summary.turnUsages = mergeTurnUsageEntriesMax(summary.turnUsages, turnUsageEntriesFromEvents(events));
+}
+
+export function mergeCumulativeThreadUsageEntries(byThread, currentEntries) {
+  for (const entry of currentEntries ?? []) {
+    if (!entry?.threadId || !hasTokenUsage(entry.usage)) continue;
+    // token_count is cumulative within a provider thread. An incremental log
+    // fragment starts with the current counter, so adding it to the cached
+    // counter makes every refresh count the same tokens again.
+    byThread.set(entry.threadId, normalizeUsage(entry.usage));
+  }
+  return byThread;
 }
 
 function applyRunUsageSummaryToShape(summary, seenThreads) {
@@ -7475,8 +7535,12 @@ async function readRunComparison(rawId, runRef, force = false) {
 }
 
 async function appBuildId() {
-  const stats = await Promise.all(VIEWER_ASSET_NAMES.map(async (file) => {
-    const stat = await fs.stat(path.join(SPA_DIR, file));
+  const files = [
+    ...VIEWER_ASSET_NAMES.map((file) => path.join(SPA_DIR, file)),
+    SERVER_FILE,
+  ];
+  const stats = await Promise.all(files.map(async (file) => {
+    const stat = await fs.stat(file);
     return `${file}:${stat.size}:${stat.mtimeMs}`;
   }));
   const key = stats.join("|");

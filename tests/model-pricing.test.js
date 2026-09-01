@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import "../ralph-viz/model-pricing.js";
-import { attributeShapeUsageModels } from "../ralph-viz/server.js";
+import {
+  attributeShapeUsageModels,
+  mergeCumulativeThreadUsageEntries,
+} from "../ralph-viz/server.js";
 
 const pricing = globalThis.RALPH_MODEL_PRICING;
 
@@ -129,11 +132,11 @@ test("shape usage prices mixed root phase agents with their own models", () => {
     runs: [{
       threadIds: ["fable-root", "luna-root"],
       threadUsages: [
-        { threadId: "fable-root", usage: fableUsage },
+        { threadId: "fable-root", usage: { ...fableUsage, input_tokens: 5000, total_tokens: 5100 } },
         { threadId: "luna-root", usage: lunaUsage },
       ],
       turnUsages: [
-        { turnNumber: 1, usage: fableUsage },
+        { turnNumber: 1, usage: { ...fableUsage, total_cost_usd: 0.01234 } },
         { turnNumber: 2, usage: lunaUsage },
       ],
       usage: aggregate,
@@ -154,14 +157,34 @@ test("shape usage prices mixed root phase agents with their own models", () => {
 
   const priced = attributeShapeUsageModels(shapeUsage, events, "claude-fable-5");
 
-  assert.ok(Math.abs(priced.usage.cost_usd - 0.01073) < 1e-12);
+  assert.ok(Math.abs(priced.usage.cost_usd - 0.01257) < 1e-12);
   assert.deepEqual(
     priced.usage.model_usage.map(({ model, cost_usd }) => ({ model, cost_usd })),
     [
-      { model: "claude-fable-5", cost_usd: 0.0105 },
+      { model: "claude-fable-5", cost_usd: 0.01234 },
       { model: "gpt-5.6-luna", cost_usd: 0.00023 },
     ],
   );
-  assert.equal(priced.runs[0].turnUsages[0].usage.cost_usd, 0.0105);
+  assert.equal(priced.runs[0].turnUsages[0].usage.cost_usd, 0.01234);
   assert.equal(priced.runs[0].turnUsages[1].usage.cost_usd, 0.00023);
+});
+
+test("incremental cumulative thread usage replaces the cached counter", () => {
+  const byThread = new Map([["thread", {
+    input_tokens: 1000,
+    output_tokens: 100,
+    total_tokens: 1100,
+  }]]);
+
+  mergeCumulativeThreadUsageEntries(byThread, [{
+    threadId: "thread",
+    usage: {
+      input_tokens: 1200,
+      output_tokens: 120,
+      total_tokens: 1320,
+    },
+  }]);
+
+  assert.equal(byThread.get("thread").input_tokens, 1200);
+  assert.equal(byThread.get("thread").total_tokens, 1320);
 });
