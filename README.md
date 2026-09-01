@@ -263,12 +263,22 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   `checks` (defaults to all checks), optional `promptTemplate` (defaults to the
   phase name), optional `goalTemplate` (defaults to `<phase>-goal`), optional
   `promptTemplates` and `goalTemplates` maps keyed by PA stage, and optional
-  `runWhenChecksPass`. If omitted, Ralph uses one `default` phase that matches
-  the old behavior. A phase with `runWhenChecksPass: true` sends the agent one
-  turn even when checks already pass, which is useful for audit/cleanup phases.
+  `runWhenChecksPass`. A phase can also set `agent` to a provider profile such
+  as `{ "provider": "codex", "model": "gpt-5.6-luna",
+  "reasoningEffort": "max" }`; omitted fields inherit the run defaults (a
+  provider change without a model uses that provider's default model). Ralph
+  always starts a fresh provider thread when the resolved phase profile changes,
+  even when `freshThreadPerTurn` is false. If phases are omitted, Ralph uses one
+  `default` phase that matches the old behavior. A phase with
+  `runWhenChecksPass: true` sends the agent one turn even when checks already
+  pass, which is useful for planning, audit, and cleanup phases.
   `checkpointOnRequiredChecks` can accept a partial checkpoint when required
   checks pass but the primary check is still incomplete. Set `checkpointPhase`
   to send that checkpoint through a named audit/review phase first. A
+  `checkpointPhaseEvery` value greater than one makes that review sparse: Ralph
+  persists accepted checkpoints for the current phase/stage/subset and enters
+  the review phase only after that many checkpoints. Its default is `1`, which
+  preserves the original review-after-every-checkpoint behavior. A
   checkpoint phase can set `checkpointOnly: true` so normal phase advancement
   skips it, and `returnPhaseOnIncompletePrimary` to return to implementation
   after the checkpoint audit unless the primary check has become complete.

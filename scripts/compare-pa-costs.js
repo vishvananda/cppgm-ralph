@@ -390,6 +390,9 @@ function buildTurnMeta(events) {
         stage: null,
         phase: null,
         subset: null,
+        agentProvider: null,
+        agentModel: null,
+        agentReasoningEffort: null,
         usage: emptyUsage(),
         durationMs: 0,
         activeDurationMs: 0,
@@ -419,7 +422,7 @@ function buildTurnMeta(events) {
   for (const attempt of attempts) {
     ensure(attempt);
   }
-  const set = (event, fields) => {
+  const set = (event, fields, { fillOnly = false } = {}) => {
     const turn = event.turnNumber;
     if (!Number.isInteger(turn) || turn <= 0) {
       return;
@@ -430,7 +433,7 @@ function buildTurnMeta(events) {
       return;
     }
     for (const [key, value] of Object.entries(fields)) {
-      if (value != null && value !== "") {
+      if (value != null && value !== "" && (!fillOnly || target[key] == null)) {
         target[key] = value;
       }
     }
@@ -443,10 +446,14 @@ function buildTurnMeta(events) {
     }
     if (event.eventType === "ralph.phase-status") {
       const status = event.event?.phaseStatus ?? {};
+      const agent = event.event?.agentProfile ?? {};
       const fields = {
         stage: status.stage,
         phase: status.phase,
         subset: status.subset,
+        agentProvider: agent.provider,
+        agentModel: agent.model,
+        agentReasoningEffort: agent.reasoningEffort,
       };
       if (typeof status.allRequiredPassed === "boolean") {
         fields.phaseStatusComplete = status.allRequiredPassed;
@@ -459,10 +466,10 @@ function buildTurnMeta(events) {
       set(event, fields);
     } else if (event.eventType === "ralph.prompt") {
       const prompt = String(event.event?.prompt ?? "");
-      set(event, inferPromptTarget(prompt));
+      set(event, inferPromptTarget(prompt), { fillOnly: true });
     } else if (event.eventType === "ralph.goal") {
       const objective = String(event.event?.goal?.objective ?? "");
-      set(event, inferGoalTarget(objective));
+      set(event, inferGoalTarget(objective), { fillOnly: true });
     }
   }
 
@@ -961,8 +968,9 @@ function usageMagnitude(usage) {
 }
 
 function attributeTurnUsage(turnInfo, rootModel) {
+  const turnModel = turnInfo.agentModel ?? rootModel;
   let usage = hasUsage(turnInfo.usage)
-    ? MODEL_PRICING.attributeUsage(turnInfo.usage, rootModel)
+    ? MODEL_PRICING.attributeUsage(turnInfo.usage, turnModel)
     : emptyUsage();
   for (const child of turnInfo.subagentUsages.values()) {
     usage = addUsage(usage, MODEL_PRICING.attributeUsage(child.usage, child.model));

@@ -28,6 +28,13 @@ import {
   updatePendingCheckpoint,
 } from "./checkpoint-progress.js";
 import {
+  checkpointReviewDue,
+  checkpointReviewStateForTarget,
+  markCheckpointReviewed,
+  normalizeCheckpointReviewState,
+  recordAcceptedCheckpoint,
+} from "./checkpoint-review.js";
+import {
   clearPersistedLimitWait,
   parseCodexUsageLimitResetAt,
   readPersistedLimitWait,
@@ -215,6 +222,62 @@ let AUTO_TEST_SUBSETS = new Map();
 const ACTIVE_CHILD_PROCESSES = new Set();
 let shutdownInProgress = false;
 
+function defaultModelForProvider(provider) {
+  if (provider === "claude") {
+    return DEFAULT_CONFIG.claudeDefaultModel;
+  }
+  if (provider === "antigravity") {
+    return DEFAULT_CONFIG.antigravityDefaultModel;
+  }
+  return DEFAULT_CONFIG.model;
+}
+
+function resolvePhaseAgentProfile(phase) {
+  const override = phase?.agent ?? {};
+  const provider = override.provider ?? CONFIG.provider;
+  const model = override.model ??
+    (provider === CONFIG.provider ? CONFIG.model : defaultModelForProvider(provider));
+  const reasoningEffort = override.reasoningEffort ?? CONFIG.reasoningEffort;
+  return { provider, model, reasoningEffort };
+}
+
+function normalizeAgentProfileState(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const provider = typeof value.provider === "string" ? value.provider : null;
+  const model = typeof value.model === "string" ? value.model : null;
+  const reasoningEffort = typeof value.reasoningEffort === "string"
+    ? value.reasoningEffort
+    : null;
+  return provider && model ? { provider, model, reasoningEffort } : null;
+}
+
+function sameAgentProfile(left, right) {
+  return Boolean(left && right &&
+    left.provider === right.provider &&
+    left.model === right.model &&
+    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null));
+}
+
+function buildThreadOptions(agentProfile) {
+  return {
+    workingDirectory: CONFIG.workdir,
+    sandboxMode: CONFIG.sandboxMode,
+    approvalPolicy: CONFIG.approvalPolicy,
+    networkAccessEnabled: CONFIG.networkAccessEnabled,
+    webSearchEnabled: CONFIG.webSearchEnabled,
+    ...(agentProfile.model ? { model: agentProfile.model } : {}),
+    ...(agentProfile.reasoningEffort
+      ? { modelReasoningEffort: agentProfile.reasoningEffort }
+      : {}),
+    ...(CONFIG.additionalDirectories.length > 0
+      ? { additionalDirectories: CONFIG.additionalDirectories }
+      : {}),
+    claudeCompactOnIncompleteGoal: CONFIG.claudeCompactOnIncompleteGoal,
+  };
+}
+
 async function main() {
   installProcessSignalHandlers();
   CONFIG = await loadConfig();
@@ -229,7 +292,11 @@ async function main() {
   await fs.mkdir(CHECK_LOG_DIR_PATH, { recursive: true });
   await fs.mkdir(EVENTS_DIR_PATH, { recursive: true });
   const state = await loadState();
-  const persistedLimitResume = await handlePersistedProviderLimitWait(state);
+  const startupAgentProfile = resolvePhaseAgentProfile(resolveActivePhase(state));
+  const persistedLimitResume = await handlePersistedProviderLimitWait(
+    state,
+    startupAgentProfile.provider,
+  );
   const startingFreshRun =
     !state.threadId &&
     state.turnsCompleted === 0 &&
@@ -269,7 +336,10 @@ async function main() {
       `claudeGoalCompaction=${CONFIG.claudeCompactOnIncompleteGoal ? "on" : "off"} ` +
       `freshThreadPerTurn=${CONFIG.freshThreadPerTurn ? "on" : "off"} ` +
       `autoCommitOnPassingChecks=${CONFIG.autoCommitOnPassingChecks ? "on" : "off"} ` +
-      `phases=${CONFIG.phases.map((phase) => phase.name).join(",")}`,
+      `phases=${CONFIG.phases.map((phase) => {
+        const agent = resolvePhaseAgentProfile(phase);
+        return `${phase.name}:${agent.provider}/${agent.model}/${agent.reasoningEffort}`;
+      }).join(",")}`,
   );
   if (CONFIG.resourceLimits?.enabled) {
     const active = resourceLimitsEnabled();
@@ -282,22 +352,6 @@ async function main() {
   } else {
     log("Resource limits: disabled");
   }
-  const threadOptions = {
-    workingDirectory: CONFIG.workdir,
-    sandboxMode: CONFIG.sandboxMode,
-    approvalPolicy: CONFIG.approvalPolicy,
-    networkAccessEnabled: CONFIG.networkAccessEnabled,
-    webSearchEnabled: CONFIG.webSearchEnabled,
-    ...(CONFIG.model ? { model: CONFIG.model } : {}),
-    ...(CONFIG.reasoningEffort
-      ? { modelReasoningEffort: CONFIG.reasoningEffort }
-      : {}),
-    ...(CONFIG.additionalDirectories.length > 0
-      ? { additionalDirectories: CONFIG.additionalDirectories }
-      : {}),
-    claudeCompactOnIncompleteGoal: CONFIG.claudeCompactOnIncompleteGoal,
-  };
-
   const configuredThreadId = process.env.RALPH_THREAD_ID ?? null;
   // --continue resumes the most recent provider thread for the next turn only;
   // afterwards the configured freshThreadPerTurn behavior applies again.
@@ -319,9 +373,9 @@ async function main() {
     log("--skip-checks: using --reuse-last-checks behavior");
   }
   let activeThreadId = configuredThreadId ?? continueThreadId ?? state.threadId ?? null;
+  let activeThreadProfile = normalizeAgentProfileState(state.threadAgent);
   let backend = null;
   let thread = null;
-  const providerLabel = formatProviderLabel(CONFIG.provider);
 
   // With --continue, the resumed attempt re-enters the interrupted turn, so
   // keep the state's completed-turn count instead of bumping past the partial
@@ -346,6 +400,23 @@ async function main() {
       return;
     }
     const phase = resolveActivePhase(state);
+    const agentProfile = resolvePhaseAgentProfile(phase);
+    const threadOptions = buildThreadOptions(agentProfile);
+    const providerLabel = formatProviderLabel(agentProfile.provider);
+    if (activeThreadId && activeThreadProfile &&
+        !sameAgentProfile(activeThreadProfile, agentProfile)) {
+      log(
+        `Agent profile changed from ${activeThreadProfile.provider}/${activeThreadProfile.model}/` +
+          `${activeThreadProfile.reasoningEffort ?? "default"} to ` +
+          `${agentProfile.provider}/${agentProfile.model}/${agentProfile.reasoningEffort ?? "default"}; ` +
+          `starting a fresh ${providerLabel} thread.`,
+      );
+      activeThreadId = null;
+      activeThreadProfile = null;
+      thread = null;
+      backend = null;
+      continueThreadId = null;
+    }
     const phaseStatus = reuseLastChecksForNextTurn
       ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId })
       : await runPhaseChecks(state, phase, phaseCheckReuse);
@@ -370,10 +441,18 @@ async function main() {
     }
     state.pendingCheckpoint = pendingCheckpoint;
     phaseStatus.pendingCheckpoint = pendingCheckpoint;
+    phaseStatus.checkpointReview = checkpointReviewStateForTarget(state.checkpointReview, {
+      phase: phase.name,
+      stage: phaseStatus.stage,
+      subset: phaseStatus.subset,
+    }) ?? (phase.checkpointOnly
+      ? normalizeCheckpointReviewState(state.checkpointReview)
+      : null);
     if (phaseStatus.checksReusedFrom) {
       await appendRalphEventRecord(
         buildRalphPhaseStatusEventRecord({
           phaseStatus,
+          agentProfile,
           threadId: activeThreadId ?? state.threadId ?? null,
           turnNumber: turnNumber + 1,
           action: "checks-reused",
@@ -423,6 +502,7 @@ async function main() {
       await appendRalphEventRecord(
         buildRalphPhaseStatusEventRecord({
           phaseStatus,
+          agentProfile,
           threadId,
           turnNumber,
           action: "checked",
@@ -435,10 +515,20 @@ async function main() {
           turnNumber,
         }),
       );
-      await completeLoopGoalIfPresent(threadId, testStatus, turnNumber);
+      await completeLoopGoalIfPresent(threadId, testStatus, turnNumber, agentProfile);
       if (phase.checkpointOnRequiredChecks && !phasePrimaryCheckPassed(phaseStatus)) {
+        const checkpointReview = recordAcceptedCheckpoint({
+          checkpointReview: state.checkpointReview,
+          phase: phase.name,
+          stage: normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
+          subset: getStateActiveSubsetAfterTest(testStatus, state),
+          turnNumber,
+        });
+        state.checkpointReview = checkpointReview;
         const checkpointPhase = getPhaseByName(phase.checkpointPhase);
-        if (checkpointPhase && phaseAppliesToCurrentTarget(checkpointPhase, {
+        const reviewDue = checkpointPhase &&
+          checkpointReviewDue(checkpointReview, phase.checkpointPhaseEvery);
+        if (reviewDue && phaseAppliesToCurrentTarget(checkpointPhase, {
           activeStage: normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
           activeSubset: getStateActiveSubsetAfterTest(testStatus, state),
           lastTestStatus: testStatus,
@@ -446,6 +536,7 @@ async function main() {
           phaseCheckReuse = buildPhaseCheckReuse(phaseStatus, checkpointPhase);
           await saveState({
             threadId,
+            threadAgent: activeThreadProfile,
             eventLogPath: buildEventLogPath(threadId),
             turnsCompleted: turnNumber,
             lastExitCode: 0,
@@ -455,9 +546,11 @@ async function main() {
             activePhase: checkpointPhase.name,
             phaseAttempted: false,
             pendingCheckpoint: null,
+            checkpointReview,
             updatedAt: new Date().toISOString(),
           });
           state.threadId = threadId;
+          state.threadAgent = activeThreadProfile;
           state.lastExitCode = 0;
           state.lastTestStatus = testStatus;
           state.activeStage = normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus);
@@ -465,14 +558,17 @@ async function main() {
           state.activePhase = checkpointPhase.name;
           state.phaseAttempted = false;
           state.pendingCheckpoint = null;
+          state.checkpointReview = checkpointReview;
           log(
             `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
+              `${checkpointReview.acceptedSinceReview}/${phase.checkpointPhaseEvery} checkpoints accepted since review; ` +
               `advancing to checkpoint phase ${checkpointPhase.name}.`,
           );
           continue;
         }
         await saveState({
           threadId,
+          threadAgent: activeThreadProfile,
           eventLogPath: buildEventLogPath(threadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
@@ -482,9 +578,11 @@ async function main() {
           activePhase: phase.name,
           phaseAttempted: false,
           pendingCheckpoint: null,
+          checkpointReview,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
+        state.threadAgent = activeThreadProfile;
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
         state.activeStage = normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus);
@@ -492,16 +590,20 @@ async function main() {
         state.activePhase = phase.name;
         state.phaseAttempted = false;
         state.pendingCheckpoint = null;
+        state.checkpointReview = checkpointReview;
         log(
           `Phase ${phase.name} checkpoint accepted for ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
+            `${checkpointReview.acceptedSinceReview}/${phase.checkpointPhaseEvery} checkpoints accepted since review; ` +
             "full primary check is still incomplete, so the next turn will continue the same target.",
         );
         continue;
       }
       const returnPhase = getPhaseByName(phase.returnPhaseOnIncompletePrimary);
       if (returnPhase && !phasePrimaryCheckPassed(phaseStatus)) {
+        const checkpointReview = markCheckpointReviewed(state.checkpointReview);
         await saveState({
           threadId,
+          threadAgent: activeThreadProfile,
           eventLogPath: buildEventLogPath(threadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
@@ -511,9 +613,11 @@ async function main() {
           activePhase: returnPhase.name,
           phaseAttempted: false,
           pendingCheckpoint: null,
+          checkpointReview,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
+        state.threadAgent = activeThreadProfile;
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
         state.activeStage = getStateActiveStageAfterTest(testStatus);
@@ -521,6 +625,7 @@ async function main() {
         state.activePhase = returnPhase.name;
         state.phaseAttempted = false;
         state.pendingCheckpoint = null;
+        state.checkpointReview = checkpointReview;
         log(
           `Phase ${phase.name} completed for partial ${formatTargetLabel(state.activeStage, state.activeSubset)}; ` +
             `returning to phase ${returnPhase.name}.`,
@@ -532,6 +637,7 @@ async function main() {
         phaseCheckReuse = buildPhaseCheckReuse(phaseStatus, nextPhase);
         await saveState({
           threadId,
+          threadAgent: activeThreadProfile,
           eventLogPath: buildEventLogPath(threadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
@@ -541,9 +647,11 @@ async function main() {
           activePhase: nextPhase.name,
           phaseAttempted: false,
           pendingCheckpoint: null,
+          checkpointReview: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
+        state.threadAgent = activeThreadProfile;
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
         state.activeStage = getStateActiveStageAfterTest(testStatus);
@@ -551,6 +659,7 @@ async function main() {
         state.activePhase = nextPhase.name;
         state.phaseAttempted = false;
         state.pendingCheckpoint = null;
+        state.checkpointReview = null;
         log(`Phase ${phase.name} completed. Advancing to phase ${nextPhase.name}.`);
         continue;
       }
@@ -560,6 +669,7 @@ async function main() {
         const firstPhase = CONFIG.phases[0];
         await saveState({
           threadId,
+          threadAgent: activeThreadProfile,
           eventLogPath: buildEventLogPath(threadId),
           turnsCompleted: turnNumber,
           lastExitCode: 0,
@@ -569,9 +679,11 @@ async function main() {
           activePhase: firstPhase.name,
           phaseAttempted: false,
           pendingCheckpoint: null,
+          checkpointReview: null,
           updatedAt: new Date().toISOString(),
         });
         state.threadId = threadId;
+        state.threadAgent = activeThreadProfile;
         state.lastExitCode = 0;
         state.lastTestStatus = testStatus;
         state.activeStage = nextTarget.stage;
@@ -579,6 +691,7 @@ async function main() {
         state.activePhase = firstPhase.name;
         state.phaseAttempted = false;
         state.pendingCheckpoint = null;
+        state.checkpointReview = null;
         log(
           `Phase ${phase.name} completed for ${formatTargetLabel(testStatus.targetStage, testStatus.targetSubset)}. ` +
             `Advancing to ${formatTargetLabel(nextTarget.stage, nextTarget.subset)}.`,
@@ -588,6 +701,7 @@ async function main() {
 
       await saveState({
         threadId,
+        threadAgent: activeThreadProfile,
         eventLogPath: buildEventLogPath(threadId),
         turnsCompleted: turnNumber,
         lastExitCode: 0,
@@ -597,9 +711,11 @@ async function main() {
         activePhase: null,
         phaseAttempted: false,
         pendingCheckpoint: null,
+        checkpointReview: null,
         updatedAt: new Date().toISOString(),
       });
       state.threadId = threadId;
+      state.threadAgent = activeThreadProfile;
       state.lastExitCode = 0;
       state.lastTestStatus = testStatus;
       state.activeStage = null;
@@ -607,6 +723,7 @@ async function main() {
       state.activePhase = null;
       state.phaseAttempted = false;
       state.pendingCheckpoint = null;
+      state.checkpointReview = null;
       state.turnsCompleted = turnNumber;
       log(`All required checks passed for final phase ${phase.name}. Exiting.`);
       return;
@@ -631,6 +748,7 @@ async function main() {
         log(`Starting a fresh ${providerLabel} thread for this turn; previous thread was ${activeThreadId}`);
       }
       activeThreadId = null;
+      activeThreadProfile = null;
       thread = null;
     }
     const hadExistingThread = Boolean(activeThreadId);
@@ -650,8 +768,12 @@ async function main() {
         phase,
         phaseStatus,
         turnNumber: turnNumber + 1,
+        agentProfile,
       });
       activeThreadId = preparedGoal.threadId;
+      if (activeThreadId) {
+        activeThreadProfile = agentProfile;
+      }
       state.threadId = activeThreadId;
       loopGoalEventRecord = buildRalphGoalEventRecord({
         action: "set",
@@ -663,6 +785,7 @@ async function main() {
 
     const preTurnState = {
       threadId: activeThreadId,
+      threadAgent: activeThreadProfile,
       eventLogPath: buildEventLogPath(activeThreadId),
       turnsCompleted: turnNumber,
       lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
@@ -672,6 +795,7 @@ async function main() {
       activePhase: phase.name,
       phaseAttempted: state.phaseAttempted === true,
       pendingCheckpoint: state.pendingCheckpoint,
+      checkpointReview: state.checkpointReview,
       activeTurn: resumedTurnContext ?? {
         turnNumber: turnNumber + 1,
         phase: phase.name,
@@ -679,6 +803,7 @@ async function main() {
         subset: activeSubsetForTurn,
         startedClean: gitStatus.clean,
         cleanupOnly: cleanupOnlyTurn,
+        agent: agentProfile,
       },
       updatedAt: new Date().toISOString(),
     };
@@ -686,10 +811,11 @@ async function main() {
     Object.assign(state, preTurnState);
 
     if (!thread) {
-      backend = createAgentBackend();
+      backend = createAgentBackend(agentProfile.provider);
       thread = activeThreadId
         ? backend.resumeThread(activeThreadId, threadOptions)
         : backend.startThread(threadOptions);
+      activeThreadProfile = agentProfile;
       if (activeThreadId) {
         log(`Resuming ${providerLabel} thread ${activeThreadId}`);
       } else {
@@ -698,7 +824,7 @@ async function main() {
     }
 
     const loopGoal = loopGoalEventRecord?.event?.goal ?? null;
-    let turnPrompt = attachPortableGoalPrompt(prompt, loopGoal);
+    let turnPrompt = attachPortableGoalPrompt(prompt, loopGoal, agentProfile);
     if (pendingRecoveryNote) {
       turnPrompt = `${pendingRecoveryNote}\n\n${turnPrompt}`;
       pendingRecoveryNote = null;
@@ -721,6 +847,7 @@ async function main() {
           preTurnEventRecords: [
             buildRalphPhaseStatusEventRecord({
               phaseStatus,
+              agentProfile,
               threadId: thread.id ?? activeThreadId,
               turnNumber: turnNumber + 1,
               action: "turn-start",
@@ -734,10 +861,11 @@ async function main() {
           ],
           threadId: thread.id ?? activeThreadId,
           turnNumber: turnNumber + 1,
+          provider: agentProfile.provider,
         });
         break;
       } catch (error) {
-        if (isCodexUsageLimitError(error) && !shutdownInProgress) {
+        if (isCodexUsageLimitError(error, agentProfile.provider) && !shutdownInProgress) {
           providerLimitRetryAttempts += 1;
           const retryMax = codexLimitRetryMax();
           if (providerLimitRetryAttempts > retryMax) {
@@ -750,7 +878,7 @@ async function main() {
           const retryThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
           const limit = codexLimitWait(error);
           const pendingWait = await beginPersistedProviderLimitWait({
-            provider: CONFIG.provider,
+            provider: agentProfile.provider,
             threadId: retryThreadId,
             turnNumber: turnNumber + 1,
             waitMs: limit.waitMs,
@@ -765,7 +893,7 @@ async function main() {
               `(attempt ${providerLimitRetryAttempts}/${retryMax}).`,
           );
           await appendRalphEventRecord(buildRalphLimitWaitEventRecord({
-            provider: CONFIG.provider,
+            provider: agentProfile.provider,
             threadId: retryThreadId,
             turnNumber: turnNumber + 1,
             waitMs: limit.waitMs,
@@ -778,7 +906,7 @@ async function main() {
           await finishPersistedProviderLimitWait(pendingWait);
           activeThreadId = retryThreadId;
           thread = null;
-          backend = createAgentBackend();
+          backend = createAgentBackend(agentProfile.provider);
           thread = activeThreadId
             ? backend.resumeThread(activeThreadId, threadOptions)
             : backend.startThread(threadOptions);
@@ -790,7 +918,7 @@ async function main() {
           continue;
         }
 
-        if (isRecoverableCodexIncompleteTask(error) && !shutdownInProgress) {
+        if (isRecoverableCodexIncompleteTask(error, agentProfile.provider) && !shutdownInProgress) {
           codexIncompleteTaskRetryAttempts += 1;
           const retryMax = codexIncompleteTaskRetryMax();
           if (codexIncompleteTaskRetryAttempts > retryMax) {
@@ -813,7 +941,7 @@ async function main() {
               `(recovery ${codexIncompleteTaskRetryAttempts}/${retryMax}).`,
           );
           await appendRalphEventRecord(buildRalphAgentRecoveryEventRecord({
-            provider: CONFIG.provider,
+            provider: agentProfile.provider,
             threadId: retryThreadId,
             turnNumber: turnNumber + 1,
             attempt: codexIncompleteTaskRetryAttempts,
@@ -822,13 +950,13 @@ async function main() {
           }));
           activeThreadId = retryThreadId;
           thread = null;
-          backend = createAgentBackend();
+          backend = createAgentBackend(agentProfile.provider);
           thread = backend.resumeThread(activeThreadId, threadOptions);
           turnPrompt = buildCodexIncompleteTaskContinuationPrompt();
           continue;
         }
 
-        if (shouldRetryTransientProviderError(error) && !shutdownInProgress) {
+        if (shouldRetryTransientProviderError(error, agentProfile.provider) && !shutdownInProgress) {
           transientRetryAttempts += 1;
           const retryMax = transientProviderRetryMax();
           if (transientRetryAttempts > retryMax) {
@@ -846,7 +974,7 @@ async function main() {
               `${transientRetryAttempts}/${retryMax}.`,
           );
           await appendRalphEventRecord(buildRalphLimitWaitEventRecord({
-            provider: CONFIG.provider,
+            provider: agentProfile.provider,
             threadId: retryThreadId,
             turnNumber: turnNumber + 1,
             waitMs,
@@ -859,7 +987,7 @@ async function main() {
             CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId;
           activeThreadId = shouldStartFreshRetryThread ? null : retryThreadId;
           thread = null;
-          backend = createAgentBackend();
+          backend = createAgentBackend(agentProfile.provider);
           thread = activeThreadId
             ? backend.resumeThread(activeThreadId, threadOptions)
             : backend.startThread(threadOptions);
@@ -892,7 +1020,7 @@ async function main() {
               `without consuming the turn (recovery ${sigtermRecoveryAttempts}/${sigtermRecoveryMax()}).`,
           );
           await appendRalphEventRecord(buildRalphAgentRecoveryEventRecord({
-            provider: CONFIG.provider,
+            provider: agentProfile.provider,
             threadId: retryThreadId,
             turnNumber: turnNumber + 1,
             attempt: sigtermRecoveryAttempts,
@@ -901,7 +1029,7 @@ async function main() {
           }));
           activeThreadId = retryThreadId;
           thread = null;
-          backend = createAgentBackend();
+          backend = createAgentBackend(agentProfile.provider);
           thread = activeThreadId
             ? backend.resumeThread(activeThreadId, threadOptions)
             : backend.startThread(threadOptions);
@@ -941,12 +1069,14 @@ async function main() {
     }
     consecutiveOomRecoveries = 0;
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
+    activeThreadProfile = agentProfile;
     // --continue only applies to the first provider turn.
     continueThreadId = null;
 
     const phaseAttemptedAfterTurn = cleanupOnlyTurn ? state.phaseAttempted === true : true;
     await saveState({
       threadId: activeThreadId,
+      threadAgent: activeThreadProfile,
       eventLogPath: buildEventLogPath(activeThreadId),
       turnsCompleted: turnNumber + 1,
       lastExitCode: phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode,
@@ -956,9 +1086,11 @@ async function main() {
       activePhase: phase.name,
       phaseAttempted: phaseAttemptedAfterTurn,
       pendingCheckpoint: state.pendingCheckpoint,
+      checkpointReview: state.checkpointReview,
       updatedAt: new Date().toISOString(),
     });
     state.threadId = activeThreadId;
+    state.threadAgent = activeThreadProfile;
     state.lastExitCode = phaseStatus.allRequiredPassed ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode;
     state.lastTestStatus = testStatus;
     state.activeStage = activeStageForTurn;
@@ -966,6 +1098,7 @@ async function main() {
     state.activePhase = phase.name;
     state.phaseAttempted = phaseAttemptedAfterTurn;
     state.pendingCheckpoint = normalizePendingCheckpoint(state.pendingCheckpoint);
+    state.checkpointReview = normalizeCheckpointReviewState(state.checkpointReview);
     state.activeTurn = null;
     turnNumber += 1;
     state.turnsCompleted = turnNumber;
@@ -1028,8 +1161,8 @@ function buildCodexIncompleteTaskContinuationPrompt() {
   ].join(" ");
 }
 
-function isRecoverableCodexIncompleteTask(error) {
-  return CONFIG.provider === "codex" && error?.codexIncompleteTask === true;
+function isRecoverableCodexIncompleteTask(error, provider = CONFIG.provider) {
+  return provider === "codex" && error?.codexIncompleteTask === true;
 }
 
 function codexIncompleteTaskRetryMax() {
@@ -1048,19 +1181,19 @@ function sigtermRecoveryMax() {
     : 3;
 }
 
-function shouldRetryTransientProviderError(error) {
+function shouldRetryTransientProviderError(error, provider = CONFIG.provider) {
   const message = formatErrorMessage(error);
-  if (CONFIG.provider === "codex") {
+  if (provider === "codex") {
     return isCodexTransientProviderMessage(message);
   }
-  if (CONFIG.provider === "claude") {
+  if (provider === "claude") {
     return isClaudeTransientProviderMessage(message);
   }
   return false;
 }
 
-function isCodexUsageLimitError(error) {
-  if (CONFIG.provider !== "codex") {
+function isCodexUsageLimitError(error, provider = CONFIG.provider) {
+  if (provider !== "codex") {
     return false;
   }
   if (error?.codexUsageLimit === true) {
@@ -1471,6 +1604,12 @@ function buildBriefStateLines({ testStatus, gitStatus, phase = null, phaseStatus
   if (phaseStatus?.pendingCheckpoint) {
     lines.push(`- pending checkpoint: ${formatPendingCheckpoint(phaseStatus.pendingCheckpoint)}`);
   }
+  if (phaseStatus?.checkpointReview) {
+    lines.push(
+      `- accepted checkpoints since review: ${phaseStatus.checkpointReview.acceptedSinceReview} ` +
+        `(total ${phaseStatus.checkpointReview.acceptedTotal})`,
+    );
+  }
   return lines;
 }
 
@@ -1498,6 +1637,10 @@ function buildCurrentStateLines({
   );
   if (phase?.name) {
     lines.push(`- Current phase: \`${phase.name}\``);
+    const agent = resolvePhaseAgentProfile(phase);
+    lines.push(
+      `- Current agent: \`${agent.provider}/${agent.model}/${agent.reasoningEffort ?? "default"}\``,
+    );
   }
   if (testStatus?.targetStage) {
     lines.push(`- Current stage: \`${testStatus.targetStage}\``);
@@ -1538,6 +1681,12 @@ function buildCurrentStateLines({
   if (phaseStatus?.pendingCheckpoint) {
     lines.push(`Pending checkpoint: ${formatPendingCheckpoint(phaseStatus.pendingCheckpoint)}.`);
   }
+  if (phaseStatus?.checkpointReview) {
+    lines.push(
+      `Accepted checkpoints since review: ${phaseStatus.checkpointReview.acceptedSinceReview}; ` +
+        `total accepted for this target: ${phaseStatus.checkpointReview.acceptedTotal}.`,
+    );
+  }
   const firstBlockerLine = formatFirstBlockerLine(testStatus);
   if (firstBlockerLine) {
     lines.push(firstBlockerLine);
@@ -1569,17 +1718,18 @@ function normalizeRenderedPrompt(value) {
     .trim();
 }
 
-function attachPortableGoalPrompt(prompt, goal) {
+function attachPortableGoalPrompt(prompt, goal, agentProfile = null) {
   if (!goal) {
     return prompt;
   }
 
   const isPortableGoal = goal.provider === "ralph-portable";
-  if (CONFIG.provider === "codex" && !isPortableGoal) {
+  const provider = agentProfile?.provider ?? CONFIG.provider;
+  if (provider === "codex" && !isPortableGoal) {
     return prompt;
   }
 
-  if (CONFIG.provider === "claude") {
+  if (provider === "claude") {
     // Claude Code has goal mode built in, so the goal is delivered through the
     // native `/goal` command instead of prompt text. ClaudeThread sends
     // `/goal <objective>` as the turn message and carries this prompt as
@@ -1594,7 +1744,7 @@ function attachPortableGoalPrompt(prompt, goal) {
     "## Ralph Portable Goal",
     "",
     "This is the active Ralph loop goal. Treat it as mandatory state for this turn.",
-    CONFIG.provider === "codex"
+    provider === "codex"
       ? "Ralph will verify the external checks after this turn; keep working until the goal and prompt criteria are actually satisfied."
       : "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
     "",
@@ -3619,9 +3769,25 @@ async function getGitStatus(cwd) {
   };
 }
 
-async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
-  if (CONFIG.provider !== "codex") {
-    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
+async function prepareLoopGoalForTurn({
+  threadId,
+  testStatus,
+  gitStatus,
+  turnNumber,
+  phase,
+  phaseStatus,
+  agentProfile,
+}) {
+  if (agentProfile.provider !== "codex") {
+    return preparePortableLoopGoalForTurn({
+      threadId,
+      testStatus,
+      gitStatus,
+      turnNumber,
+      phase,
+      phaseStatus,
+      agentProfile,
+    });
   }
 
   try {
@@ -3629,7 +3795,10 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
       let activeThreadId = threadId;
       let startedThread = false;
       if (!activeThreadId) {
-        const startResponse = await client.request("thread/start", buildAppServerThreadStartParams());
+        const startResponse = await client.request(
+          "thread/start",
+          buildAppServerThreadStartParams(agentProfile),
+        );
         activeThreadId = startResponse?.thread?.id ?? null;
         if (!activeThreadId) {
           throw new Error(`thread/start did not return a thread id: ${JSON.stringify(startResponse)}`);
@@ -3658,16 +3827,29 @@ async function prepareLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNum
     });
   } catch (error) {
     log(`Failed to set Codex loop goal; using portable prompt goal: ${formatErrorMessage(error)}`);
-    return preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus });
+    return preparePortableLoopGoalForTurn({
+      threadId,
+      testStatus,
+      gitStatus,
+      turnNumber,
+      phase,
+      phaseStatus,
+      agentProfile,
+    });
   }
 }
 
-async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
+async function completeLoopGoalIfPresent(
+  threadId,
+  testStatus,
+  turnNumber,
+  agentProfile,
+) {
   if (!CONFIG.loopGoalsEnabled || !threadId) {
     return;
   }
 
-  if (CONFIG.provider !== "codex") {
+  if (agentProfile.provider !== "codex") {
     await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
     return;
   }
@@ -3699,14 +3881,22 @@ async function completeLoopGoalIfPresent(threadId, testStatus, turnNumber) {
   await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
 }
 
-async function preparePortableLoopGoalForTurn({ threadId, testStatus, gitStatus, turnNumber, phase, phaseStatus }) {
+async function preparePortableLoopGoalForTurn({
+  threadId,
+  testStatus,
+  gitStatus,
+  turnNumber,
+  phase,
+  phaseStatus,
+  agentProfile,
+}) {
   // These providers mint their own conversation/session ids on the first turn,
   // so leave the thread id unset until the provider reports it.
   const activeThreadId =
     threadId ??
-    (CONFIG.provider === "antigravity" || CONFIG.provider === "claude" || CONFIG.provider === "codex"
+    (["antigravity", "claude", "codex"].includes(agentProfile.provider)
       ? null
-      : generateProviderThreadId(CONFIG.provider));
+      : generateProviderThreadId(agentProfile.provider));
   const startedThread = !threadId;
   const now = new Date().toISOString();
   const goal = {
@@ -4796,13 +4986,13 @@ function truncateGoalObjective(objective) {
   return `${chars.slice(0, maxChars - 80).join("")}\n[goal objective truncated by Ralph]`;
 }
 
-function buildAppServerThreadStartParams() {
+function buildAppServerThreadStartParams(agentProfile = resolvePhaseAgentProfile(CONFIG.phases[0])) {
   const config = {
     features: { goals: true },
   };
 
-  if (CONFIG.reasoningEffort) {
-    config.model_reasoning_effort = CONFIG.reasoningEffort;
+  if (agentProfile.reasoningEffort) {
+    config.model_reasoning_effort = agentProfile.reasoningEffort;
   }
   if (CONFIG.networkAccessEnabled != null) {
     config.sandbox_workspace_write = { network_access: CONFIG.networkAccessEnabled };
@@ -4812,7 +5002,7 @@ function buildAppServerThreadStartParams() {
   }
 
   return {
-    ...(CONFIG.model ? { model: CONFIG.model } : {}),
+    ...(agentProfile.model ? { model: agentProfile.model } : {}),
     cwd: CONFIG.workdir,
     approvalPolicy: CONFIG.approvalPolicy,
     sandbox: CONFIG.sandboxMode,
@@ -4829,17 +5019,17 @@ function buildCodexOptions() {
   };
 }
 
-function createAgentBackend() {
-  if (CONFIG.provider === "codex") {
+function createAgentBackend(provider = CONFIG.provider) {
+  if (provider === "codex") {
     return new Codex(buildCodexOptions());
   }
-  if (CONFIG.provider === "antigravity") {
+  if (provider === "antigravity") {
     return new Antigravity(buildAntigravityOptions());
   }
-  if (CONFIG.provider === "claude") {
+  if (provider === "claude") {
     return new Claude(buildClaudeOptions());
   }
-  throw new Error(`Unsupported provider ${CONFIG.provider}`);
+  throw new Error(`Unsupported provider ${provider}`);
 }
 
 function buildClaudeOptions() {
@@ -5725,7 +5915,7 @@ async function finishPersistedProviderLimitWait(wait) {
   await clearPersistedLimitWait(LIMIT_WAIT_PATH, wait?.id ?? null);
 }
 
-async function handlePersistedProviderLimitWait(state) {
+async function handlePersistedProviderLimitWait(state, activeProvider = CONFIG.provider) {
   const wait = await readPersistedLimitWait(LIMIT_WAIT_PATH);
   if (!wait) {
     return null;
@@ -5735,15 +5925,15 @@ async function handlePersistedProviderLimitWait(state) {
     (Number.isInteger(state.turnsCompleted) ? state.turnsCompleted + 1 : null);
   const ignoreWait = process.argv.includes("--ignore-limit-wait") ||
     parseBoolean(process.env.RALPH_IGNORE_LIMIT_WAIT, false);
-  const providerChanged = Boolean(wait.provider && wait.provider !== CONFIG.provider);
+  const providerChanged = Boolean(wait.provider && wait.provider !== activeProvider);
   if (ignoreWait || providerChanged) {
     const reason = providerChanged ? "provider_changed" : "operator_override";
     log(
-      `${providerChanged ? `Persisted ${wait.provider} limit wait does not apply to ${CONFIG.provider}` :
+      `${providerChanged ? `Persisted ${wait.provider} limit wait does not apply to ${activeProvider}` :
         "Ignoring persisted provider limit wait by request"}; retrying immediately.`,
     );
     await appendRalphEventRecord(buildRalphLimitWaitBypassEventRecord({
-      provider: wait.provider ?? CONFIG.provider,
+      provider: wait.provider ?? activeProvider,
       threadId: wait.threadId ?? state.threadId ?? null,
       turnNumber,
       reason,
@@ -5760,13 +5950,13 @@ async function handlePersistedProviderLimitWait(state) {
   const remainingMs = Math.max(0, Date.parse(wait.resumeAt) - Date.now());
   if (remainingMs > 0) {
     log(
-      `${formatProviderLabel(wait.provider ?? CONFIG.provider)} usage limit wait remains active until ` +
+      `${formatProviderLabel(wait.provider ?? activeProvider)} usage limit wait remains active until ` +
         `${wait.resumeAt}; sleeping ${formatDurationForLog(remainingMs)} before resuming the interrupted turn.`,
     );
     await sleepMs(remainingMs);
   } else {
     log(
-      `Persisted ${formatProviderLabel(wait.provider ?? CONFIG.provider)} usage limit has expired; ` +
+      `Persisted ${formatProviderLabel(wait.provider ?? activeProvider)} usage limit has expired; ` +
         "resuming the interrupted turn.",
     );
   }
@@ -6880,6 +7070,7 @@ async function collectStreamedTurn(events, options = {}) {
   const prompt = typeof options.prompt === "string" ? options.prompt : "";
   let threadId = options.threadId ?? null;
   const turnNumber = options.turnNumber ?? null;
+  const provider = options.provider ?? CONFIG.provider;
   let eventLogPath = buildEventLogPath(threadId);
   const pendingEventRecords = Array.isArray(options.preTurnEventRecords)
     ? options.preTurnEventRecords.filter(Boolean)
@@ -6913,7 +7104,7 @@ async function collectStreamedTurn(events, options = {}) {
       pendingEventRecords.push(eventRecord);
     }
 
-    log(`${formatProviderLabel(CONFIG.provider)} event: ${summarizeEvent(event)}`);
+    log(`${formatProviderLabel(provider)} event: ${summarizeEvent(event)}`);
     if (event.type === "item.completed") {
       items.push(event.item);
       if (event.item.type === "agent_message") {
@@ -7654,7 +7845,13 @@ function buildRalphTestStatusEventRecord({ testStatus, threadId, turnNumber }) {
   };
 }
 
-function buildRalphPhaseStatusEventRecord({ phaseStatus, threadId, turnNumber, action = "checked" }) {
+function buildRalphPhaseStatusEventRecord({
+  phaseStatus,
+  agentProfile = null,
+  threadId,
+  turnNumber,
+  action = "checked",
+}) {
   if (!phaseStatus) {
     return null;
   }
@@ -7669,6 +7866,7 @@ function buildRalphPhaseStatusEventRecord({ phaseStatus, threadId, turnNumber, a
       sender: "ralph",
       action,
       phaseStatus,
+      ...(agentProfile ? { agentProfile } : {}),
     },
   };
 }
@@ -8109,6 +8307,7 @@ async function loadState() {
     const parsed = JSON.parse(raw);
     return {
       threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
+      threadAgent: normalizeAgentProfileState(parsed.threadAgent),
       eventLogPath: typeof parsed.eventLogPath === "string" ? parsed.eventLogPath : null,
       turnsCompleted: Number.isInteger(parsed.turnsCompleted)
         ? parsed.turnsCompleted
@@ -8123,12 +8322,14 @@ async function loadState() {
       activePhase: typeof parsed.activePhase === "string" ? parsed.activePhase : null,
       phaseAttempted: parsed.phaseAttempted === true,
       pendingCheckpoint: normalizePendingCheckpoint(parsed.pendingCheckpoint),
+      checkpointReview: normalizeCheckpointReviewState(parsed.checkpointReview),
       activeTurn: normalizeActiveTurnState(parsed.activeTurn),
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return {
         threadId: null,
+        threadAgent: null,
         eventLogPath: null,
         turnsCompleted: 0,
         lastExitCode: null,
@@ -8138,6 +8339,7 @@ async function loadState() {
         activePhase: null,
         phaseAttempted: false,
         pendingCheckpoint: null,
+        checkpointReview: null,
         activeTurn: null,
       };
     }
@@ -8161,6 +8363,7 @@ function normalizeActiveTurnState(value) {
     subset: normalizeTestSubset(value.subset),
     startedClean: value.startedClean === true,
     cleanupOnly: value.cleanupOnly === true,
+    agent: normalizeAgentProfileState(value.agent),
   };
 }
 
@@ -8737,6 +8940,7 @@ function normalizePhaseDefinition(phase, checks) {
   const name = sanitizeIdentifier(phase.name, "phase name");
   return {
     name,
+    agent: normalizePhaseAgentOverride(phase.agent, `phases.${name}.agent`),
     promptTemplate: sanitizeOptionalTemplateName(phase.promptTemplate ?? name),
     goalTemplate: sanitizeOptionalTemplateName(phase.goalTemplate ?? `${name}-goal`),
     promptTemplates: normalizeStageTemplateMap(phase.promptTemplates, `phases.${name}.promptTemplates`),
@@ -8748,11 +8952,47 @@ function normalizePhaseDefinition(phase, checks) {
     checkpointOnRequiredChecks: parseBoolean(phase.checkpointOnRequiredChecks, false),
     checkpointOnly: parseBoolean(phase.checkpointOnly, false),
     checkpointPhase: sanitizeOptionalIdentifier(phase.checkpointPhase, `phases.${name}.checkpointPhase`),
+    checkpointPhaseEvery: parsePositiveInt(
+      phase.checkpointPhaseEvery,
+      1,
+    ),
     returnPhaseOnIncompletePrimary: sanitizeOptionalIdentifier(
       phase.returnPhaseOnIncompletePrimary,
       `phases.${name}.returnPhaseOnIncompletePrimary`,
     ),
   };
+}
+
+function normalizePhaseAgentOverride(value, label) {
+  if (value == null || value === "") {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Config ${label} must be an object`);
+  }
+  const provider = value.provider == null || value.provider === ""
+    ? null
+    : normalizeProvider(value.provider);
+  const model = normalizeOptionalNonEmptyString(value.model, `${label}.model`);
+  const reasoningEffort = normalizeOptionalNonEmptyString(
+    value.reasoningEffort,
+    `${label}.reasoningEffort`,
+  );
+  if (!provider && !model && !reasoningEffort) {
+    throw new Error(`Config ${label} must override provider, model, or reasoningEffort`);
+  }
+  return { provider, model, reasoningEffort };
+}
+
+function normalizeOptionalNonEmptyString(value, label) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text || /[\r\n\0]/.test(text)) {
+    throw new Error(`Config ${label} must be a non-empty single-line string`);
+  }
+  return text;
 }
 
 function validatePhaseControlTargets(phases) {
