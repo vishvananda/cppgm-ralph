@@ -7702,7 +7702,12 @@ async function requestHandler(req, res) {
           })
         : await readFastShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
       const configured = await configuredRunMetadataForShape(runRef.shape);
-      shapeUsage = attributeShapeUsageModels(shapeUsage, events, configured.model);
+      const structuralEvents = await readRunStructuralEvents(runRef.filePath);
+      const attributionEvents = mergeEventStreams(
+        structuralEvents.filter((event) => event.eventType === "ralph.phase-status"),
+        events,
+      );
+      shapeUsage = attributeShapeUsageModels(shapeUsage, attributionEvents, configured.model);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return sendJson(res, { error: "Run not found" }, 404);
