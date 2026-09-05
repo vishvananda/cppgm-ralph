@@ -44,6 +44,8 @@ const RUN_REPOSITORIES = new Map([
 const FORMAT_VERSION = 1;
 const EXPORT_CACHE_VERSION = 1;
 const COMPARISON_MAX_OLD_SPACE_MB = 16384;
+const DEFAULT_PUBLISHED_BASE_URL =
+  "https://storage.googleapis.com/ralph-run-viewer-zippy-960/";
 
 function usage() {
   return `Usage: node scripts/export-viz-static.js [options]
@@ -59,6 +61,9 @@ Options:
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
   --claude-dir <dir>    Claude projects dir (default: ~/.claude/projects)
   --work-dir <dir>      Run prompt/config dir (default: ~/work)
+  --published-base <url> Published export used to retain archived runs
+                         (default: ralph-run-viewer-zippy-960)
+  --no-published-base   Do not consult the published export for missing runs
   --clean               Force a full rebuild (exports are incremental by default)
   --no-clean            Retained alias for the incremental default
   --no-compare          Skip comparison generation
@@ -77,6 +82,8 @@ function parseArgs(argv) {
     runs: [],
     clean: false,
     compare: true,
+    publishedBaseUrl:
+      process.env.RALPH_VIZ_PUBLISHED_EXPORT_URL ?? DEFAULT_PUBLISHED_BASE_URL,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -106,6 +113,10 @@ function parseArgs(argv) {
       options.claudeDir = expandHome(next());
     } else if (arg === "--work-dir") {
       options.workDir = expandHome(next());
+    } else if (arg === "--published-base") {
+      options.publishedBaseUrl = next();
+    } else if (arg === "--no-published-base") {
+      options.publishedBaseUrl = null;
     } else if (arg === "--clean") {
       options.clean = true;
     } else if (arg === "--no-clean") {
@@ -256,6 +267,77 @@ async function readJsonIfExists(filePath) {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
+}
+
+function publishedArtifactUrl(baseUrl, relativePath) {
+  const base = String(baseUrl ?? "").endsWith("/")
+    ? String(baseUrl)
+    : `${String(baseUrl)}/`;
+  return new URL(relativePath.replace(/^\/+/, ""), base).href;
+}
+
+async function fetchJsonArtifact(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`${url}: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function readPublishedBaseline(options) {
+  if (!options.publishedBaseUrl) return null;
+  const manifest = await fetchJsonArtifact(publishedArtifactUrl(
+    options.publishedBaseUrl,
+    "data/runs.json",
+  ));
+  const comparisonEntry = manifest.comparisons?.[0];
+  const comparison = options.compare && comparisonEntry?.path
+    ? await fetchJsonArtifact(publishedArtifactUrl(
+        options.publishedBaseUrl,
+        `data/${comparisonEntry.path}`,
+      ))
+    : null;
+  return { manifest, comparison };
+}
+
+function runMetaForSpec(manifest, spec) {
+  return (manifest?.runs ?? []).find((run) =>
+    run.id === `${spec}/run` ||
+    run.label === spec ||
+    run.safeId === sanitizePathPart(spec));
+}
+
+function artifactTimestamp(artifact) {
+  for (const value of [
+    artifact?.generatedAt,
+    artifact?.eventMtime,
+    artifact?.mtime,
+    artifact?.last,
+  ]) {
+    const timestamp = Date.parse(value ?? "");
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return 0;
+}
+
+function newerArtifact(local, published) {
+  if (!local) return published ?? null;
+  if (!published) return local;
+  return artifactTimestamp(published) > artifactTimestamp(local)
+    ? published
+    : local;
+}
+
+function retainedRunIdentity(spec, meta) {
+  return {
+    spec,
+    id: meta.id ?? `${spec}/run`,
+    label: meta.label ?? spec,
+    shape: String(meta.id ?? `${spec}/run`).split("/", 1)[0],
+    fileBase: meta.fileBase ?? "run",
+    filePath: meta.filePath ?? "",
+    safeId: meta.safeId ?? sanitizePathPart(spec),
+  };
 }
 
 async function readRunStateSummary(run) {
@@ -597,7 +679,9 @@ function annotateComparison(comparison, runMetas) {
       run.repositoryUrl = meta.repositoryUrl;
     }
     run.ordinal = index + 1;
-    run.label = `${run.ordinal}-${run.label ?? run.spec ?? `run-${run.ordinal}`}`;
+    const baseLabel = String(run.label ?? run.spec ?? `run-${run.ordinal}`)
+      .replace(/^\d+-/, "");
+    run.label = `${run.ordinal}-${baseLabel}`;
   }
   comparison.assignmentLayouts = ASSIGNMENT_LAYOUT.layouts;
   comparison.displayLayout = "v3";
@@ -1006,7 +1090,7 @@ function comparisonExportFingerprint(options, preparedRuns, implementation) {
 }
 
 async function readPreviousComparisonArtifact(previousManifest, options) {
-  if (options.clean || !previousManifest) {
+  if (!previousManifest) {
     return null;
   }
   const entry = previousManifest.comparisons?.[0];
@@ -1016,13 +1100,6 @@ async function readPreviousComparisonArtifact(previousManifest, options) {
   const filePath = path.join(options.outDir, "data", entry.path);
   const comparison = await readJsonIfExists(filePath);
   return comparison ? { comparison, entries: previousManifest.comparisons } : null;
-}
-
-async function previousComparison(previousManifest, options, expectedFingerprint) {
-  if (previousManifest?.source?.comparisonFingerprint !== expectedFingerprint) {
-    return null;
-  }
-  return readPreviousComparisonArtifact(previousManifest, options);
 }
 
 async function writeComparison(options, comparison) {
@@ -1039,59 +1116,158 @@ async function writeComparison(options, comparison) {
   }];
 }
 
+function comparisonContainsRun(comparison, run) {
+  return comparisonRunIndex(comparison, run) >= 0;
+}
+
+function combineComparisonBaselines(published, local, runs, through) {
+  const publishedMatch = published?.through === through ? published : null;
+  const localMatch = local?.through === through ? local : null;
+  const represented = runs.filter((run) =>
+    comparisonContainsRun(publishedMatch, run) || comparisonContainsRun(localMatch, run));
+  if (!represented.length) return null;
+  if (!publishedMatch) {
+    return mergeComparisonUpdates(localMatch, localMatch, represented);
+  }
+  if (!localMatch) {
+    return mergeComparisonUpdates(publishedMatch, publishedMatch, represented);
+  }
+  return artifactTimestamp(publishedMatch) > artifactTimestamp(localMatch)
+    ? mergeComparisonUpdates(localMatch, publishedMatch, represented)
+    : mergeComparisonUpdates(publishedMatch, localMatch, represented);
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   const manifestPath = path.join(options.outDir, "data", "runs.json");
-  const previousManifest = options.clean ? null : await readJsonIfExists(manifestPath);
+  const localManifest = await readJsonIfExists(manifestPath);
+  const localComparison = localManifest
+    ? await readPreviousComparisonArtifact(localManifest, options)
+    : null;
+
+  const resolvedRuns = new Map();
+  const missingSpecs = [];
+  for (const spec of options.runs) {
+    try {
+      resolvedRuns.set(spec, await resolveRun(spec, options.ralphDir));
+    } catch (error) {
+      missingSpecs.push(spec);
+      console.warn(`local source unavailable for ${spec}: ${error.message}`);
+    }
+  }
+
+  const needsPublishedBaseline = missingSpecs.length > 0;
+  let publishedBaseline = null;
+  if (needsPublishedBaseline && options.publishedBaseUrl) {
+    try {
+      publishedBaseline = await readPublishedBaseline(options);
+      console.error(`loaded archived-run baseline from ${options.publishedBaseUrl}`);
+    } catch (error) {
+      console.warn(`published baseline unavailable: ${error.message}`);
+    }
+  }
+
+  const entries = [];
+  const unresolvedSpecs = [];
+  for (const spec of options.runs) {
+    const run = resolvedRuns.get(spec);
+    if (run) {
+      entries.push({ kind: "live", spec, run });
+      continue;
+    }
+    const meta = newerArtifact(
+      runMetaForSpec(localManifest, spec),
+      runMetaForSpec(publishedBaseline?.manifest, spec),
+    );
+    if (!meta) {
+      unresolvedSpecs.push(spec);
+      continue;
+    }
+    entries.push({
+      kind: "retained",
+      spec,
+      run: retainedRunIdentity(spec, meta),
+      meta: { ...meta, exportRetained: true, exportSettled: true },
+    });
+    console.error(`retaining archived ${spec}`);
+  }
+  if (unresolvedSpecs.length) {
+    throw new Error(
+      `cannot safely export; no local or published artifact for: ${unresolvedSpecs.join(", ")}`,
+    );
+  }
+  if (!entries.length) {
+    throw new Error("no runs resolved or retained");
+  }
+
   await cleanOutput(options);
   await copyViewerAssets(options.outDir);
 
-  const runs = [];
-  for (const spec of options.runs) {
-    try {
-      runs.push(await resolveRun(spec, options.ralphDir));
-    } catch (error) {
-      console.warn(`skipping ${spec}: ${error.message}`);
-    }
-  }
-  if (!runs.length) {
-    throw new Error("no runs resolved");
+  const implementation = await exportImplementationFingerprint();
+  const previousRuns = new Map((localManifest?.runs ?? []).map((run) => [run.id, run]));
+  const preparedLiveRuns = [];
+  const preparedById = new Map();
+  for (const entry of entries.filter((candidate) => candidate.kind === "live")) {
+    const prepared = await prepareRunExport(
+      entry.run,
+      options,
+      previousRuns.get(entry.run.id) ?? null,
+      implementation,
+    );
+    preparedLiveRuns.push(prepared);
+    preparedById.set(entry.run.id, prepared);
   }
 
-  const implementation = await exportImplementationFingerprint();
-  const previousRuns = new Map((previousManifest?.runs ?? []).map((run) => [run.id, run]));
-  const preparedRuns = [];
-  for (const run of runs) {
-    preparedRuns.push(await prepareRunExport(
-      run,
-      options,
-      previousRuns.get(run.id) ?? null,
-      implementation,
-    ));
-  }
+  const comparisonPrepared = entries.map((entry) =>
+    entry.kind === "live"
+      ? preparedById.get(entry.run.id)
+      : {
+          run: entry.run,
+          exportFingerprint: entry.meta.exportFingerprint ?? fingerprint({
+            id: entry.meta.id,
+            size: entry.meta.size,
+            eventMtime: entry.meta.eventMtime,
+          }),
+        });
 
   const expectedComparisonFingerprint = comparisonExportFingerprint(
     options,
-    preparedRuns,
+    comparisonPrepared,
     implementation,
   );
-  const reusedComparison = options.compare
-    ? await previousComparison(previousManifest, options, expectedComparisonFingerprint)
-    : null;
+  const reusedComparison = options.compare &&
+    localManifest?.source?.comparisonFingerprint === expectedComparisonFingerprint &&
+    localComparison
+      ? localComparison
+      : null;
+  const catalogRuns = entries.map((entry) => entry.run);
   const priorComparison = options.compare && !reusedComparison
-    ? await readPreviousComparisonArtifact(previousManifest, options)
+    ? combineComparisonBaselines(
+        publishedBaseline?.comparison,
+        localComparison?.comparison,
+        catalogRuns,
+        options.through,
+      )
     : null;
   let comparison = reusedComparison?.comparison ?? null;
   if (reusedComparison) {
     console.error("reusing unchanged comparison");
   } else if (options.compare) {
-    const canUpdateIncrementally = priorComparison &&
-      previousManifest?.source?.through === options.through &&
-      previousManifest?.source?.implementationFingerprint === implementation;
+    const canUpdateIncrementally = Boolean(priorComparison);
+    const publishedComparisonIsNewer = artifactTimestamp(publishedBaseline?.comparison) >
+      artifactTimestamp(localComparison?.comparison);
+    const baselineImplementation = publishedComparisonIsNewer
+      ? publishedBaseline?.manifest?.source?.implementationFingerprint
+      : localComparison
+        ? localManifest?.source?.implementationFingerprint
+        : publishedBaseline?.manifest?.source?.implementationFingerprint;
+    const implementationMatches = baselineImplementation === implementation;
     const comparisonRuns = canUpdateIncrementally
-      ? preparedRuns.filter((prepared) => !prepared.reusable).map((prepared) => prepared.run)
-      : runs;
-    if (canUpdateIncrementally && comparisonRuns.length < runs.length) {
+      ? preparedLiveRuns
+          .filter((prepared) => !implementationMatches || !prepared.reusable)
+          .map((prepared) => prepared.run)
+      : preparedLiveRuns.map((prepared) => prepared.run);
+    if (canUpdateIncrementally && comparisonRuns.length < catalogRuns.length) {
       console.error(
         `updating comparison from ${comparisonRuns.length} changed run` +
         `${comparisonRuns.length === 1 ? "" : "s"}`,
@@ -1100,16 +1276,38 @@ export async function main(argv = process.argv.slice(2)) {
     const updates = comparisonRuns.length
       ? await buildComparison(options, comparisonRuns)
       : null;
-    comparison = canUpdateIncrementally && !comparisonRuns.length
-      ? priorComparison.comparison
-      : canUpdateIncrementally && updates
-        ? mergeComparisonUpdates(priorComparison.comparison, updates, runs)
-        : updates;
+    if (canUpdateIncrementally) {
+      if (comparisonRuns.length && !updates) {
+        console.warn("comparison update failed; retaining the previous comparison unchanged");
+      }
+      comparison = updates
+        ? mergeComparisonUpdates(priorComparison, updates, catalogRuns)
+        : priorComparison;
+    } else {
+      const retained = entries.filter((entry) => entry.kind === "retained");
+      if (retained.length) {
+        throw new Error(
+          "cannot safely rebuild comparison: archived runs require a matching prior comparison",
+        );
+      }
+      if (!updates) {
+        throw new Error("comparison generation failed and no prior comparison is available");
+      }
+      comparison = updates;
+    }
   }
 
   const runMetas = [];
   let reusedRunCount = 0;
-  for (const prepared of preparedRuns) {
+  let retainedRunCount = 0;
+  for (const entry of entries) {
+    if (entry.kind === "retained") {
+      runMetas.push(entry.meta);
+      reusedRunCount += 1;
+      retainedRunCount += 1;
+      continue;
+    }
+    const prepared = preparedById.get(entry.run.id);
     if (prepared.reusable) {
       console.error(`reusing unchanged ${prepared.run.id}`);
       runMetas.push(prepared.previous);
@@ -1134,12 +1332,15 @@ export async function main(argv = process.argv.slice(2)) {
     comparisons = await writeComparison(options, comparison);
   }
   const allExportsSettled = runMetas.every((run) => run.exportSettled === true);
+  const finalMetaById = new Map(runMetas.map((run) => [run.id, run]));
   const finalComparisonFingerprint = comparison && allExportsSettled
     ? comparisonExportFingerprint(
         options,
-        runMetas.map((run, index) => ({
-          run: runs[index],
-          exportFingerprint: run.exportFingerprint,
+        entries.map((entry) => ({
+          run: entry.run,
+          exportFingerprint: finalMetaById.get(entry.run.id)?.exportFingerprint ??
+            comparisonPrepared.find((prepared) => prepared.run.id === entry.run.id)
+              ?.exportFingerprint,
         })),
         implementation,
       )
@@ -1157,6 +1358,7 @@ export async function main(argv = process.argv.slice(2)) {
       implementationFingerprint: implementation,
       comparisonFingerprint: finalComparisonFingerprint,
       reusedRuns: reusedRunCount,
+      retainedRuns: retainedRunCount,
       exportedRuns: runMetas.length - reusedRunCount,
       comparisonReused: Boolean(reusedComparison),
     },
@@ -1165,7 +1367,8 @@ export async function main(argv = process.argv.slice(2)) {
   });
   console.log(
     `Exported ${runMetas.length} runs to ${options.outDir} ` +
-    `(${reusedRunCount} reused, ${runMetas.length - reusedRunCount} rebuilt)`,
+    `(${reusedRunCount} reused, ${retainedRunCount} retained, ` +
+    `${runMetas.length - reusedRunCount} rebuilt)`,
   );
 }
 

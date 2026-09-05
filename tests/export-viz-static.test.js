@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -83,6 +84,81 @@ test("static export reuses unchanged run artifacts and rebuilds changed runs", a
   assert.equal(third.source.reusedRuns, 0);
   assert.equal(third.source.exportedRuns, 1);
   assert.equal(thirdSummary.eventCount, 2);
+});
+
+test("static export retains an archived run from the published catalog", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-static-archive-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const outDir = path.join(root, "out");
+  const ralphDir = path.join(root, ".ralph");
+  const workDir = path.join(root, "work");
+  const codexDir = path.join(root, "codex", "sessions");
+  const claudeDir = path.join(root, "claude");
+  await Promise.all([
+    fs.mkdir(ralphDir, { recursive: true }),
+    fs.mkdir(workDir, { recursive: true }),
+    fs.mkdir(codexDir, { recursive: true }),
+    fs.mkdir(claudeDir, { recursive: true }),
+  ]);
+
+  const archived = {
+    id: "archived/run",
+    label: "archived",
+    fileBase: "run",
+    filePath: "/retired/.ralph/archived/events/run.jsonl",
+    dataPath: "runs/archived/summary.json",
+    safeId: "archived",
+    exportFingerprint: "archived-fingerprint",
+    exportSettled: true,
+  };
+  const publishedManifest = {
+    formatVersion: 1,
+    runs: [archived],
+    comparisons: [{ path: "comparisons/pa-costs.json" }],
+    source: {},
+  };
+  const publishedComparison = comparison([comparisonRun("archived")], [12]);
+  publishedComparison.through = "pa39";
+  const server = http.createServer((request, response) => {
+    if (request.url === "/data/runs.json") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(publishedManifest));
+    } else if (request.url === "/data/comparisons/pa-costs.json") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(publishedComparison));
+    } else {
+      response.writeHead(404);
+      response.end();
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  await exportViz([
+    "--out", outDir,
+    "--run", "archived",
+    "--ralph-dir", ralphDir,
+    "--work-dir", workDir,
+    "--codex-dir", codexDir,
+    "--claude-dir", claudeDir,
+    "--published-base", `http://127.0.0.1:${address.port}/`,
+  ]);
+
+  const exported = JSON.parse(await fs.readFile(
+    path.join(outDir, "data", "runs.json"),
+    "utf8",
+  ));
+  assert.equal(exported.runs.length, 1);
+  assert.equal(exported.runs[0].id, "archived/run");
+  assert.equal(exported.runs[0].exportRetained, true);
+  assert.equal(exported.source.retainedRuns, 1);
+  const exportedComparison = JSON.parse(await fs.readFile(
+    path.join(outDir, "data", "comparisons", "pa-costs.json"),
+    "utf8",
+  ));
+  assert.equal(exportedComparison.runs.length, 1);
+  assert.equal(exportedComparison.runs[0].spec, "archived");
 });
 
 function event(turnNumber, eventType) {

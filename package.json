@@ -9,6 +9,7 @@
     "ralph": "node ralph.js",
     "ralph-viz": "node ralph-viz/server.js",
     "export-viz": "node --max-old-space-size=16384 scripts/export-viz-static.js",
+    "publish-viz": "node scripts/publish-viz-static.js",
     "fork-run": "node scripts/fork-run.js",
     "compare-pa-costs": "node scripts/compare-pa-costs.js"
   },

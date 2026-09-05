@@ -142,12 +142,22 @@ Build the static viewer with:
 
 ```bash
 npm run export-viz -- --out /dev/shm/ralph-viz-static-qol --through pa39
+npm run publish-viz -- --source /dev/shm/ralph-viz-static-qol
 ```
 
 The default export includes the published trusted, Opus, mini, Fable, Luna,
 v3opus, v3codex, and v3multi runs. Exports are incremental: unchanged run
 artifacts are reused and only changed comparison columns are rebuilt. Pass
-`--clean` when a full rebuild is required.
+`--clean` when a full rebuild is required. If a default run has been archived
+locally, the exporter retains its run metadata and comparison column from the
+existing output or the published bucket instead of trying to rebuild it.
+
+Use `publish-viz` rather than calling `gcloud storage rsync` directly. It
+refuses to publish a manifest or comparison that drops an existing run, never
+deletes destination-only objects, and uploads the comparison and run catalog
+last. It also snapshots the previously published catalogs under the bucket's
+`history/` prefix before replacing them. This keeps archived run pages
+available even though their source trajectories are no longer local.
 
 Set `"assignmentLayout": "v3"` in runs using the V3 assignment order. Runs
 without this field default to V2 (with `v3*` run names recognized as a
