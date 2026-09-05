@@ -686,10 +686,18 @@ function annotateComparison(comparison, runMetas) {
   comparison.assignmentLayouts = ASSIGNMENT_LAYOUT.layouts;
   comparison.displayLayout = "v3";
   const throughNumber = paNumber(comparison.through);
+  const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(
+    comparison,
+    comparison.displayLayout,
+  ).slice(0, throughNumber ?? undefined);
+  for (const [runIndex, run] of comparison.runs.entries()) {
+    const finalSummary = displayRows.at(-1)?.runs?.[runIndex];
+    run.comparisonComplete = displayRows.length === throughNumber &&
+      finalSummary?.status === "complete";
+  }
   comparison.series = comparisonSeries({
     ...comparison,
-    rows: ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, comparison.displayLayout)
-      .slice(0, throughNumber ?? undefined),
+    rows: displayRows,
   });
   return comparison;
 }
