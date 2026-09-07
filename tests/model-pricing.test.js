@@ -9,6 +9,25 @@ import {
 
 const pricing = globalThis.RALPH_MODEL_PRICING;
 
+test("Astra usage keeps its own pricing when combined with a Luna worker", () => {
+  const astra = pricing.attributeUsage({
+    input_tokens: 1_000_000,
+    cached_input_tokens: 750_000,
+    output_tokens: 100_000,
+    reasoning_output_tokens: 80_000,
+  }, "gpt-6-astra");
+  assert.equal(astra.cost_usd, 8.25);
+  const luna = pricing.attributeUsage({
+    input_tokens: 1_000_000,
+    cached_input_tokens: 750_000,
+    output_tokens: 100_000,
+  }, "gpt-5.6-luna");
+  const combined = pricing.addUsage(astra, luna);
+  assert.equal(combined.cost_usd, 8.435);
+  assert.equal(pricing.costBreakdown(combined).find(entry => entry.model === "gpt-6-astra").cost_usd, 8.25);
+  assert.equal(pricing.estimateCost({ cost_usd: 12.34, input_tokens: 100 }, "gpt-6-astra"), 12.34);
+});
+
 test("Fable 5.1 uses its reduced cache-read price without repricing Fable 5", () => {
   const usage = {
     input_tokens: 1_000_000,

@@ -1,0 +1,193 @@
+{
+  "baseDir": "/home/vishvananda/work",
+  "workdir": "/home/vishvananda/work/v4codex",
+  "useExistingWorkdir": true,
+  "name": "v4codex",
+  "assignmentLayout": "v4",
+  "provider": "codex",
+  "testCommand": "make test-report-through-paX",
+  "checks": {
+    "tests": {
+      "command": "make test-report-through-{{testStage}}",
+      "primary": true,
+      "required": true,
+      "kind": "test",
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "priorThroughTests": {
+      "command": "n={{stageNumber}}; if [ \"$n\" -le 1 ]; then echo '===== ALL TESTS PASSED SUCCESSFULLY! (0/0) ====='; else make test-report-through-pa$((n - 1)); fi",
+      "required": true,
+      "kind": "test",
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "stageTests": {
+      "command": "make test-{{testStage}}",
+      "primary": true,
+      "required": false,
+      "kind": "test",
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "stageProgress": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ],
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "stageProgressPreserved": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}} mode=preserve",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ],
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "fileAudit": {
+      "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev/src",
+      "required": true
+    },
+    "pa34HostThrough33": {
+      "command": "make test-report-through-pa33",
+      "required": true,
+      "kind": "test",
+      "targetStage": "pa34",
+      "onlyStages": [
+        "pa34"
+      ]
+    },
+    "pa34SelfThroughPa5": {
+      "command": "make -C pa34 test-through-pa5 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
+      "required": true,
+      "dependsOn": [
+        "pa34HostThrough33"
+      ],
+      "kind": "generic",
+      "targetStage": "pa34",
+      "onlyStages": [
+        "pa34"
+      ]
+    },
+    "pa34PptokenInception": {
+      "command": "make -C pa34 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++",
+      "required": true,
+      "dependsOn": [
+        "pa34HostThrough33",
+        "pa34SelfThroughPa5"
+      ],
+      "kind": "generic",
+      "targetStage": "pa34",
+      "onlyStages": [
+        "pa34"
+      ]
+    },
+    "pa34Inception": {
+      "command": "make inception CXX=g++ CPPGM_HOST_CXX=g++",
+      "primary": true,
+      "required": true,
+      "dependsOn": [
+        "pa34HostThrough33",
+        "pa34SelfThroughPa5",
+        "pa34PptokenInception"
+      ],
+      "kind": "generic",
+      "targetStage": "pa34",
+      "onlyStages": [
+        "pa34"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "promptTemplates": {
+        "pa34": "pa34-implement"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-implement-goal"
+      },
+      "checkpointOnRequiredChecks": true,
+      "checkpointPhase": "checkpointAudit",
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "stageProgress",
+        "pa34HostThrough33",
+        "pa34SelfThroughPa5",
+        "pa34PptokenInception",
+        "pa34Inception"
+      ]
+    },
+    {
+      "name": "checkpointAudit",
+      "promptTemplate": "checkpointAudit",
+      "goalTemplate": "checkpointAudit-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "stageProgressPreserved"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "promptTemplates": {
+        "pa34": "pa34-audit"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-audit-goal"
+      },
+      "runWhenChecksPass": true,
+      "checks": [
+        "fileAudit",
+        "tests",
+        "pa34HostThrough33",
+        "pa34SelfThroughPa5",
+        "pa34PptokenInception",
+        "pa34Inception"
+      ]
+    }
+  ],
+  "extraStages": [
+    "pa34"
+  ],
+  "maxTurns": 500,
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "model": "gpt-6-astra",
+  "reasoningEffort": "xhigh",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true
+  },
+  "additionalDirectories": [],
+  "outputTailChars": 20000,
+  "codexPath": "/usr/local/bin/codex",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run"
+}

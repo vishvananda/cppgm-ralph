@@ -1,5 +1,8 @@
 (function installRalphModelPricing(root) {
   const rates = Object.freeze({
+    // Standard short-context API-equivalent estimate (USD per 1M tokens).
+    // https://developers.openai.com/api/docs/pricing (2026-09-07)
+    "gpt-6-astra": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
     "gpt-5.6-sol": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 30.00 }),
     "gpt-5.6-terra": Object.freeze({ input: 2.00, cachedInput: 0.25, output: 12.00 }),
     "gpt-5.6-luna": Object.freeze({ input: 0.20, cachedInput: 0.02, output: 1.20 }),

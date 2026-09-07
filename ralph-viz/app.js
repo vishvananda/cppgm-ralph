@@ -4367,7 +4367,7 @@ function costEstimateText(usage, model, options = {}) {
 }
 
 function shortModelName(model) {
-  const match = String(model ?? "").match(/^gpt-[\d.]+-(sol|terra|luna)$/i);
+  const match = String(model ?? "").match(/^gpt-[\d.]+-(astra|sol|terra|luna)$/i);
   if (match) {
     return match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
   }

@@ -159,11 +159,18 @@ last. It also snapshots the previously published catalogs under the bucket's
 `history/` prefix before replacing them. This keeps archived run pages
 available even though their source trajectories are no longer local.
 
-Set `"assignmentLayout": "v3"` in runs using the V3 assignment order. Runs
-without this field default to V2 (with `v3*` run names recognized as a
-compatibility fallback). Comparisons use V3 order globally and the selected
-run's native order on individual run pages; event logs retain their original
-PA numbers.
+Set `"assignmentLayout": "v3"` or `"v4"` for the corresponding assignment
+order. Runs without this field default to V2, with `v3*` and `v4*` run names
+recognized as compatibility fallbacks. V4 has 34 stages: its inception PA34
+aligns with V3's PA39. Removed standalone stages have empty comparison cells;
+their costs are not assigned to another stage. Comparisons use V3 order
+globally and the selected run's native order on individual run pages; event
+logs retain their original PA numbers. Stage alignment compares the broad
+compiler milestones, not identical fixture coverage across course versions.
+
+The [V4 Codex scaffold](examples/v4codex/README.md) contains an Astra/xhigh
+config and the complete spec-aware prompt/goal family, including PA34
+inception checks.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;
