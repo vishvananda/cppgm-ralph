@@ -5,7 +5,7 @@ and final audit phases, using `gpt-6-astra` with `xhigh` reasoning. Each turn
 starts a fresh thread under the same bubblewrap isolation settings.
 
 The prepared checkout is `/home/vishvananda/work/v4codex`, based on
-`cppgm-assignments` commit `11be2afc8c6626efdb01a8fa67b390385bbcf474`
+`cppgm-assignments` commit `05cab5a6c54d3c07cc31cbdb16196d060ed32c5f`
 (V4, PA1–PA34). Its file audit is copied from v3codex; the revised `spec.md`
 covers compiler latency, peak memory, generated runtime and code size, with
 bounded optimization and controlled performance evidence beyond course tests.
