@@ -1,18 +1,16 @@
-Ralph loop {{turnNumber}} implementation checkpoint for {{runName}}.
+Ralph loop {{turnNumber}} implementation for {{runName}}.
 
-Implement `{{testStage}}` as the next coherent, performance-conscious increment
-of the existing compiler.
+Work toward completing `{{testStage}}`, extending into related behavior groups
+while the same understanding supports further progress.
 
 Completion criteria:
-- The compact plan defines a substantial checkpoint and identifies its relevant
-  `spec.md` requirements, ownership, complexity, and validation.
-- The checkpoint implements real compiler behavior consistent with the
-  current-stage portions of `spec.md`; material performance risks have evidence.
-- Assignments through the previous PA pass.
-- The current PA fully passes, or its failure count is lower than the turn-start
-  baseline without reducing test coverage. Adding passing tests while retaining
-  every existing failure does not count as checkpoint progress.
-- File audit and required exit criteria pass:
+- Implemented behavior satisfies current-stage `spec.md`; performance claims
+  have its required compiler and applicable executable evidence.
+- Any incomplete handoff finishes a coherent behavior group and justifies why
+  further related work is impractical; meeting the progress minimum is not enough.
+- Earlier PAs pass; current failures decrease or reach zero without reduced
+  coverage. Adding passing tests alone does not qualify.
+- The compact plan, handoff reason and ledger are current; review markers remain.
+- File audit and required checks pass:
 {{modelValidation}}
-- The plan and completed-checkpoint ledger are refreshed.
-- Intended changes are committed and `git status --short` is empty.
+- Intended changes are committed; `git status --short` is empty.

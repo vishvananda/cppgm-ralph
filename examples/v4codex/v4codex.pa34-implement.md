@@ -8,45 +8,30 @@ State:
 
 Before editing, read `AGENTS.md`, `TESTING_AND_REFERENCES.md`, `spec.md`,
 `pa34/README.md`, `pa34/Makefile`, and `dev/frontend_source_sets.mk`. Keep
-`pa34/plan.md` focused on the first failing checkpoint, its relevant spec
-requirements, the underlying earlier compiler surface, and validation.
+`pa34/plan.md` compact with remaining divergences, their owning compiler
+surfaces, spec requirements and validation. Continue through related fixes;
+passing a ladder rung or committing a fix is not a handoff boundary.
 
-PA34 adds no language feature or compiler mode. It proves that the existing
-compiler can rebuild itself reproducibly while retaining the architecture in
-`spec.md`. Treat failures as earlier compiler or reproducibility bugs.
+PA34 proves reproducible self-compilation and adds no language feature or mode.
+Treat failures as earlier compiler or reproducibility bugs.
 
-If host-seeded `../dev/cppgm++` and a `*-self` compiler differ on the same
-command, first assume the self compiler may have been miscompiled. Compare their
-behavior and trace the divergence back to the self-built object, source, and
-earlier compiler feature that produced it. A stack inside `*-self` identifies
-where the bad program failed, not necessarily where the compiler fix belongs.
+If seed and self-built compilers differ on the same command, investigate
+miscompilation: trace the divergence to its object, source and owning compiler
+feature. The failing self-built stack may only show the symptom.
 
-A self-only timeout, OOM, unbounded memory growth, or slowdown beyond roughly
-5x on the same source is also divergence evidence. Use the observability and
-audit requirements in `spec.md` to distinguish expected local code-quality
-differences from a changed branch, call, overload, loop, recursion, allocation,
-or repeated-work path. Establish that divergence before changing valid compiler
-source merely to avoid a construct that self compilation mishandles.
+A self-only timeout, OOM or material slowdown is also divergence evidence.
+Use the spec's measurement protocol to separate code-quality differences from
+miscompilation or repeated work before changing valid compiler source to avoid
+a construct. Compare compiler latency/memory and generated runtime/text size;
+runtime gains must justify optimization work and growth within explicit budgets.
 
-Implementation checkpoints:
-- Keep `make test-report-through-pa33` passing.
-- Debug the self ladder with
-  `make -C pa34 test-through-pa5 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`.
-- Use `probe-self-object` and `probe-self-link` for scratch tracing or a
-  suspected one-object fix without rebuilding the host compiler. Probe results
-  are diagnostic; canonical targets remain required.
-- Pass `make -C pa34 compare-pptoken-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++`
-  before the full compiler compare.
-- Final success requires
-  `make inception CXX=g++ CPPGM_HOST_CXX=g++`.
-- Reduce compiler bugs into focused tests under the earliest owning
-  `student.tests/paN` directory and run them explicitly.
-
-The self-contained implementation and architecture requirements in `spec.md`
-remain hard blockers throughout PA34.
+Follow the required host regression, self-test ladder, pptoken inception and
+full inception checks below, in order. `probe-self-object` and `probe-self-link`
+are diagnostic only; finish with canonical builds. Put reducers under the
+earliest owning `student.tests/paN` and run them explicitly.
 
 Required exit criteria:
 {{modelValidation}}
 
-Treat file-audit findings as design blockers. Commit cohesive progress and
-leave `git status --short` empty.
+Preserve self-containment and file-audit requirements. Commit cohesive progress
+and leave `git status --short` empty.

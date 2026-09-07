@@ -6,8 +6,9 @@ before advancing.
 Completion criteria:
 - The actual stage architecture and representative data flow are reviewed
   against the relevant spec requirements.
-- Whole-stage architecture and performance issues are fixed across their full
-  ownership path, with representative performance evidence.
+- Whole-stage defects are fixed; the spec's benchmarks establish compiler
+  latency/memory and applicable executable runtime/text size with controlled
+  evidence and justified optimization work/growth budgets.
 - Earlier assignments remain passing and no correctness, self-containment,
   timeout, file-audit, architecture, or performance issue remains.
 - The compact plan and audit record final Spec Alignment, findings, changes,

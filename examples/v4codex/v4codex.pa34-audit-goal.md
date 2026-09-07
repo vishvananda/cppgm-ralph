@@ -8,8 +8,9 @@ Completion criteria:
 - PA1-PA33 and all required PA34 checks pass reproducibly.
 - No layer divergence, PA34-only path, shortcut, nondeterminism, missing
   reducer, timeout/OOM workaround, or file-audit issue remains.
-- The plan and audit record final architecture and comparative performance
-  evidence.
+- The plan and audit record final architecture, optimization budgets and the
+  spec's controlled compiler latency/memory and executable runtime/text-size
+  evidence across generations.
 - Required exit criteria pass:
 {{modelValidation}}
 - Intended changes are committed and `git status --short` is empty.

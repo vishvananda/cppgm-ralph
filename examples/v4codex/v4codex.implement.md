@@ -5,36 +5,32 @@ State:
 - test status: {{testStatusSummary}}
 - full primary log: `{{lastTestLogPath}}`
 
-Before editing, read `AGENTS.md`, `TESTING_AND_REFERENCES.md`, `spec.md`,
-`{{testStage}}/README.md`, and the relevant required tests. Keep personal tests in `student.tests/`
-and run them explicitly; `tests/regression/` fixtures are outside the course
-exit criteria. Treat `spec.md` as the
-normative architecture for the completed compiler. Apply its requirements that
-are relevant to this stage and preserve a path toward the full design without
-pulling later assignment behavior into the current PA.
+Read `AGENTS.md`, `TESTING_AND_REFERENCES.md`, `spec.md`, the assignment README,
+and relevant tests. Apply current-stage spec requirements while preserving the
+later design. Keep personal tests in `student.tests/` and run them explicitly;
+`tests/regression/` fixtures are outside the course exit criteria.
 
-Keep `{{testStage}}/plan.md` compact with Stage Design and Spec Alignment,
-Current Failure Map, Active Checkpoint, Performance Evidence, and a Completed
-Checkpoints ledger. Replace superseded state and use one concise ledger row per
-completed checkpoint.
+Work toward completing the assignment. Group failures by shared semantic
+ownership; record owner, data flow, complexity and validation, then implement
+related groups together. Extend the initial scope while the same understanding
+supports further fixes. Commit coherent increments throughout the turn.
+The initial plan, a commit or minimum test progress is not a stopping boundary.
+An incomplete handoff must finish a coherent behavior group and explain the
+concrete boundary making further related work impractical.
 
-Group the complete current-PA failure set by shared behavior and ownership.
-Select a substantial checkpoint at a stable compiler boundary, bundling related
-small groups when appropriate. Before implementation, record the relevant spec
-requirements, owner and data flow, expected complexity, and validation.
+Keep `{{testStage}}/plan.md` compact: design/spec alignment, remaining groups,
+performance evidence and a handoff ledger. On first entry, before stage edits,
+record HEAD as `Stage base commit` and `Last reviewed commit`; preserve both
+during implementation.
 
-Build the next coherent increment of the same compiler and preserve previous
-assignments. Use `spec.md` to guide representations, phase boundaries, demand,
-lookup, lowering, allocation, and complexity. Measure representative cases for
-scaling-sensitive or unexpectedly slow work and record the evidence.
+Follow the spec's evidence protocol for performance claims. Measure compiler
+latency/peak RSS and, where executable output exists, runtime/text size; optimization
+benefits must justify compiler work and growth within explicit budgets.
 
-Ralph separately checks assignments through the previous PA and the current
-PA-local report. Before returning, complete the selected checkpoint, reduce
-the current-PA failure count below the turn-start baseline or finish the PA,
-without reducing test coverage. Adding passing tests while retaining every
-existing failure does not count as checkpoint progress. Keep file audit
-passing, refresh the compact plan, commit cohesive progress, and leave
-`git status --short` empty.
+At handoff, earlier PAs and file audit pass; current failures decrease or reach
+zero without reduced coverage. Adding passing tests alone is not progress.
+Refresh the plan and leave committed, clean changes. Ralph audits every three
+accepted incomplete handoffs and performs a full audit when the stage passes.
 
 Required exit criteria:
 {{modelValidation}}

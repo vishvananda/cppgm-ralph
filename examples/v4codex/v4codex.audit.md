@@ -6,21 +6,21 @@ State:
 - first blocker: {{firstFailureBlocker}}
 - full primary log: `{{lastTestLogPath}}`
 
-Perform an independent PA-wide review of the actual implementation. Read
-`spec.md`, the assignment README, stage commits, changed source, and current
-plan, but do not assume checkpoint conclusions are complete. Reconstruct the
-stage architecture and compare it with the relevant normative requirements.
+Read `spec.md`, the assignment README, stage commits, source and plan.
+Independently reconstruct the whole-stage architecture; checkpoint conclusions
+do not substitute for this review.
 
-Apply the `spec.md` architecture audit checklist, adapting it to the language
-and compiler surfaces available in this PA. Trace representative stage data
-end to end, measure scaling-sensitive workloads, and profile unexplained slow
-paths. Fix every correctness, architecture, performance, self-containment, or
-file-audit blocker across its full ownership path rather than one symptom.
+Apply the spec's architecture audit to the surfaces available in this PA.
+Trace representative data end to end and fix defects across their full ownership
+paths. Review fixed compiler and applicable executable benchmarks beyond course
+tests: latency, peak memory, runtime and text size. Follow the spec's frozen A/B,
+ABBA and noise-calibration protocol for claims; verify optimization legality,
+profitability, invalidation and pipeline work/growth budgets. Fewer IR nodes
+alone do not establish runtime improvement.
 
-Finish with a compact plan containing current Stage Design and Spec Alignment,
-Performance Evidence, Architecture Review, Final Architecture Review, and the
-checkpoint ledger. Consolidate the audit into its ledger plus final Findings,
-Changes, Performance Evidence, and Validation.
+Consolidate the plan and audit: final design/spec alignment, findings, changes,
+performance evidence, validation and ledger. Include any unaudited handoffs
+remaining since the last checkpoint audit.
 
 Required exit criteria:
 {{modelValidation}}

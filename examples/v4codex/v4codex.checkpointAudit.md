@@ -1,25 +1,26 @@
-Audit the latest checkpoint for `{{testStage}}`.
+Audit the accumulated implementation for `{{testStage}}`.
 
 State:
 {{briefState}}
 - test status: {{testStatusSummary}}
 - full primary log: `{{lastTestLogPath}}`
 
-Read `spec.md`, the active checkpoint in `{{testStage}}/plan.md`, its commits
-and changed source, and the assignment README. In `{{testStage}}/audit.md`,
-replace the Current Checkpoint Review and add one concise Checkpoint Audit
-Ledger row. Preserve only durable architecture decisions.
+Read `spec.md`, the assignment README and `{{testStage}}/plan.md`. Review every
+commit and the combined source changes from `Last reviewed commit` through HEAD,
+including interactions across handoffs. For the first audit use `Stage base
+commit`; if markers are missing, recover the stage boundary from history rather
+than narrowing the review to the latest handoff.
 
-Keep the review bounded to the landed increment. Confirm earlier assignments
-pass, the checkpoint failure count is not exceeded, and test coverage is not
-reduced, then apply the relevant
-`spec.md` requirements and audit checklist. Trace any violation through the
-complete affected ownership path and fix the checkpoint-level problem. Support
-material performance conclusions with representative evidence.
+Apply the spec's architecture audit and fix affected ownership paths. Verify
+compiler latency/memory, applicable runtime/text size, and optimization
+legality/profitability/budgets using its evidence protocol. Earlier PAs pass;
+latest checkpoint failures must not increase and coverage must not shrink.
 
-After validation, refresh the plan's Spec Alignment, failure map, performance
-evidence, next substantial checkpoint, and completed-checkpoint row without
-retaining superseded inventories or transcripts.
+After validating and committing code fixes, record that code tip as `Last
+reviewed commit`. Update the compact plan and `{{testStage}}/audit.md` with the
+range, findings, evidence and one ledger row. Group remaining work broadly and
+note avoidable handoff fragmentation. Commit these records without further code
+edits so the next audit has an unambiguous baseline.
 
 Required exit criteria:
 {{modelValidation}}

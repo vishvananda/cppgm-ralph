@@ -1,16 +1,16 @@
 Ralph loop {{turnNumber}} checkpoint audit for {{runName}}.
 
-Audit the latest `{{testStage}}` checkpoint against `spec.md` before
-implementation continues.
+Audit all `{{testStage}}` changes since the last review against `spec.md`.
 
 Completion criteria:
-- The current checkpoint review and audit-ledger row are updated.
-- Earlier assignments pass, the checkpoint failure count is not exceeded, and
+- The complete accumulated range and its interactions are reviewed; affected
+  ownership paths have no unresolved spec, correctness or performance issue.
+- Performance claims meet the spec's compiler and applicable executable evidence
+  requirements, including optimization legality and work/growth budgets.
+- Earlier PAs pass; the latest checkpoint failure count is not exceeded and
   test coverage is not reduced.
-- The affected ownership path has no unresolved relevant spec, correctness,
-  performance, shortcut, timeout, or file-audit issue.
-- Material performance conclusions have representative evidence.
-- File audit and required exit criteria pass:
+- The compact plan and audit record findings, evidence, the reviewed code tip
+  as `Last reviewed commit`, and broadly grouped remaining work.
+- File audit and required checks pass:
 {{modelValidation}}
-- The compact plan records current Spec Alignment and the next checkpoint.
-- Intended changes are committed and `git status --short` is empty.
+- Intended changes are committed; `git status --short` is empty.

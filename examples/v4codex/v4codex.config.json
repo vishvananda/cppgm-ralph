@@ -120,6 +120,7 @@
       },
       "checkpointOnRequiredChecks": true,
       "checkpointPhase": "checkpointAudit",
+      "checkpointPhaseEvery": 3,
       "checks": [
         "priorThroughTests",
         "stageTests",

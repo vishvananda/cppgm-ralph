@@ -6,9 +6,11 @@ starts a fresh thread under the same bubblewrap isolation settings.
 
 The prepared checkout is `/home/vishvananda/work/v4codex`, based on
 `cppgm-assignments` commit `11be2afc8c6626efdb01a8fa67b390385bbcf474`
-(V4, PA1–PA34). Its `spec.md` and `scripts/cppgm_file_audit.pl` are copied from
-v3codex. The assignment handouts, fixtures, and starter implementation remain
-the V4 versions. Personal tests go in `student.tests/` and are run explicitly.
+(V4, PA1–PA34). Its file audit is copied from v3codex; the revised `spec.md`
+covers compiler latency, peak memory, generated runtime and code size, with
+bounded optimization and controlled performance evidence beyond course tests.
+The handouts, fixtures and starter implementation remain the V4 versions.
+Personal tests go in `student.tests/` and are run explicitly.
 
 The config and all ten prompt/goal sidecars must have the same filename stem.
 Installed copies live beside the checkout as `/home/vishvananda/work/v4codex.*`.
@@ -30,6 +32,17 @@ being marked experimental by the root Makefile. Its ordered required checks
 are the host PA1–PA33 report, self-built PA1–PA5 ladder (through AST, the V4
 counterpart of V3's PA10 rung), pptoken inception, and root `make inception`.
 The final implementation and audit both require the complete inception chain.
+
+Implementation turns expand into related behavior groups while their shared
+context remains useful; commits and minimum test progress do not end a turn.
+Incomplete handoffs must finish a coherent group and justify their stopping
+boundary. The numerical failure-reduction guard remains a minimum safeguard.
+`checkpointPhaseEvery: 3` batches audits across three accepted incomplete
+handoffs. Each audit covers all changes since the plan's `Last reviewed commit`
+(initially `Stage base commit`), then advances that marker to the validated code
+tip before committing its records. Full-stage audit always runs on completion,
+including changes remaining in a partially filled batch. Each handoff still
+starts a fresh thread; audit batching alone does not enlarge implementation turns.
 
 Astra costs use the shared standard short-context API estimate: $10 input,
 $1 cached input, and $50 output per million tokens, from the
