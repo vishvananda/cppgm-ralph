@@ -14,6 +14,7 @@ const runComparisonCard = document.getElementById("runComparisonCard");
 const runComparisonEl = document.getElementById("runComparison");
 const runComparisonMeta = document.getElementById("runComparisonMeta");
 const runComparisonThrough = document.getElementById("runComparisonThrough");
+const runComparisonLayout = document.getElementById("runComparisonLayout");
 const eventFilter = document.getElementById("eventFilter");
 const eventCountEl = document.getElementById("eventCount");
 const hideNoiseToggle = document.getElementById("hideNoise");
@@ -149,6 +150,7 @@ const state = {
   runComparisonRequestId: 0,
   loadRequestId: 0,
   compareThrough: null,
+  comparisonLayout: "capabilities",
   selectedDocName: null,
   autoRefreshTimer: null,
   openTurnReloadTimer: null,
@@ -7557,7 +7559,7 @@ async function renderComparisonView() {
   setCombinedModeActive(false);
   hideRunDocsPanel();
   hideRunComparisonPanel();
-  setViewTitles("Comparison", "PA Costs");
+  setViewTitles("Comparison", "Milestone Costs");
   state.events = [];
   state.combinedRuns = [];
   state.shapeUsage = null;
@@ -7580,10 +7582,8 @@ async function renderComparisonView() {
     eventCountEl.textContent = "";
     return;
   }
-  const displayLayout = ASSIGNMENT_LAYOUT.normalizeLayoutId(comparison.displayLayout, "v3");
-  const comparisonThrough = Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10);
-  const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, displayLayout)
-    .slice(0, Number.isFinite(comparisonThrough) ? comparisonThrough : undefined);
+  const displayLayout = state.comparisonLayout;
+  const displayRows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, displayLayout);
   const maxPa = displayRows.length;
   const requested = Number.parseInt(state.compareThrough ?? maxPa, 10);
   const through = Math.max(1, Math.min(maxPa, Number.isFinite(requested) ? requested : maxPa));
@@ -7594,9 +7594,9 @@ async function renderComparisonView() {
   const totals = runOrder.map((index) => comparisonTotalForRows(rows, index));
   await ensureEChartsLoaded();
   summaryEl.innerHTML = `
-    <div><strong>through</strong><input id="compareThrough" class="compact-number" type="number" min="1" max="${maxPa}" value="${through}" /></div>
+    <div><strong>through</strong><select id="compareThrough" class="comparison-select">${comparisonThroughOptions(displayRows, through)}</select></div>
     <div><strong>runs</strong>${fmtInt(comparison.runs.length)}</div>
-    <div><strong>order</strong>${escapeHtml(ASSIGNMENT_LAYOUT.descriptor(displayLayout).shortLabel)}</div>
+    <div><strong>view</strong><select id="compareLayout" class="comparison-select">${comparisonLayoutOptions(displayLayout)}</select></div>
     <div><strong>generated</strong>${fmt(comparison.generatedAt)}</div>
     <div class="summary-wide"><strong>pricing</strong>${escapeHtml(comparison.runs.map((run) => `${run.label}=${run.model ?? "provider"}`).join(", "))}</div>
   `;
@@ -7605,13 +7605,19 @@ async function renderComparisonView() {
     state.compareThrough = Number.parseInt(input.value, 10);
     renderComparisonView().catch((error) => console.error("comparison render failed", error));
   });
+  document.getElementById("compareLayout")?.addEventListener("change", (event) => {
+    state.comparisonLayout = event.target.value;
+    state.compareThrough = null;
+    state.runComparisonThrough.clear();
+    renderComparisonView().catch((error) => console.error("comparison render failed", error));
+  });
 
   const table = document.createElement("table");
   table.className = "comparison-table";
   const header = document.createElement("thead");
   header.innerHTML = `
     <tr>
-      <th>PA</th>
+      <th>Milestone</th>
       ${orderedRuns.map((run) => `<th>${runRepositoryLinkHtml(run, run.label)}</th>`).join("")}
     </tr>
   `;
@@ -7623,8 +7629,9 @@ async function renderComparisonView() {
   body.append(totalRow);
   for (const row of rows) {
     const tr = document.createElement("tr");
+    tr.className = row.legacy ? "comparison-legacy" : "";
     tr.innerHTML = `
-      <th>${escapeHtml(row.pa)}</th>
+      <th>${escapeHtml(row.label ?? row.pa)}${row.note ? `<div class="comparison-meta">${escapeHtml(row.note)}</div>` : ""}</th>
       ${runOrder.map((index) => `<td>${comparisonCellHtml(row.runs[index])}</td>`).join("")}
     `;
     body.append(tr);
@@ -7633,14 +7640,18 @@ async function renderComparisonView() {
   const content = document.createElement("div");
   content.className = "comparison-content";
   const charts = renderComparisonCharts(rows, runOrder, orderedRuns);
-  content.append(charts, table);
+  const tableScroll = document.createElement("div");
+  tableScroll.className = "comparison-table-scroll";
+  tableScroll.append(table);
+  content.append(charts, tableScroll);
+  disposeComparisonCharts(timelineEl);
   timelineEl.replaceChildren(content);
   hydrateComparisonCharts(charts, rows, runOrder, orderedRuns);
-  eventCountEl.textContent = `${fmtInt(rows.length)} PAs / ${fmtInt(comparison.runs.length)} runs`;
+  eventCountEl.textContent = `${fmtInt(rows.length)} milestones / ${fmtInt(comparison.runs.length)} runs`;
   if (progressDock) {
     setProgressDockHtml(`
       <strong>Compare</strong>
-      <span class="dock-main">through pa${fmtInt(through)}</span>
+      <span class="dock-main">through ${escapeHtml(rows.at(-1)?.label ?? "")}</span>
       <span class="dock-meta">${fmtInt(comparison.runs.length)} runs</span>
     `);
     updateProgressDockSpace();
@@ -7663,18 +7674,50 @@ function comparisonRunOrder(runs) {
   return runs.map((_, index) => index);
 }
 
+function comparisonLayoutOptions(selected) {
+  return [["capabilities", "Grouped capabilities"], ["v2", "V2 PA order"],
+    ["v3", "V3 PA order"], ["v4", "V4 PA order"]]
+    .map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("");
+}
+
+function comparisonThroughOptions(rows, through) {
+  return rows.map((row, index) => `<option value="${index + 1}"${index + 1 === through ? " selected" : ""}>${escapeHtml(row.label ?? row.pa)}</option>`).join("");
+}
+
+function comparisonMilestoneDetailsHtml(row, runOrder, runs) {
+  return `<strong>${escapeHtml(row.label ?? row.pa)}</strong>
+    ${row.note ? `<p class="comparison-meta">${escapeHtml(row.note)}</p>` : ""}
+    ${runOrder.map((runIndex, position) => `<div class="comparison-breakdown-run">
+      <strong>${escapeHtml(runs[position]?.label ?? `run ${runIndex + 1}`)}</strong>
+      ${comparisonCellHtml(row.runs?.[runIndex])}</div>`).join("")}`;
+}
+
+function showComparisonMilestoneDetails(container, index, rows, runOrder, runs, open = true) {
+  const row = rows[index];
+  if (!row) return;
+  const details = container.querySelector(".comparison-breakdowns");
+  details.querySelector("select").value = String(index + 1);
+  details.querySelector(".comparison-breakdown-body").innerHTML = comparisonMilestoneDetailsHtml(row, runOrder, runs);
+  for (const native of details.querySelectorAll(".comparison-native-details")) native.open = true;
+  if (open) details.open = true;
+}
+
 function renderComparisonCharts(rows, runOrder, orderedRuns) {
   const wrap = document.createElement("div");
   wrap.className = "comparison-charts";
   const legend = comparisonRunLegendHtml(orderedRuns);
+  const explanation = '<p class="comparison-explanation">Spending grouped by capability, not chronology. All earlier-only work is included; matched milestones may have different requirements. Select a point for original PA details.</p>';
+  const breakdowns = `<details class="comparison-breakdowns"><summary>Milestone / original PA details</summary>
+    <select class="comparison-select" aria-label="Milestone details">${comparisonThroughOptions(rows, rows.length)}</select>
+    <div class="comparison-breakdown-body"></div></details>`;
   if (window.echarts) {
-    wrap.innerHTML = legend + [
+    wrap.innerHTML = legend + explanation + [
       comparisonChartShellHtml("Accumulated Cost", "cost"),
       comparisonChartShellHtml("Accumulated Active Time", "runtime"),
-    ].join("");
+    ].join("") + breakdowns;
     return wrap;
   }
-  wrap.innerHTML = legend + [
+  wrap.innerHTML = legend + explanation + [
     comparisonAreaChartHtml("Accumulated Cost", rows, runOrder, orderedRuns, {
       field: "cost",
       format: formatUsd,
@@ -7686,7 +7729,7 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
       format: (value) => formatHhhMmSs(value),
       axis: formatCompactDuration,
     }),
-  ].join("");
+  ].join("") + breakdowns;
   return wrap;
 }
 
@@ -7823,6 +7866,11 @@ function hydrateComparisonCharts(container, rows, runOrder, orderedRuns) {
     }
   }
   hydrateComparisonRunLegend(container, orderedRuns);
+  const detailSelect = container.querySelector(".comparison-breakdowns select");
+  detailSelect?.addEventListener("change", () => {
+    showComparisonMilestoneDetails(container, Number(detailSelect.value) - 1, rows, runOrder, orderedRuns);
+  });
+  showComparisonMilestoneDetails(container, rows.length - 1, rows, runOrder, orderedRuns, false);
 }
 
 function hydrateComparisonRunLegend(container, orderedRuns) {
@@ -7851,7 +7899,7 @@ function hydrateComparisonRunLegend(container, orderedRuns) {
 function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
   window.echarts.getInstanceByDom?.(el)?.dispose?.();
   const chart = window.echarts.init(el, null, { renderer: "canvas" });
-  const labels = rows.map((row) => row.pa);
+  const labels = rows.map((row) => row.label ?? row.pa);
   const series = comparisonCumulativeSeries(
     rows,
     runOrder,
@@ -7879,6 +7927,10 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         colorBySeries,
         metric.tooltipFormatter,
         metric.secondaryLabel,
+        rows,
+        runOrder,
+        orderedRuns,
+        metric.field,
       ),
     },
     legend: {
@@ -7899,6 +7951,7 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         color: "#999",
         interval: "auto",
         rotate: responsiveLayout.labelRotation,
+        formatter: (value) => comparisonAxisLabel(value, responsiveLayout.labelLimit),
         margin: 14,
         hideOverlap: true,
         showMinLabel: true,
@@ -7931,6 +7984,12 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
         },
         areaStyle: { opacity: run.highlighted ? 0.26 : 0.1 },
         z: run.highlighted ? 10 : 2,
+        markArea: {
+          silent: true,
+          itemStyle: { color: cssThemeColor("--muted", "#888"), opacity: 0.07 },
+          data: rows.flatMap((row, index) => row.legacy && runIndex === 0
+            ? [[{ xAxis: Math.max(0, index - 0.45) }, { xAxis: index + 0.45 }]] : []),
+        },
         emphasis: { focus: "series" },
         data: rows.map((_, index) => {
           const point = run.points.find((candidate) => candidate.index === index);
@@ -7980,6 +8039,11 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
       }];
     }),
   });
+  chart.on("click", (params) => {
+    if (Number.isInteger(params.dataIndex)) {
+      showComparisonMilestoneDetails(el.closest(".comparison-charts"), params.dataIndex, rows, runOrder, orderedRuns);
+    }
+  });
   if (hasSecondary) {
     let totalsVisible = false;
     const setTotalsVisible = (visible) => {
@@ -8002,7 +8066,10 @@ function renderEChartArea(el, title, rows, runOrder, orderedRuns, metric) {
     const layout = comparisonEChartResponsiveLayout(el.clientWidth);
     chart.setOption({
       grid: layout.grid,
-      xAxis: { axisLabel: { rotate: layout.labelRotation } },
+      xAxis: { axisLabel: {
+        rotate: layout.labelRotation,
+        formatter: (value) => comparisonAxisLabel(value, layout.labelLimit),
+      } },
     }, { lazyUpdate: true });
   };
   if (window.ResizeObserver) {
@@ -8021,17 +8088,25 @@ function comparisonEChartResponsiveLayout(width) {
       left: compact ? 8 : 54,
       right: compact ? 6 : 20,
       top: 10,
-      bottom: compact ? 50 : 58,
+      bottom: compact ? 10 : 20,
       containLabel: true,
     },
     labelRotation: compact ? 35 : 45,
+    labelLimit: compact ? 14 : 22,
   };
 }
 
-function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secondaryLabel = null) {
+function comparisonAxisLabel(value, limit) {
+  const label = String(value);
+  return label.length > limit ? `${label.slice(0, limit - 1)}…` : label;
+}
+
+function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secondaryLabel = null,
+  milestones = [], runOrder = [], runs = [], field = "cost") {
   const list = Array.isArray(params) ? params : [params];
   const axisLabel = list.find(Boolean)?.axisValueLabel ?? "";
   const grouped = new Map();
+  const milestone = milestones[list.find(Boolean)?.dataIndex];
   for (const param of list.filter((candidate) => candidate?.value != null)) {
     const key = param.seriesName ?? "";
     const entry = grouped.get(key) ?? { active: null, total: null, param };
@@ -8050,10 +8125,14 @@ function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secon
       const values = secondaryLabel
         ? `<strong>active ${escapeHtml(valueFormatter(active))}</strong><span>${escapeHtml(secondaryLabel)} ${escapeHtml(valueFormatter(total))}</span>`
         : `<strong>${escapeHtml(valueFormatter(active))}</strong>`;
+      const position = runs.findIndex((run) => run.label === seriesName);
+      const summary = milestone?.runs?.[runOrder[position]];
+      const nativeDetail = summary?.status === "not required" ? "Not separately required"
+        : summary?.sources?.map((source) => `${source.pa.toUpperCase()} ${valueFormatter(source.summary?.[field] ?? 0)} (${source.summary?.status ?? "not started"})`).join(" + ");
       return `
         <div class="comparison-tooltip-row">
           <span class="comparison-tooltip-dot" style="background:${escapeHtml(color)}"></span>
-          <span>${escapeHtml(seriesName)}</span>
+          <span>${escapeHtml(seriesName)}${nativeDetail ? `<span class="comparison-tooltip-native">${escapeHtml(nativeDetail)}</span>` : ""}</span>
           <span class="comparison-tooltip-values">${values}</span>
         </div>
       `;
@@ -8062,6 +8141,7 @@ function comparisonChartTooltipHtml(params, colorBySeries, valueFormatter, secon
   return `
     <div class="comparison-tooltip">
       <div class="comparison-tooltip-title">${escapeHtml(axisLabel)}</div>
+      ${milestone?.note ? `<div class="comparison-meta">${escapeHtml(milestone.note)}</div>` : ""}
       ${rows}
     </div>
   `;
@@ -8094,14 +8174,19 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
       return "";
     }
     const color = comparisonRunColor(run, runIndex);
-    const line = run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.value).toFixed(1)}`).join(" ");
+    const segments = [];
+    for (const point of run.points) {
+      if (segments.at(-1)?.at(-1)?.index !== point.index - 1) segments.push([]);
+      segments.at(-1).push(point);
+    }
+    const segmentPath = (points, field) => points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point[field] ?? point.value).toFixed(1)}`).join(" ");
+    const line = segments.map((points) => segmentPath(points, "value")).join(" ");
     const totalLine = metric.secondaryField
-      ? run.points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.index).toFixed(1)} ${yFor(point.secondaryValue ?? point.value).toFixed(1)}`).join(" ")
+      ? segments.map((points) => segmentPath(points, "secondaryValue")).join(" ")
       : "";
-    const firstPoint = run.points[0];
     const finalPoint = run.points.at(-1);
     const complete = finalPoint.status === "complete";
-    const area = `${line} L ${xFor(finalPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(firstPoint.index).toFixed(1)} ${yFor(0).toFixed(1)} Z`;
+    const area = segments.map((points) => `${segmentPath(points, "value")} L ${xFor(points.at(-1).index).toFixed(1)} ${yFor(0).toFixed(1)} L ${xFor(points[0].index).toFixed(1)} ${yFor(0).toFixed(1)} Z`).join(" ");
     return `
       <g data-comparison-series="${runIndex}"${comparisonRunVisible(orderedRuns[runIndex], runIndex) ? "" : ' style="display:none"'}>
         ${totalLine ? `<path class="comparison-total-line" d="${totalLine}" stroke="${color}" />` : ""}
@@ -8125,7 +8210,8 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
         <strong>${escapeHtml(title)}</strong>
         <span>${escapeHtml(metric.format(maxValue))}${metric.secondaryField ? " total scale · hover" : " max"}</span>
       </div>
-      <svg class="comparison-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} by PA">
+      <svg class="comparison-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} by milestone">
+        ${rows.flatMap((row, index) => row.legacy ? [`<rect x="${xFor(index - 0.45)}" y="${pad.top}" width="${xFor(0.9) - xFor(0)}" height="${plotHeight}" fill="currentColor" opacity="0.07" />`] : []).join("")}
         ${ticks.map((tick) => {
           const y = yFor(tick);
           return `
@@ -8137,7 +8223,7 @@ function comparisonAreaChartHtml(title, rows, runOrder, orderedRuns, metric) {
           const x = xFor(index);
           return `
             <line class="comparison-tick" x1="${x.toFixed(1)}" y1="${height - pad.bottom}" x2="${x.toFixed(1)}" y2="${height - pad.bottom + 5}" />
-            <text class="comparison-axis-label" x="${x.toFixed(1)}" y="${height - 18}" text-anchor="middle">${escapeHtml(label)}</text>
+            <text class="comparison-axis-label" x="${x.toFixed(1)}" y="${height - 18}" text-anchor="middle"><title>${escapeHtml(label)}</title>${escapeHtml(comparisonAxisLabel(label, 14))}</text>
           `;
         }).join("")}
         <line class="comparison-axis" x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}" />
@@ -8155,43 +8241,15 @@ function cssThemeColor(name, fallback) {
 }
 
 function comparisonCumulativeSeries(rows, runOrder, orderedRuns, field, secondaryField = null) {
-  return runOrder.map((runIndex, position) => {
-    let value = 0;
-    let secondaryValue = 0;
-    return {
+  return runOrder.map((runIndex, position) => ({
       label: orderedRuns[position]?.label ?? `run ${position + 1}`,
       highlighted: orderedRuns[position]?.highlighted === true,
-      points: rows.flatMap((row, index) => {
-        const summary = row.runs?.[runIndex] ?? null;
-        if (!comparisonSummaryStarted(summary)) {
-          return [];
-        }
-        value += Number(summary?.[field] ?? 0) || 0;
-        secondaryValue += secondaryField
-          ? Number(summary?.[secondaryField] ?? summary?.[field] ?? 0) || 0
-          : Number(summary?.[field] ?? 0) || 0;
-        return [{
-          pa: row.pa,
-          index,
-          value,
-          secondaryValue,
-          status: summary?.status ?? "complete",
-        }];
-      }),
-    };
-  });
+      points: ASSIGNMENT_LAYOUT.cumulativePoints(rows, runIndex, field, secondaryField),
+  }));
 }
 
 function comparisonSummaryStarted(summary) {
-  if (!summary || summary.status === "not started") {
-    return false;
-  }
-  return (Array.isArray(summary.turns) && summary.turns.length > 0) ||
-    (Number(summary.durationMs ?? 0) || 0) > 0 ||
-    (Number(summary.totalDurationMs ?? 0) || 0) > 0 ||
-    (Number(summary.cost ?? 0) || 0) > 0 ||
-    summary.status === "partial" ||
-    summary.status === "complete";
+  return ASSIGNMENT_LAYOUT.summaryStarted(summary);
 }
 
 function comparisonChartTicks(maxValue, count) {
@@ -8204,14 +8262,14 @@ function comparisonChartTicks(maxValue, count) {
 
 function comparisonXLabels(rows) {
   if (rows.length <= 1) {
-    return rows.length ? [{ index: 0, label: rows[0].pa }] : [];
+    return rows.length ? [{ index: 0, label: rows[0].label ?? rows[0].pa }] : [];
   }
   const labels = new Map();
   const step = Math.max(1, Math.ceil((rows.length - 1) / 6));
   for (let index = 0; index < rows.length; index += step) {
-    labels.set(index, rows[index].pa);
+    labels.set(index, rows[index].label ?? rows[index].pa);
   }
-  labels.set(rows.length - 1, rows.at(-1).pa);
+  labels.set(rows.length - 1, rows.at(-1).label ?? rows.at(-1).pa);
   return [...labels.entries()].map(([index, label]) => ({ index, label }));
 }
 
@@ -8232,7 +8290,7 @@ function formatCompactDuration(durationMs) {
 }
 
 function comparisonTotalForRows(rows, runIndex) {
-  return rows.reduce((total, row) => {
+  const result = rows.reduce((total, row) => {
     const summary = row.runs?.[runIndex];
     return {
       turns: [...total.turns, ...(summary?.turns ?? [])],
@@ -8244,9 +8302,17 @@ function comparisonTotalForRows(rows, runIndex) {
       status: total.status === "partial" || summary?.status === "partial" ? "partial" : "complete",
     };
   }, { turns: [], durationMs: 0, totalDurationMs: 0, cost: 0, status: "complete" });
+  const required = rows.map((row) => row.runs?.[runIndex]).filter((summary) => summary?.status !== "not required");
+  result.status = !required.some(comparisonSummaryStarted) ? "not started"
+    : required.every((summary) => summary?.status === "complete") ? "complete" : "partial";
+  return result;
 }
 
 function comparisonCellHtml(summary) {
+  if (!summary || summary.status === "not started" || summary.status === "not required") {
+    const native = summary?.sources?.map((source) => `${source.layout.toUpperCase()} ${source.pa.toUpperCase()}`).join(" + ");
+    return `<div class="comparison-meta">${summary?.status === "not required" ? "Not separately required" : "Not reached"}${native ? ` · ${escapeHtml(native)}` : ""}</div>`;
+  }
   const turns = Array.isArray(summary?.turns) ? summary.turns.length : 0;
   const status = summary?.status ?? "n/a";
   const activeDurationMs = summary?.activeDurationMs ?? summary?.durationMs ?? 0;
@@ -8257,6 +8323,8 @@ function comparisonCellHtml(summary) {
   return `
     <div>${escapeHtml(formatHhhMmSs(activeDurationMs))} active / ${escapeHtml(formatHhhMmSs(totalDurationMs))} total / ${escapeHtml(formatUsd(summary?.cost ?? 0))}</div>
     <div class="comparison-meta">${fmtInt(turns)} turn${turns === 1 ? "" : "s"} / ${escapeHtml(status)}</div>
+    ${summary.sources?.length ? `<details class="comparison-native-details"><summary>${escapeHtml(summary.sources.map((source) => `${source.layout.toUpperCase()} ${source.pa.toUpperCase()}`).join(" + "))}</summary>
+      ${summary.sources.map((source) => `<div><strong>${escapeHtml(source.pa.toUpperCase())} · ${escapeHtml(source.title)}</strong>${comparisonCellHtml(source.summary)}</div>`).join("")}</details>` : ""}
   `;
 }
 
@@ -8397,14 +8465,13 @@ function highlightedComparisonRunIndex(comparison) {
   return (comparison?.runs ?? []).findIndex((run) => run?.highlighted === true);
 }
 
-function defaultRunComparisonThrough(comparison) {
-  const rows = comparison?.rows ?? [];
+function defaultRunComparisonThrough(comparison, rows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, state.comparisonLayout)) {
   const runIndex = highlightedComparisonRunIndex(comparison);
   let currentPa = 0;
   if (runIndex >= 0) {
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
       if (comparisonSummaryStarted(row?.runs?.[runIndex])) {
-        currentPa = Number.parseInt(String(row.pa ?? "").replace(/^pa/, ""), 10) || currentPa;
+        currentPa = index + 1;
       }
     }
   }
@@ -8413,20 +8480,14 @@ function defaultRunComparisonThrough(comparison) {
 
 async function renderRunComparisonPanel(run, comparison, loadedAt) {
   const runs = comparison?.runs ?? [];
-  const highlightedRun = runs[highlightedComparisonRunIndex(comparison)] ?? null;
-  const displayLayout = ASSIGNMENT_LAYOUT.normalizeLayoutId(
-    highlightedRun?.layout ?? run?.assignmentLayout,
-    "v2",
-  );
-  const comparisonThrough = Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10);
-  const allRows = ASSIGNMENT_LAYOUT.remapComparisonRows(comparison, displayLayout)
-    .slice(0, Number.isFinite(comparisonThrough) ? comparisonThrough : undefined);
+  const displayLayout = state.comparisonLayout;
+  const allRows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, displayLayout);
   const requestedThrough = Number.parseInt(state.runComparisonThrough.get(run.id), 10);
   const through = Math.max(1, Math.min(
     allRows.length,
-    Number.isFinite(requestedThrough) ? requestedThrough : defaultRunComparisonThrough(comparison),
+    Number.isFinite(requestedThrough) ? requestedThrough : defaultRunComparisonThrough(comparison, allRows),
   ));
-  const renderKey = `${run.id}:${loadedAt}:${through}`;
+  const renderKey = `${run.id}:${loadedAt}:${displayLayout}:${through}`;
   if (runComparisonCard.dataset.renderKey === renderKey) {
     return;
   }
@@ -8447,12 +8508,11 @@ async function renderRunComparisonPanel(run, comparison, loadedAt) {
   const localName = runs.find((candidate) => candidate.highlighted)?.label ?? run.label ?? run.id;
   runComparisonMeta.textContent = [
     localName,
-    `${ASSIGNMENT_LAYOUT.descriptor(displayLayout).shortLabel} order`,
+    displayLayout === "capabilities" ? "capability order" : `${displayLayout.toUpperCase()} PA order`,
     publishedAt ? `baseline ${fmtShort(publishedAt)}` : "",
   ].filter(Boolean).join(" / ");
-  runComparisonThrough.min = "1";
-  runComparisonThrough.max = String(allRows.length);
-  runComparisonThrough.value = String(through);
+  runComparisonThrough.innerHTML = comparisonThroughOptions(allRows, through);
+  runComparisonLayout.innerHTML = comparisonLayoutOptions(displayLayout);
   runComparisonThrough.disabled = false;
   runComparisonCard.dataset.runId = run.id;
   runComparisonCard.dataset.renderKey = renderKey;
@@ -9393,7 +9453,7 @@ if (runComparisonThrough) {
     if (!runId || !cached?.data) {
       return;
     }
-    const maxPa = cached.data.rows?.length ?? 1;
+    const maxPa = ASSIGNMENT_LAYOUT.comparisonRows(cached.data, state.comparisonLayout).length;
     const through = Math.max(1, Math.min(
       maxPa,
       Number.parseInt(runComparisonThrough.value, 10) || defaultRunComparisonThrough(cached.data),
@@ -9407,6 +9467,17 @@ if (runComparisonThrough) {
     ).catch((error) => console.error("run comparison render failed", error));
   });
 }
+runComparisonLayout?.addEventListener("change", () => {
+  state.comparisonLayout = runComparisonLayout.value;
+  state.runComparisonThrough.clear();
+  state.compareThrough = null;
+  const runId = state.selectedRun;
+  const cached = state.runComparisons.get(runId);
+  if (cached?.data) {
+    renderRunComparisonPanel(state.runs.find((run) => run.id === runId) ?? { id: runId }, cached.data, cached.loadedAt)
+      .catch((error) => console.error("run comparison render failed", error));
+  }
+});
 window.addEventListener("scroll", handleObservedScroll, { passive: true });
 window.addEventListener("resize", scheduleProgressDockSpaceUpdate, { passive: true });
 window.addEventListener("focusin", (event) => {

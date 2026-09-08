@@ -162,11 +162,22 @@ available even though their source trajectories are no longer local.
 Set `"assignmentLayout": "v3"` or `"v4"` for the corresponding assignment
 order. Runs without this field default to V2, with `v3*` and `v4*` run names
 recognized as compatibility fallbacks. V4 has 34 stages: its inception PA34
-aligns with V3's PA39. Removed standalone stages have empty comparison cells;
-their costs are not assigned to another stage. Comparisons use V3 order
-globally and the selected run's native order on individual run pages; event
-logs retain their original PA numbers. Stage alignment compares the broad
-compiler milestones, not identical fixture coverage across course versions.
+aligns with V3's PA39. Both comparison pages default to named capability
+groups, with V2/V3/V4 PA-order views available. V3's macro + preprocessor
+assignments combine against V4 PA4. Older recognition, namespace and CY86
+assignments form a shaded legacy-only group; their spending is retained even
+in V4 order. LowIR is explicitly an approximate match because its deliverable
+changed. Every native assignment contributes once: changing views does not
+change a full run's total cost or active/total agent time.
+
+Hover for native PA contributions, or select a chart point/the milestone
+details selector to inspect the original assignments. A combined group stays
+partial until all its required assignments complete. “Not separately required”
+is distinct from “Not reached”; an interior not-required slot carries the
+cumulative line without claiming completion. Capability-order accumulation is
+not chronological spending (notably V2 places ABI naming at PA30). Event logs
+and exported rows retain native PA numbers, so archived data needs no migration.
+The export `--through` cutoff remains in canonical V3 numbering.
 
 The [V4 Codex scaffold](examples/v4codex/README.md) contains an Astra/xhigh
 config and the complete spec-aware prompt/goal family, including PA34

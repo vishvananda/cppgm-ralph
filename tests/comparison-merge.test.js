@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergePublishedAndLocalComparison } from "../ralph-viz/server.js";
+import "../ralph-viz/comparison-run-visibility.js";
 
 function summary(cost, status = "complete") {
   return {
@@ -76,4 +77,38 @@ test("live comparison retains an older published run with a different event file
 
   assert.equal(merged.runs.length, 2);
   assert.deepEqual(merged.rows[0].runs.map((run) => run.cost), [4, 5]);
+});
+
+test("live comparison preserves finished-run visibility while hiding unfinished baselines", () => {
+  const localPath = "/work/.ralph/v4codex/events/run.jsonl";
+  const published = {
+    through: "pa39",
+    runs: [
+      { spec: "trusted", layout: "v2", comparisonComplete: true },
+      { spec: "v3codex", layout: "v3", comparisonComplete: true },
+      { spec: "v3multi", layout: "v3", comparisonComplete: false },
+      { spec: "legacy-without-completion" },
+      { spec: "v4codex", layout: "v4", comparisonComplete: false, filePath: localPath },
+    ],
+    rows: [{ pa: "pa1", runs: [summary(1), summary(2), summary(3), summary(4), summary(5)] }],
+  };
+  const before = structuredClone(published);
+  const local = {
+    through: "pa39",
+    runs: [{ spec: "v4codex/run", layout: "v4", filePath: localPath }],
+    rows: [{ pa: "pa1", runs: [summary(6, "partial")] }],
+  };
+  const merged = mergePublishedAndLocalComparison(published, local, {
+    shape: "v4codex", filePath: localPath,
+  }, new Date("2026-09-07T00:00:00Z"));
+
+  assert.deepEqual(merged.runs.map(globalThis.RALPH_COMPARISON_RUN_VISIBILITY.defaultVisible), [
+    true, true, false, false, true,
+  ]);
+  assert.equal(merged.runs[0].comparisonComplete, true);
+  assert.equal(merged.runs[2].comparisonComplete, false);
+  assert.equal(merged.runs.at(-1).highlighted, true);
+  assert.equal(merged.runs.at(-1).layout.id, "v4");
+  assert.equal(merged.rows[0].runs.at(-1).cost, 6, "local data replaces its published duplicate");
+  assert.deepEqual(published, before, "published metadata is not mutated");
 });

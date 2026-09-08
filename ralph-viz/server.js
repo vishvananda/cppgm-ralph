@@ -7324,6 +7324,7 @@ function comparisonRunForChart(run, highlighted = false) {
     model: run?.model ?? null,
     repositoryUrl: run?.repositoryUrl ?? null,
     layout: ASSIGNMENT_LAYOUT.descriptor(run?.layout, "v2"),
+    comparisonComplete: run?.comparisonComplete === true,
     highlighted,
   };
 }

@@ -7,7 +7,7 @@
     <link id="prismThemeDark" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" />
     <link id="prismThemeLight" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" disabled />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/diff-highlight/prism-diff-highlight.min.css" />
-    <link rel="stylesheet" href="styles.css?v=20260814-bounded-progress" />
+    <link rel="stylesheet" href="styles.css?v=20260907-capability-groups" />
   </head>
   <body>
     <main class="page">
@@ -65,8 +65,10 @@
         <div class="run-comparison-heading">
           <h2>Published Run Comparison</h2>
           <div class="run-comparison-controls">
-            <label for="runComparisonThrough">through PA</label>
-            <input id="runComparisonThrough" class="compact-number" type="number" min="1" disabled />
+            <label for="runComparisonLayout">view</label>
+            <select id="runComparisonLayout" class="comparison-select"></select>
+            <label for="runComparisonThrough">through</label>
+            <select id="runComparisonThrough" class="comparison-select" disabled></select>
             <span id="runComparisonMeta" class="muted"></span>
           </div>
         </div>
@@ -100,13 +102,13 @@
     <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/diff-highlight/prism-diff-highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
     <script src="model-pricing.js?v=20260901-fable-5-1"></script>
-    <script src="assignment-layouts.js?v=20260805-v3-order"></script>
+    <script src="assignment-layouts.js?v=20260907-capability-groups"></script>
     <script src="command-status.js?v=20260814-uncollected-async"></script>
     <script src="entry-dedupe.js?v=20260806-entry-dedupe"></script>
     <script src="comparison-run-visibility.js?v=20260822-v3-defaults"></script>
     <script src="safe-markdown.js?v=20260806-safe-markdown"></script>
     <script src="test-progress-evidence.js?v=20260822-focused-pass"></script>
     <script src="test-status-summary.js?v=20260815-partial-stage"></script>
-    <script src="app.js?v=20260822-focused-pass"></script>
+    <script src="app.js?v=20260907-capability-groups"></script>
   </body>
 </html>

@@ -542,6 +542,60 @@ body.is-static-viz .combined-view-toggle {
   min-width: 0;
 }
 
+.comparison-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.comparison-select {
+  min-width: 0;
+  max-width: min(18rem, 100%);
+}
+
+.comparison-explanation,
+.comparison-breakdowns {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.comparison-explanation {
+  margin: 0;
+}
+
+.comparison-breakdowns > select {
+  margin: 0.5rem 0;
+}
+
+.comparison-breakdown-run,
+.comparison-native-details > div {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.comparison-native-details > div {
+  padding-left: 0.6rem;
+}
+
+.comparison-legacy {
+  background: var(--surface-raised);
+}
+
+.comparison-tooltip-native {
+  display: block;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.comparison-tooltip .comparison-meta {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .run-comparison-card {
   overflow: hidden;
 }
