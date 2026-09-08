@@ -46,6 +46,11 @@ import {
 } from "./systemd-scope.js";
 import "./ralph-viz/test-progress-evidence.js";
 import "./ralph-viz/turn-lifecycle.js";
+import {
+  assertCodexGoalComplete,
+  codexSessionTaskCompletion,
+  requiresCodexGoalCompletion,
+} from "./codex-goal-completion.js";
 
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
@@ -59,7 +64,6 @@ const STAGE_COUNT_HINTS_TAIL_BYTES = 64 * 1024 * 1024;
 const EVENT_LOG_TURN_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_RESUME_STDOUT_SILENCE_MS = 5000;
 const CODEX_RESUME_SESSION_FALLBACK_POLL_MS = 1000;
-const CODEX_GOAL_COMPLETE_STATUSES = new Set(["complete", "completed"]);
 const CODEX_INCOMPLETE_TASK_RETRY_MAX = Number(
   process.env.RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX ?? 20,
 );
@@ -873,6 +877,15 @@ async function main() {
           turnNumber: turnNumber + 1,
           provider: agentProfile.provider,
         });
+        if (requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
+          // exec can exit 0 immediately after a final message, interrupting
+          // the native goal's next continuation. The watcher cannot catch
+          // that short-lived process; verify the durable goal before accepting
+          // this attempt or consuming a Ralph turn.
+          const threadId = thread.id ?? turn.threadId ?? activeThreadId;
+          const current = await withCodexAppServer((client) => client.request("thread/goal/get", { threadId }));
+          assertCodexGoalComplete(current?.goal, threadId);
+        }
         break;
       } catch (error) {
         // Close every failed attempt, including recoverable ones. Keep phase
@@ -3873,26 +3886,25 @@ async function completeLoopGoalIfPresent(
   try {
     await withCodexAppServer(async (client) => {
       const current = await client.request("thread/goal/get", { threadId });
-      if (!current?.goal || current.goal.status === "complete") {
-        return;
-      }
-
-      const response = await client.request("thread/goal/set", {
-        threadId,
-        status: "complete",
-      });
+      if (!current?.goal) return;
+      // Only the model completes a native goal. Passing checks and committing
+      // a dirty worktree are necessary gates, not evidence the audit is done.
+      assertCodexGoalComplete(current.goal, threadId);
       const record = buildRalphGoalEventRecord({
         action: "complete",
-        goal: response.goal,
+        goal: current.goal,
         threadId,
         turnNumber,
         testStatus,
       });
       await appendRalphEventRecord(record);
-      log(`Marked Codex loop goal complete: ${previewText(response.goal.objective)}`);
+      log(`Confirmed Codex loop goal complete: ${previewText(current.goal.objective)}`);
     });
   } catch (error) {
-    log(`Failed to mark Codex loop goal complete: ${formatErrorMessage(error)}`);
+    // Old providers without native goals use Ralph's portable goal file.
+    // Never use that fallback to override an observed incomplete native goal.
+    if (error?.codexGoalVerification || !(await readPortableGoalState(threadId))) throw error;
+    log(`Native Codex goal unavailable; using portable goal: ${formatErrorMessage(error)}`);
   }
   await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
 }
@@ -5123,6 +5135,7 @@ class CodexThread {
       webSearchEnabled: this.threadOptions.webSearchEnabled,
       approvalPolicy: this.threadOptions.approvalPolicy,
       additionalDirectories: this.threadOptions.additionalDirectories,
+      requireGoalCompletion: requiresCodexGoalCompletion(turnOptions.goal, "codex"),
       signal: turnOptions.signal,
     });
 
@@ -5299,9 +5312,12 @@ class CodexExec {
             codexSessionFailure.codexUsageLimit = true;
             codexSessionFailure.codexErrorInfo = result.codexErrorInfo ?? null;
             codexSessionFailure.threadId = args.threadId;
+          } else if (result?.status === "goal_stopped") {
+            codexSessionFailure = new Error(result.reason);
+            codexSessionFailure.threadId = args.threadId;
           }
           terminateChildProcess(child, "SIGTERM");
-        })
+        }, { requireGoalCompletion: args.requireGoalCompletion })
       : null;
     let spawnError = null;
     child.once("error", (error) => {
@@ -6743,7 +6759,7 @@ function buildAntigravityExecEnv(options, config) {
   return env;
 }
 
-function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
+function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete, options = {}) {
   let stopped = false;
   let polling = false;
 
@@ -6753,8 +6769,8 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
     }
     polling = true;
     try {
-      const result = await getCodexSessionTaskCompletion(threadId, startedAtMs);
-      if (result.status !== "pending") {
+      const result = await getCodexSessionTaskCompletion(threadId, startedAtMs, options);
+      if (!stopped && result.status !== "pending") {
         stopped = true;
         clearInterval(timer);
         onComplete(result);
@@ -6776,10 +6792,9 @@ function watchCodexSessionTaskComplete(threadId, startedAtMs, onComplete) {
   };
 }
 
-async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
+async function getCodexSessionTaskCompletion(threadId, startedAtMs, options = {}) {
   const files = await findCodexSessionFiles(threadId);
-  let latestLifecycleEvent = null;
-  let latestGoalEvent = null;
+  const records = [];
   for (const filePath of files) {
     const raw = await readRecentText(filePath, CODEX_SESSION_WATCH_TAIL_BYTES);
     const lines = raw.split(/\r?\n/);
@@ -6797,113 +6812,15 @@ async function getCodexSessionTaskCompletion(threadId, startedAtMs) {
       } catch (_) {
         continue;
       }
-      const timestampMs = Date.parse(record.timestamp ?? "");
-      if (!Number.isFinite(timestampMs) || timestampMs < startedAtMs - 5000) {
-        continue;
-      }
-      const payload = record?.payload ?? {};
-      const eventType = payload?.type;
-      if (record?.type === "event_msg") {
-        if (eventType === "thread_goal_updated") {
-          latestGoalEvent = {
-            status: String(payload?.goal?.status ?? ""),
-            timestampMs,
-            turnId: payload?.turnId ?? null,
-          };
-        } else if (eventType === "task_complete" || eventType === "task_started") {
-          latestLifecycleEvent = {
-            type: eventType,
-            timestampMs,
-            turnId: payload?.turn_id ?? null,
-            lastAgentMessage: payload?.last_agent_message ?? null,
-            error: payload?.error ?? null,
-          };
-        }
-      } else if (
-        record?.type === "response_item" &&
-        (eventType === "function_call_output" || eventType === "custom_tool_call_output")
-      ) {
-        const goalStatus = parseCodexToolGoalStatus(payload?.output, threadId);
-        if (goalStatus) {
-          latestGoalEvent = {
-            status: goalStatus,
-            timestampMs,
-            turnId: payload?.internal_chat_message_metadata_passthrough?.turn_id ?? null,
-          };
-        }
-      }
+      if (record?.type === "event_msg" || record?.type === "response_item") records.push(record);
     }
   }
 
-  if (latestLifecycleEvent?.type !== "task_complete") {
-    return { status: "pending" };
-  }
-  if (
-    Number.isFinite(latestLifecycleEvent.timestampMs) &&
-    Date.now() - latestLifecycleEvent.timestampMs < CODEX_TASK_COMPLETE_SETTLE_MS
-  ) {
-    return { status: "pending" };
-  }
-  if (latestLifecycleEvent.error?.codex_error_info === "usage_limit_exceeded") {
-    return {
-      status: "usage_limit",
-      message: latestLifecycleEvent.error.message ?? "Codex usage limit was reached.",
-      codexErrorInfo: latestLifecycleEvent.error.codex_error_info,
-    };
-  }
-  const lastAgentMessage = latestLifecycleEvent.lastAgentMessage;
-  const hasFinalMessage = typeof lastAgentMessage === "string" && lastAgentMessage.trim() !== "";
-  // Ralph installs an active goal immediately before this exec begins. For
-  // very large sessions that initial event can fall outside the bounded tail
-  // read, so absence of a newer goal event means the known initial state is
-  // still active rather than unknown.
-  const latestGoalStatus = latestGoalEvent?.status ?? (CONFIG.loopGoalsEnabled ? "active" : "");
-  if (CONFIG.loopGoalsEnabled && latestGoalStatus && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
-    if (latestGoalStatus === "active" && hasFinalMessage) {
-      return { status: "complete" };
-    }
-    const ageMs = Number.isFinite(latestLifecycleEvent.timestampMs)
-      ? Date.now() - latestLifecycleEvent.timestampMs
-      : CODEX_GOAL_CONTINUATION_GRACE_MS;
-    if (latestGoalStatus === "active" && ageMs < CODEX_GOAL_CONTINUATION_GRACE_MS) {
-      return { status: "pending" };
-    }
-    return {
-      status: "incomplete",
-      reason:
-        `Codex task ended while loop goal status was ${latestGoalStatus}; ` +
-        "requesting same-turn continuation.",
-    };
-  }
-  if (!hasFinalMessage && !CODEX_GOAL_COMPLETE_STATUSES.has(latestGoalStatus)) {
-    return {
-      status: "incomplete",
-      reason:
-        "Codex task_complete did not include a final agent message; " +
-        "requesting same-turn continuation.",
-    };
-  }
-  return { status: "complete" };
-}
-
-function parseCodexToolGoalStatus(output, threadId) {
-  if (typeof output !== "string" || output.trim() === "") {
-    return null;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(output);
-  } catch (_) {
-    return null;
-  }
-  const goal = parsed?.goal;
-  if (!goal || typeof goal.status !== "string") {
-    return null;
-  }
-  if (goal.threadId && threadId && goal.threadId !== threadId) {
-    return null;
-  }
-  return goal.status;
+  return codexSessionTaskCompletion(records, {
+    ...options, threadId, startedAtMs,
+    settleMs: CODEX_TASK_COMPLETE_SETTLE_MS,
+    continuationGraceMs: CODEX_GOAL_CONTINUATION_GRACE_MS,
+  });
 }
 
 async function readRecentText(filePath, maxBytes) {

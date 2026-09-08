@@ -78,6 +78,14 @@ transient-error backoff without consuming another turn. Authentication and
 configuration errors remain fatal. Failed attempts retain their phase for
 resumption but stop the viz's live clock; elapsed attempt time is preserved,
 excluding downtime before a retry.
+For native Codex loop goals, a final message or `turn.completed` event is not
+goal completion. Ralph leaves native continuations running and verifies
+`thread/goal/get` when the CLI exits. An active goal resumes the same thread
+within the same Ralph turn, subject to `RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX`
+(default 20); blocked, paused, missing or unverifiable goals stop without
+advancing. Only Codex completes its native goal; passing checks and a clean
+worktree do not override it. Portable goals and runs with goals disabled keep
+their existing check-driven completion behavior.
 When restarting only to pick up changed prompt files, add
 `--reuse-last-checks` (or set `RALPH_REUSE_LAST_CHECKS=1`) to reuse the latest
 compatible recorded phase check result instead of rerunning the startup checks.
