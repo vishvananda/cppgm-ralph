@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import "./assignment-layouts.js";
 import "./model-pricing.js";
 import "./test-progress-evidence.js";
+import "./turn-lifecycle.js";
 import {
   VIEWER_ASSET_NAMES,
   viewerAssetForPathname,
@@ -35,6 +36,7 @@ const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
+const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SCROLL_DEBUG_LOG_PATH = path.join(RALPH_DIR, "viz-scroll-debug.jsonl");
@@ -48,8 +50,8 @@ const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 27;
-const COMPARE_PA_COSTS_CACHE_VERSION = 2;
+const RUN_USAGE_CACHE_VERSION = 28;
+const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
@@ -154,7 +156,7 @@ async function listFiles() {
   });
 }
 
-async function readRunStateSummary(statePath, fileBase, latestMtimeMs = null) {
+export async function readRunStateSummary(statePath, fileBase, latestMtimeMs = null) {
   const parsed = JSON.parse(await fs.readFile(statePath, "utf8"));
   const eventLogPath = typeof parsed.eventLogPath === "string" ? parsed.eventLogPath : "";
   const stateFileBase = eventLogPath.endsWith(".jsonl")
@@ -172,7 +174,8 @@ async function readRunStateSummary(statePath, fileBase, latestMtimeMs = null) {
   const recentlyUpdated = activeAgeMs != null && activeAgeMs <= ACTIVE_RUN_MAX_AGE_MS;
   return {
     matchesCurrent,
-    active: matchesCurrent && recentlyUpdated && Boolean(activePhase),
+    active: matchesCurrent && recentlyUpdated && Boolean(activePhase) && parsed.activeTurn?.status !== "failed",
+    activeTurn: parsed.activeTurn ?? null,
     recentlyUpdated,
     activeAgeMs,
     turnsCompleted: Number.isInteger(parsed.turnsCompleted) ? parsed.turnsCompleted : null,
@@ -2568,7 +2571,9 @@ function activeEventDurationMs(timedEvents, options = {}) {
 
   for (let i = 0; i < events.length; i += 1) {
     const event = events[i];
-    if (isTimedWorkStartEvent(event)) {
+    if (TURN_LIFECYCLE.isFailureEvent(event)) {
+      openCommands = 0;
+    } else if (isTimedWorkStartEvent(event)) {
       openCommands += 1;
     } else if (isTimedWorkEndEvent(event)) {
       openCommands = Math.max(0, openCommands - 1);
@@ -2596,7 +2601,7 @@ function turnExecutionDurationMs(events, sessionTiming = new Map(), options = {}
     .reduce((sum, entry) => sum + entry.durationMs, 0);
 }
 
-function turnExecutionDurationEntries(events, sessionTiming = new Map(), options = {}) {
+export function turnExecutionDurationEntries(events, sessionTiming = new Map(), options = {}) {
   const fallbackDurations = ralphEventTurnDurationFallbacks(events, options);
   const limitWaitsByAttempt = limitWaitsByRawTurnAttempt(events);
   const attemptDurations = new Map();
@@ -2694,6 +2699,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   const spansByAttempt = new Map();
   const limitWaitsByAttempt = new Map();
   const openCommandsByAttempt = new Map();
+  const failedAttempts = new Set();
   let latestEventTime = -Infinity;
   const latestAttemptKeys = new Set();
   for (const event of events) {
@@ -2734,7 +2740,10 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
     span.first = Math.min(span.first, time);
     span.last = Math.max(span.last, time);
     spansByAttempt.set(key, span);
-    if (isTimedWorkStartEvent(event)) {
+    if (TURN_LIFECYCLE.isFailureEvent(event)) {
+      failedAttempts.add(key);
+      openCommandsByAttempt.set(key, 0);
+    } else if (isTimedWorkStartEvent(event) && !failedAttempts.has(key)) {
       openCommandsByAttempt.set(key, (openCommandsByAttempt.get(key) ?? 0) + 1);
     } else if (isTimedWorkEndEvent(event)) {
       openCommandsByAttempt.set(key, Math.max(0, (openCommandsByAttempt.get(key) ?? 0) - 1));
@@ -2742,7 +2751,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
   }
   if (includeOpenCommandTail) {
     for (const [key, openCommands] of openCommandsByAttempt.entries()) {
-      if (openCommands <= 0 || !latestAttemptKeys.has(key)) {
+      if (openCommands <= 0 || failedAttempts.has(key) || !latestAttemptKeys.has(key)) {
         continue;
       }
       const span = spansByAttempt.get(key);
@@ -2768,6 +2777,7 @@ function ralphEventTurnDurationFallbacks(events, options = {}) {
 function isTurnTimingActivityEvent(event) {
   const type = String(event?.eventType ?? "");
   return type === "ralph.prompt" ||
+    type === "error" || type === "ralph.turn-failed" ||
     type === "thread.started" ||
     type === "codex.session.token_count" ||
     type === "codex.task_complete" ||

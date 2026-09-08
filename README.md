@@ -72,6 +72,12 @@ follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
 still active, Ralph skips re-sending the goal and instead sends a short
 continuation nudge with refreshed turn instructions in the appended system
 prompt. The CLI path can be overridden with `claudePath` / `RALPH_CLAUDE_PATH`.
+Codex `Reconnecting... N/M` notices leave its stream running while the CLI
+retries. If the stream ultimately fails, transport errors use Ralph's bounded
+transient-error backoff without consuming another turn. Authentication and
+configuration errors remain fatal. Failed attempts retain their phase for
+resumption but stop the viz's live clock; elapsed attempt time is preserved,
+excluding downtime before a retry.
 When restarting only to pick up changed prompt files, add
 `--reuse-last-checks` (or set `RALPH_REUSE_LAST_CHECKS=1`) to reuse the latest
 compatible recorded phase check result instead of rerunning the startup checks.

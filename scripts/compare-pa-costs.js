@@ -7,6 +7,7 @@ import readline from "readline";
 import { fileURLToPath } from "url";
 import "../ralph-viz/model-pricing.js";
 import "../ralph-viz/assignment-layouts.js";
+import "../ralph-viz/turn-lifecycle.js";
 import {
   collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -15,6 +16,7 @@ import {
 const DEFAULT_RATES = globalThis.RALPH_MODEL_PRICE_RATES;
 const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
+const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
 
 const MODEL_ALIASES = [
@@ -192,6 +194,7 @@ function comparisonEventRelevant(record) {
     type === "ralph.prompt" ||
     type === "ralph.goal" ||
     type === "ralph.turn-restart" ||
+    type === "ralph.turn-failed" || type === "error" ||
     type === "ralph.limit_wait" ||
     type === "claude.limit_wait" ||
     type === "thread.started" ||
@@ -813,7 +816,11 @@ function fillDurationFallbacks(events, byTurn) {
       bestDurationMs = slot.goalTimeUsedMs;
       subtractWait = true;
     }
-    if (bestDurationMs > 0) {
+    if (slot.failedAtMs != null) {
+      // Zero is a valid duration for an immediate failure, not a missing
+      // measurement to replace with downtime until the next attempt.
+      slot.durationMs = Math.max(0, slot.failedAtMs - starts[index].startTime - limitWaitOverlapMs(slot));
+    } else if (bestDurationMs > 0) {
       slot.durationMs = Math.max(0, bestDurationMs - (subtractWait ? limitWaitOverlapMs(slot) : 0));
     } else {
       const nextTime = starts[index + 1]?.startTime;
@@ -866,6 +873,7 @@ function readRunEventUsageIntoTurns(events, byTurn) {
       !type.startsWith("turn.") &&
       type !== "thread.started" &&
       type !== "codex.session.token_count" &&
+      type !== "error" && type !== "ralph.turn-failed" &&
       type !== "ralph.prompt"
     ) {
       continue;
@@ -876,6 +884,7 @@ function readRunEventUsageIntoTurns(events, byTurn) {
     }
     slot.eventFirstMs = slot.eventFirstMs == null ? time : Math.min(slot.eventFirstMs, time);
     slot.eventLastMs = slot.eventLastMs == null ? time : Math.max(slot.eventLastMs, time);
+    if (TURN_LIFECYCLE.isFailureEvent(record)) slot.failedAtMs = time;
 
     const item = record.event?.item;
     if (item?.type === "subagent") {

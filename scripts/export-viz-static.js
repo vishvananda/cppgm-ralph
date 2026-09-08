@@ -574,6 +574,7 @@ async function exportImplementationFingerprint() {
     path.join(REPO_ROOT, "claude-subagent-events.js"),
     path.join(REPO_ROOT, "ralph-viz", "assignment-layouts.js"),
     path.join(REPO_ROOT, "ralph-viz", "model-pricing.js"),
+    path.join(REPO_ROOT, "ralph-viz", "turn-lifecycle.js"),
   ];
   const hash = createHash("sha256");
   hash.update(String(EXPORT_CACHE_VERSION));

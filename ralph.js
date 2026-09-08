@@ -45,8 +45,10 @@ import {
   stopSystemdScope,
 } from "./systemd-scope.js";
 import "./ralph-viz/test-progress-evidence.js";
+import "./ralph-viz/turn-lifecycle.js";
 
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
+const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -836,6 +838,14 @@ async function main() {
     let sigtermRecoveryAttempts = 0;
     let codexIncompleteTaskRetryAttempts = 0;
     while (true) {
+      state.activeTurn = {
+        ...state.activeTurn,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        error: null,
+      };
+      await saveState({ ...state, updatedAt: state.activeTurn.startedAt });
       try {
         const { events } = await thread.runStreamed(turnPrompt, {
           goal: loopGoal,
@@ -865,6 +875,20 @@ async function main() {
         });
         break;
       } catch (error) {
+        // Close every failed attempt, including recoverable ones. Keep phase
+        // and handoff context intact so --continue still resumes correctly.
+        const failedAt = new Date().toISOString();
+        const failedThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
+        state.threadId = failedThreadId;
+        state.activeTurn = { ...state.activeTurn, status: "failed", endedAt: failedAt, error: formatErrorMessage(error) };
+        await appendRalphEventRecord({
+          recordedAt: failedAt,
+          threadId: failedThreadId,
+          turnNumber: turnNumber + 1,
+          eventType: "ralph.turn-failed",
+          event: { type: "ralph.turn-failed", sender: "ralph", startedAt: state.activeTurn.startedAt, error: { message: formatErrorMessage(error) } },
+        });
+        await saveState({ ...state, updatedAt: failedAt });
         if (isCodexUsageLimitError(error, agentProfile.provider) && !shutdownInProgress) {
           providerLimitRetryAttempts += 1;
           const retryMax = codexLimitRetryMax();
@@ -1236,15 +1260,7 @@ function positiveFiniteNumber(value, fallback) {
 }
 
 function isCodexTransientProviderMessage(message) {
-  if (typeof message !== "string" || !message.trim()) {
-    return false;
-  }
-  return (
-    /\bselected model\b.*\bat capacity\b/i.test(message) ||
-    /\bmodel\b.*\bat capacity\b/i.test(message) ||
-    /\btemporarily unavailable\b/i.test(message) ||
-    /\boverloaded\b/i.test(message)
-  );
+  return TURN_LIFECYCLE.isCodexTransientProviderMessage(message);
 }
 
 function isClaudeTransientProviderMessage(message) {
@@ -7067,6 +7083,7 @@ async function collectStreamedTurn(events, options = {}) {
   let usage = null;
   let turnFailure = null;
   let streamError = null;
+  let pendingReconnect = null;
   const prompt = typeof options.prompt === "string" ? options.prompt : "";
   let threadId = options.threadId ?? null;
   const turnNumber = options.turnNumber ?? null;
@@ -7112,10 +7129,17 @@ async function collectStreamedTurn(events, options = {}) {
       }
     } else if (event.type === "turn.completed") {
       usage = event.usage;
+      pendingReconnect = null;
+    } else if (event.type === "codex.task_complete") {
+      pendingReconnect = null;
     } else if (event.type === "turn.failed") {
       turnFailure = event.error;
       break;
     } else if (event.type === "error") {
+      if (provider === "codex" && TURN_LIFECYCLE.isCodexReconnectNotice(event)) {
+        pendingReconnect = event.message;
+        continue;
+      }
       streamError = event.message;
       break;
     }
@@ -7126,6 +7150,9 @@ async function collectStreamedTurn(events, options = {}) {
   }
   if (streamError) {
     throw buildStreamedTurnError(streamError, { threadId, turnNumber });
+  }
+  if (pendingReconnect) {
+    throw buildStreamedTurnError(`Codex stream disconnected before completion: ${pendingReconnect}`, { threadId, turnNumber });
   }
 
   await flushEventLogBuffer(eventLogPath, pendingEventRecords);
@@ -8364,6 +8391,10 @@ function normalizeActiveTurnState(value) {
     startedClean: value.startedClean === true,
     cleanupOnly: value.cleanupOnly === true,
     agent: normalizeAgentProfileState(value.agent),
+    status: ["running", "failed"].includes(value.status) ? value.status : null,
+    startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+    endedAt: typeof value.endedAt === "string" ? value.endedAt : null,
+    error: typeof value.error === "string" ? value.error : null,
   };
 }
 

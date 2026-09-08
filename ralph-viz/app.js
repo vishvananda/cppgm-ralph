@@ -54,6 +54,7 @@ const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
 const TEST_STATUS_SUMMARY = globalThis.RALPH_TEST_STATUS_SUMMARY;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
+const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 
 const API_PRICE_MODEL_ALIASES = [
   [/(\b|-)opus(\b|-)/, "claude-opus-4-8"],
@@ -856,7 +857,7 @@ function latestTurnOverview(events, priceModel, shapeUsage = null, run = null) {
   }
   const durationMap = buildTurnDurationMap(events);
   const duration = durationText(bestTurnDurationSpan(shapeUsage, turn, durationMap, {
-    activeCurrentTurn: isActiveCurrentRunTurn(run, turn),
+    activeCurrentTurn: isActiveCurrentRunTurn(run, turn, events),
     activeStartMs: activeCurrentRunTurnStartMs(run, turn, events),
   }));
   const usage = bestTurnUsage(shapeUsage, turn, buildUsageMap(events, priceModel).get(turn));
@@ -901,16 +902,17 @@ function activeCurrentTurnDurationSpan(best, cached, live, options = {}) {
   };
 }
 
-function isActiveCurrentRunTurn(run, turn) {
+function isActiveCurrentRunTurn(run, turn, records = []) {
   if (!run?.state?.active || !Number.isInteger(turn) || turn <= 0) {
     return false;
   }
+  if (run.state.activeTurn?.status === "failed" || TURN_LIFECYCLE.failedAttemptEndMs(records, turn) != null) return false;
   const completed = Number(run.state.turnsCompleted);
   return Number.isInteger(completed) && turn > completed;
 }
 
 function activeCurrentRunTurnStartMs(run, turn, records = []) {
-  if (!isActiveCurrentRunTurn(run, turn)) {
+  if (!isActiveCurrentRunTurn(run, turn, records)) {
     return null;
   }
   const latestEventStartMs = latestTurnStartMs(records, turn);
@@ -3824,7 +3826,9 @@ function buildTurnDurationMap(records, options = {}) {
       threadSpan.last = Math.max(threadSpan.last, time);
       threadSpan.events.push({ ...record, time });
       spansByTurnAttemptThread.set(attemptThreadKey, threadSpan);
-      if (isTimedWorkStartEvent(record)) {
+      if (TURN_LIFECYCLE.isFailureEvent(record)) {
+        openCommandsByTurnAttemptThread.set(attemptThreadKey, 0);
+      } else if (isTimedWorkStartEvent(record)) {
         openCommandsByTurnAttemptThread.set(
           attemptThreadKey,
           (openCommandsByTurnAttemptThread.get(attemptThreadKey) ?? 0) + 1,
@@ -4097,7 +4101,9 @@ function activeEventDurationMs(records, options = {}) {
 
   for (let i = 0; i < events.length; i += 1) {
     const record = events[i].record;
-    if (isTimedWorkStartEvent(record)) {
+    if (TURN_LIFECYCLE.isFailureEvent(record)) {
+      openCommands = 0;
+    } else if (isTimedWorkStartEvent(record)) {
       openCommands += 1;
     } else if (isTimedWorkEndEvent(record)) {
       openCommands = Math.max(0, openCommands - 1);
@@ -6969,7 +6975,7 @@ function renderTimeline(records) {
     const testStatus = testMap.get(turn);
     const subagents = buildSubagentStats(items, subagentEstimateModel);
     const duration = durationText(bestTurnDurationSpan(state.shapeUsage, turn, durationMap, {
-      activeCurrentTurn: isActiveCurrentRunTurn(selectedRunMeta(), turn),
+      activeCurrentTurn: isActiveCurrentRunTurn(selectedRunMeta(), turn, state.events),
       activeStartMs: activeCurrentRunTurnStartMs(selectedRunMeta(), turn, items),
     }));
     const infoText = items.length ? turnSummaryText(items) : "pre-turn check";
