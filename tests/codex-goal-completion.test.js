@@ -60,8 +60,12 @@ test("goal outputs support direct JSON and Code Mode text blocks, with thread va
   assert.equal(codexSessionTaskCompletion([event(1000,"task_complete",{error:{codex_error_info:"usage_limit_exceeded"}})],options).status,"usage_limit");
 });
 
-for (const scenario of ["active-exit", "native-continuation", "blocked", "missing", "verify-error", "exhausted", "reopened"]) {
+for (const scenario of ["active-exit", "native-continuation", "native-isolation", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "reopened", "interactive-request"]) {
   test(`native Codex goal subprocess: ${scenario}`, async (t) => {
+    const isolated = scenario === "native-isolation";
+    if (isolated && (!process.env.XDG_RUNTIME_DIR || spawnSync("bwrap",["--version"]).status !== 0)) {
+      return t.skip("requires bubblewrap and a user systemd manager");
+    }
     const root = await fs.mkdtemp(path.join(os.tmpdir(),"ralph-native-goal-"));
     t.after(() => fs.rm(root,{recursive:true,force:true}));
     const workdir=path.join(root,"work"), remote=path.join(root,"remote.git");
@@ -79,22 +83,27 @@ for (const scenario of ["active-exit", "native-continuation", "blocked", "missin
     const config=path.join(root,"config.json");
     await fs.writeFile(config,JSON.stringify({name:"goal-test",provider:"codex",model:"fake",reasoningEffort:"high",
       workdir,useExistingWorkdir:true,stateBaseDir,codexPath:provider,loopGoalsEnabled:true,freshThreadPerTurn:true,
-      eventLogScope:"run",maxTurns:2,initialStage:"pa1",resourceLimits:false,sessionIsolation:false,
+      eventLogScope:"run",maxTurns:2,initialStage:"pa1",additionalDirectories:[root],
+      resourceLimits:isolated?{enabled:true,memoryMax:"512M",cleanupTimeoutSec:0.2}:false,sessionIsolation:isolated,
       checks:{verify:{command:"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
       phases:[{name:"audit",runWhenChecksPass:true,checks:["verify"]}]}));
     const run=spawnSync(process.execPath,[path.resolve("ralph.js")],{encoding:"utf8",timeout:25000,
-      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:"0",RALPH_SESSION_ISOLATION:"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2"}});
-    const succeeds=["active-exit","native-continuation"].includes(scenario);
+      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1"}});
+    const succeeds=["active-exit","native-continuation","native-isolation","transport-retry"].includes(scenario);
     assert.equal(run.status,succeeds?0:1,run.stdout+"\n"+run.stderr);
     const traces=(await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
     const invocations=traces.filter(r=>r.kind==="exec");
-    assert.equal(invocations.length,scenario==="active-exit"?2:scenario==="exhausted"?3:1);
+    assert.equal(invocations.length,["active-exit","transport-retry"].includes(scenario)?2:scenario==="exhausted"?3:1);
     assert.equal(traces.filter(r=>r.method==="thread/start").length,1,"incomplete work resumes even with freshThreadPerTurn");
     assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,1,"never reset or forcibly complete the model's goal");
     if(scenario==="active-exit") {
       assert.match(invocations[1].input,/Continue the active loop goal/);
       assert.doesNotMatch(invocations[1].input,/Clean up `audit`/);
-      assert.ok(invocations.every(r=>r.args.includes(threadId)));
+      assert.ok(invocations.every(r=>r.threadId===threadId));
+    }
+    if (scenario.startsWith("native-")) {
+      assert.ok(traces.some(r=>r.kind==="child-survived"), "background process survives the native turn boundary");
+      assert.equal(traces.filter(r=>r.method==="thread/resume").length,1);
     }
     const state=JSON.parse(await fs.readFile(path.join(stateDir,"state.json"),"utf8"));
     assert.equal(state.turnsCompleted,succeeds||scenario==="reopened"?1:0);
@@ -102,14 +111,26 @@ for (const scenario of ["active-exit", "native-continuation", "blocked", "missin
     const events=(await fs.readFile(path.join(stateDir,"events","run.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
     assert.ok(events.filter(r=>r.eventType==="ralph.prompt").every(r=>r.turnNumber===1));
     assert.equal(events.some(r=>r.eventType==="ralph.goal"&&r.event.action==="complete"),succeeds);
+    if (scenario.startsWith("native-")) {
+      assert.equal(events.filter(r=>r.eventType==='ralph.turn-failed').length,0);
+      assert.equal(events.filter(r=>r.eventType==='turn.completed').length,1);
+      const command=events.find(r=>r.eventType==='item.completed' && r.event?.item?.id==='poll');
+      assert.equal(command.event.item.exit_code,2);
+      assert.equal(command.event.item.session_id,4430);
+      assert.match(command.event.item.aggregated_output,/TEST SUMMARY: 45 \/ 47/);
+      assert.equal(events.filter(r=>r.eventType==='codex.session.token_count').length,2);
+      assert.ok(events.some(r=>r.event?.item?.text==='Audit done.'));
+    }
+    if (scenario === "interactive-request") assert.match(run.stderr,/requires host interaction/);
   });
 }
 
 function fakeCodexSource(settings) {
   return `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
-const {execFileSync}=require('node:child_process');
+const {execFileSync,spawn}=require('node:child_process');
 const {scenario,workdir,codexDir,trace,goalFile}=${JSON.stringify(settings)};
+const native=scenario.startsWith('native-');
 const threadId=${JSON.stringify(threadId)};
 const emit=x=>console.log(JSON.stringify(x));
 const history=()=>fs.existsSync(trace)?fs.readFileSync(trace,'utf8').trim().split('\\n').map(JSON.parse):[];
@@ -118,12 +139,62 @@ const getGoal=()=>fs.existsSync(goalFile)?JSON.parse(fs.readFileSync(goalFile,'u
 const saveGoal=g=>fs.writeFileSync(goalFile,JSON.stringify(g));
 const session=path.join(codexDir,'sessions','rollout-'+threadId+'.jsonl');
 const record=(type,data={})=>fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'event_msg',payload:{type,...data}})+'\\n');
+const response=payload=>fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload})+'\\n');
+const notify=(method,params)=>emit({method,params:{threadId,...params}});
+const end=(text,turnId)=>{
+ fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})+'\\n');
+ record('task_complete',{turn_id:turnId,last_agent_message:text});
+ notify('turn/completed',{turn:{id:turnId,status:'completed',error:null}});
+};
+async function runTurn(r) {
+ const input=r.params.input.map(x=>x.text??'').join('\\n');
+ const attempt=history().filter(x=>x.kind==='exec').length;
+ log({kind:'exec',args:process.argv.slice(2),threadId,input,pid:process.pid});
+ const turnId='attempt-'+attempt;
+ record('task_started',{turn_id:turnId});notify('turn/started',{turn:{id:turnId,status:'inProgress'}});
+ emit({id:r.id,result:{turn:{id:turnId,status:'inProgress'}}});
+ if(!attempt)fs.writeFileSync(path.join(workdir,'evidence.json'),'partial audit evidence\\n');
+ if(scenario==='interactive-request') {
+  emit({id:1,method:'item/commandExecution/requestApproval',params:{threadId,turnId}});return;
+ }
+ if(scenario==='transport-retry'&&!attempt) {
+  notify('error',{willRetry:false,error:{message:'request timed out'}});return;
+ }
+ if(scenario==='exhausted'||(scenario==='active-exit'&&!attempt)) {
+  end('Audit remains active. Evidence and review records are unresolved.',turnId);
+  setTimeout(()=>process.exit(0),20);return;
+ }
+ let finalTurnId=turnId;
+ if(native) {
+  response({type:'function_call',name:'exec_command',call_id:'command',arguments:JSON.stringify({cmd:'make test-pa12'})});
+  response({type:'function_call_output',call_id:'command',output:JSON.stringify({session_id:4430,output:'started'})});
+  record('token_count',{info:{total_token_usage:{input_tokens:100,output_tokens:20,cached_input_tokens:40}}});
+  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+  process.on('SIGTERM',()=>{child.kill();process.exit(0);});
+  end('Audit remains active.',turnId);
+  await new Promise(resolve=>setTimeout(resolve,2500));
+  process.kill(child.pid,0);log({kind:'child-survived',pid:child.pid,host:process.pid});
+  finalTurnId='continuation';record('task_started',{turn_id:finalTurnId});
+  notify('turn/started',{turn:{id:finalTurnId,status:'inProgress'}});
+  response({type:'function_call',name:'write_stdin',call_id:'poll',arguments:JSON.stringify({session_id:4430,chars:''})});
+  response({type:'function_call_output',call_id:'poll',output:JSON.stringify({exit_code:2,output:'===== TEST SUMMARY: 45 / 47 TESTS PASSED ====='})});
+  record('token_count',{info:{total_token_usage:{input_tokens:180,output_tokens:30,cached_input_tokens:60}}});
+ }
+ if(scenario==='blocked')saveGoal({...getGoal(),status:'blocked'});
+ else if(scenario==='missing')saveGoal(null);
+ else saveGoal({...getGoal(),status:'complete'});
+ record('thread_goal_updated',{goal:getGoal()});
+ for(const args of [['add','evidence.json'],['commit','-qm','audit evidence']])execFileSync('git',args,{cwd:workdir});
+ end('Audit done.',finalTurnId);
+}
 (async()=>{
  if(process.argv.includes('app-server')) {
   for await(const line of readline.createInterface({input:process.stdin})) {
    const r=JSON.parse(line);log(r);if(r.id==null)continue;
    let result={};
    if(r.method==='thread/start')result={thread:{id:threadId}};
+   if(r.method==='thread/resume')result={thread:{id:threadId,status:{type:'idle'}}};
+   if(r.method==='turn/start') {await runTurn(r);continue;}
    if(r.method==='thread/goal/clear')saveGoal(null);
    if(r.method==='thread/goal/set') {
     if(r.params.status==='complete') {emit({id:r.id,error:{message:'Ralph must not force completion'}});continue;}
@@ -131,34 +202,13 @@ const record=(type,data={})=>fs.appendFileSync(session,JSON.stringify({timestamp
    }
    if(r.method==='thread/goal/get') {
     if(scenario==='verify-error') {emit({id:r.id,error:{message:'verification unavailable'}});continue;}
-    if(scenario==='reopened'&&history().filter(x=>x.method==='thread/goal/get').length>1)saveGoal({...getGoal(),status:'active'});
+    if(scenario==='reopened'&&history().filter(x=>x.method==='thread/goal/get').length>2)saveGoal({...getGoal(),status:'active'});
     result={goal:getGoal()};
    }
    emit({id:r.id,result});
   } return;
  }
- let input='';for await(const chunk of process.stdin)input+=chunk;
- const attempt=history().filter(x=>x.kind==='exec').length;
- log({kind:'exec',args:process.argv.slice(2),input});
- record('task_started',{turn_id:'attempt-'+attempt});
- emit({type:'thread.started',thread_id:threadId});emit({type:'turn.started'});
- if(!attempt)fs.writeFileSync(path.join(workdir,'evidence.json'),'partial audit evidence\\n');
- const end=(text)=>{record('task_complete',{turn_id:'attempt-'+attempt,last_agent_message:text});emit({type:'item.completed',item:{id:'reply-'+attempt,type:'agent_message',text}});emit({type:'turn.completed',usage:{input_tokens:100,output_tokens:10}});};
- if(scenario==='exhausted'||(scenario==='active-exit'&&!attempt)) {
-  end('Audit remains active. Evidence and review records are unresolved.');
-  record('task_started',{turn_id:'continuation'});record('turn_aborted',{turn_id:'continuation',reason:'interrupted'});return;
- }
- if(scenario==='native-continuation') {
-  end('Audit remains active.');record('task_started',{turn_id:'continuation'});
-  await new Promise(r=>setTimeout(r,3500));
- }
- if(scenario==='blocked')saveGoal({...getGoal(),status:'blocked'});
- else if(scenario==='missing')saveGoal(null);
- else saveGoal({...getGoal(),status:'complete'});
- record('thread_goal_updated',{goal:getGoal()});
- for(const args of [['add','evidence.json'],['commit','-qm','audit evidence']])execFileSync('git',args,{cwd:workdir});
- end('Audit done.');
- if(scenario==='native-continuation')await new Promise(r=>setTimeout(r,10000));
+ throw new Error('Native goals must use app-server, not codex exec');
 })();
 `;
 }

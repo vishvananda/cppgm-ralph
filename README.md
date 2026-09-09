@@ -28,9 +28,10 @@ Ralph now also enforces a clean repository handoff:
 
 For Codex runs, Ralph can also turn each outer loop into a persisted Codex goal.
 Ralph uses `codex app-server` to create or resume the thread, clear any previous
-loop goal, and set a fresh active goal for the current blocker before running
-the turn through `codex exec resume`. If app-server goal setup fails before a
-thread exists, Ralph falls back to carrying the same goal in the prompt.
+loop goal, and set a fresh active goal for the current blocker. Native-goal
+execution then uses a persistent app-server host for the entire Ralph turn.
+If app-server goal setup fails, Ralph falls back to carrying the same goal in
+the prompt and using `codex exec`.
 
 For Antigravity runs, Ralph uses portable goals instead. It writes the same loop
 objective to `.ralph/<run-name>/current-goal.json`, appends it to the turn
@@ -79,13 +80,19 @@ configuration errors remain fatal. Failed attempts retain their phase for
 resumption but stop the viz's live clock; elapsed attempt time is preserved,
 excluding downtime before a retry.
 For native Codex loop goals, a final message or `turn.completed` event is not
-goal completion. Ralph leaves native continuations running and verifies
-`thread/goal/get` when the CLI exits. An active goal resumes the same thread
-within the same Ralph turn, subject to `RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX`
-(default 20); blocked, paused, missing or unverifiable goals stop without
-advancing. Only Codex completes its native goal; passing checks and a clean
-worktree do not override it. Portable goals and runs with goals disabled keep
-their existing check-driven completion behavior.
+goal completion. Ralph keeps the same app-server, process namespace and cgroup
+alive across native continuations, so background commands and their session
+handles survive. After the final native turn, `thread/goal/get` must confirm
+completion before host cleanup. If an active goal remains idle for 60 seconds,
+Ralph verifies the live thread is idle and nudges it in the same host. These
+fallback nudges and unexpected successful host-exit recoveries are bounded by
+`RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX` (default 20). Normal native continuations
+are not failed Ralph turns. Blocked, paused, missing or unverifiable goals stop
+without advancing. Only Codex completes its native goal; passing checks and a
+clean worktree do not override it. Isolation and descendant cleanup still apply
+at completion, failure and shutdown. Session-log parsing remains the single
+source of tool output and usage. Portable goals and runs with goals disabled
+keep their existing `codex exec` and check-driven completion behavior.
 When restarting only to pick up changed prompt files, add
 `--reuse-last-checks` (or set `RALPH_REUSE_LAST_CHECKS=1`) to reuse the latest
 compatible recorded phase check result instead of rerunning the startup checks.

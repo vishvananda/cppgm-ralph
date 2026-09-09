@@ -13,29 +13,30 @@ export function createCodexSessionTailer({
   const converter = new CodexSessionConverter();
   const offsets = new Map();
   let stopped = false;
-  let polling = false;
+  let currentPoll = null;
   let timer = null;
 
-  const poll = async () => {
-    if (stopped || polling) {
-      return;
-    }
-    polling = true;
-    try {
-      await pollCodexSessionEvents({
-        codexDir,
-        threadId,
-        sinceMs,
-        seenKeys,
-        converter,
-        offsets,
-        onEvent,
-      });
-    } catch (error) {
-      onError?.(error);
-    } finally {
-      polling = false;
-    }
+  const poll = () => {
+    if (stopped) return Promise.resolve();
+    if (currentPoll) return currentPoll;
+    currentPoll = (async () => {
+      try {
+        await pollCodexSessionEvents({
+          codexDir,
+          threadId,
+          sinceMs,
+          seenKeys,
+          converter,
+          offsets,
+          onEvent,
+        });
+      } catch (error) {
+        onError?.(error);
+      } finally {
+        currentPoll = null;
+      }
+    })();
+    return currentPoll;
   };
 
   return {
@@ -48,6 +49,9 @@ export function createCodexSessionTailer({
       poll();
     },
     async flush() {
+      await poll();
+      // A poll already in flight may have stat'ed the file before the final
+      // messages were written. Drain that poll, then read through the new EOF.
       await poll();
     },
     stop() {
@@ -162,8 +166,12 @@ async function pollCodexSessionFile({
   }
 
   const raw = await readFileRange(filePath, offset, stat.size);
-  offsets.set(filePath, stat.size);
-  for (const line of raw.split(/\r?\n/)) {
+  // A live writer may have only appended part of a JSON record (or UTF-8
+  // character). Commit offsets through complete lines, not the observed EOF.
+  const end = raw.lastIndexOf(10) + 1;
+  if (!end) return;
+  offsets.set(filePath, offset + end);
+  for (const line of raw.subarray(0, end).toString("utf8").split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) {
       continue;
@@ -194,13 +202,13 @@ async function pollCodexSessionFile({
 async function readFileRange(filePath, start, end) {
   const length = Math.max(0, end - start);
   if (length === 0) {
-    return "";
+    return Buffer.alloc(0);
   }
   const handle = await fs.open(filePath, "r");
   try {
     const buffer = Buffer.allocUnsafe(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
-    return buffer.subarray(0, bytesRead).toString("utf8");
+    return buffer.subarray(0, bytesRead);
   } finally {
     await handle.close();
   }

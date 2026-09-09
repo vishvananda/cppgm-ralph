@@ -51,6 +51,7 @@ import {
   codexSessionTaskCompletion,
   requiresCodexGoalCompletion,
 } from "./codex-goal-completion.js";
+import { runCodexGoalHost } from "./codex-goal-host.js";
 
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
@@ -878,10 +879,8 @@ async function main() {
           provider: agentProfile.provider,
         });
         if (requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
-          // exec can exit 0 immediately after a final message, interrupting
-          // the native goal's next continuation. The watcher cannot catch
-          // that short-lived process; verify the durable goal before accepting
-          // this attempt or consuming a Ralph turn.
+          // The persistent host verifies completion before shutting down.
+          // Recheck durable state before consuming the Ralph turn as well.
           const threadId = thread.id ?? turn.threadId ?? activeThreadId;
           const current = await withCodexAppServer((client) => client.request("thread/goal/get", { threadId }));
           assertCodexGoalComplete(current?.goal, threadId);
@@ -1021,7 +1020,8 @@ async function main() {
           }));
           await sleepMs(waitMs);
           const shouldStartFreshRetryThread =
-            CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId;
+            CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId &&
+            !requiresCodexGoalCompletion(loopGoal, agentProfile.provider);
           activeThreadId = shouldStartFreshRetryThread ? null : retryThreadId;
           thread = null;
           backend = createAgentBackend(agentProfile.provider);
@@ -5222,6 +5222,10 @@ class CodexExec {
   }
 
   async *run(args) {
+    if (args.requireGoalCompletion) {
+      yield* this.runGoalHost(args);
+      return;
+    }
     const commandArgs = ["exec", "--json"];
     appendSerializedConfigOverrides(commandArgs, this.configOverrides);
     if (args.baseUrl) {
@@ -5488,6 +5492,74 @@ class CodexExec {
       rl.close();
       terminateChildProcess(child);
       await cleanupChildResourceScope(child);
+    }
+  }
+
+  async *runGoalHost(args) {
+    if (!args.threadId) throw new Error("Native Codex goals require a persisted thread id.");
+    const config = { ...this.configOverrides };
+    if (args.modelReasoningEffort) config.model_reasoning_effort = args.modelReasoningEffort;
+    if (args.baseUrl) config.openai_base_url = args.baseUrl;
+    if (args.networkAccessEnabled != null) {
+      config.sandbox_workspace_write = { network_access: args.networkAccessEnabled };
+    }
+    if (args.additionalDirectories?.length) {
+      config.sandbox_workspace_write = { ...config.sandbox_workspace_write, writable_roots: args.additionalDirectories };
+    }
+    if (args.webSearchMode || args.webSearchEnabled != null) {
+      config.web_search = args.webSearchMode ?? (args.webSearchEnabled ? "live" : "disabled");
+    }
+    const client = new CodexAppServerClient({
+      codexPath: this.codexPath,
+      configOverrides: config,
+      spawnOptions: {
+        cwd: args.workingDirectory || process.cwd(),
+        env: buildCodexExecEnv(this.envOverride, args.apiKey),
+        isolateSession: true,
+        limitResources: true,
+        isolationWritableDirs: [args.workingDirectory, ...(args.additionalDirectories ?? [])],
+        signal: args.signal,
+      },
+    });
+    const queue = new AsyncLineQueue();
+    // Reuse the same session converter as exec: one owner for tool chunks,
+    // subagent calls, messages and usage. RPC notifications own lifecycle only.
+    const tailer = createCodexSessionTailer({
+      codexDir: CODEX_DIR, threadId: args.threadId, sinceMs: Date.now(),
+      onEvent: (event) => queue.push(JSON.stringify(event)),
+      onError: (error) => queue.fail(error),
+    });
+    tailer.start();
+    log(`Keeping a Codex app-server execution host for goal thread ${args.threadId}`);
+    const task = (async () => {
+      try {
+        await runCodexGoalHost({
+          client, threadId: args.threadId,
+          resumeParams: {
+            model: args.model, cwd: args.workingDirectory,
+            approvalPolicy: args.approvalPolicy, sandbox: args.sandboxMode, config,
+          },
+          input: [{ type: "text", text: args.input },
+            ...(args.images ?? []).map((imagePath) => ({ type: "localImage", path: imagePath }))],
+          onEvent: (event) => queue.push(JSON.stringify(event)),
+          continuationPrompt: buildCodexIncompleteTaskContinuationPrompt(),
+          continuationMax: codexIncompleteTaskRetryMax(),
+        });
+        await tailer.flush();
+        queue.push(JSON.stringify({ type: "turn.completed", usage: null }));
+        queue.close();
+      } catch (error) {
+        await tailer.flush().catch(() => {});
+        queue.fail(error);
+      }
+    })();
+    try {
+      for await (const line of queue) yield line;
+      await task;
+    } finally {
+      tailer.stop();
+      await client.close();
+      await task;
     }
   }
 }
@@ -7447,8 +7519,13 @@ async function readFirstExistingFile(filePaths) {
 }
 
 class CodexAppServerClient {
-  constructor({ codexPath }) {
+  constructor({ codexPath, configOverrides = null, spawnOptions = {} }) {
     this.codexPath = codexPath || "codex";
+    this.configOverrides = configOverrides;
+    this.spawnOptions = spawnOptions;
+    this.onNotification = null;
+    this.onFailure = null;
+    this.failure = null;
     this.child = null;
     this.readline = null;
     this.nextRequestId = 1;
@@ -7477,9 +7554,12 @@ class CodexAppServerClient {
       return;
     }
 
-    const child = spawnTracked(this.codexPath, ["app-server", "--listen", "stdio://"], {
+    const commandArgs = ["app-server", "--listen", "stdio://"];
+    appendSerializedConfigOverrides(commandArgs, this.configOverrides);
+    const child = spawnTracked(this.codexPath, commandArgs, {
       cwd: process.cwd(),
       env: process.env,
+      ...this.spawnOptions,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
@@ -7494,7 +7574,7 @@ class CodexAppServerClient {
     child.on("exit", (code, signal) => {
       if (!this.closing) {
         const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
-        this.rejectAll(new Error(`codex app-server exited with ${detail}: ${this.stderrTail()}`));
+        this.rejectAll(agentExitError(`codex app-server exited with ${detail}: ${this.stderrTail()}`, signal, code));
       }
     });
 
@@ -7517,9 +7597,20 @@ class CodexAppServerClient {
   }
 
   handleMessage(message) {
-    if (!message || typeof message !== "object" || message.id == null) {
+    if (!message || typeof message !== "object") return;
+    if (message.method) {
+      if (message.id == null) {
+        this.onNotification?.(message);
+      } else {
+        // Server requests have a separate ID namespace from our RPCs. Never
+        // accidentally resolve a pending RPC or silently grant an approval.
+        this.writeMessage({ id: message.id, error: { code: -32601,
+          message: "Ralph cannot answer interactive app-server requests." } });
+        this.rejectAll(new Error(`Codex requires host interaction: ${message.method}`));
+      }
       return;
     }
+    if (message.id == null) return;
 
     const key = String(message.id);
     const pending = this.pending.get(key);
@@ -7536,6 +7627,8 @@ class CodexAppServerClient {
   }
 
   request(method, params = {}) {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.closing) return Promise.reject(new Error("Codex app-server client is closed."));
     const id = this.nextRequestId;
     this.nextRequestId += 1;
     const key = String(id);
@@ -7587,6 +7680,7 @@ class CodexAppServerClient {
     }
 
     this.closing = true;
+    this.rejectAll(new Error("Codex app-server client closed."));
     this.child = null;
     this.readline?.close();
     if (child.stdin?.writable) {
@@ -7605,13 +7699,17 @@ class CodexAppServerClient {
         resolve();
       });
     });
+    terminateChildProcess(child, "SIGKILL");
+    await cleanupChildResourceScope(child);
   }
 
   rejectAll(error) {
+    this.failure ??= error;
     for (const [key, pending] of this.pending.entries()) {
       this.pending.delete(key);
       pending.reject(error);
     }
+    this.onFailure?.(error);
   }
 
   stderrTail() {
