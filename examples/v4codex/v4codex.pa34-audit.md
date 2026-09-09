@@ -24,6 +24,12 @@ Update `pa34/plan.md` with Architecture Review and Final Architecture Review,
 and consolidate `pa34/audit.md` into Findings, Changes, Performance Evidence,
 and Validation.
 
+Exception to reference preservation: you may correct reference outputs without
+approval if a reduced reproducer and cited C++11 rules (LowIR contract for
+IR-only cases) prove them wrong. Document the proof and bundle revision;
+compiler agreement alone is insufficient. Preserve required behavior, coverage
+and comparison rules.
+
 Required exit criteria:
 {{modelValidation}}
 

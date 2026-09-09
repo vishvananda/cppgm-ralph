@@ -3,6 +3,8 @@ Ralph loop {{turnNumber}} PA34 audit phase for {{runName}}.
 Audit PA34 inception against `spec.md` before completing the run.
 
 Completion criteria:
+- Reference corrections are allowed with a documented reducer and cited
+  standard/contract proof; preserve required behavior, coverage and comparison rules.
 - The final implementation and both inception layers satisfy the spec's
   architecture, performance, observability, and self-containment requirements.
 - PA1-PA33 and all required PA34 checks pass reproducibly.

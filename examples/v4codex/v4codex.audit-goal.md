@@ -4,6 +4,8 @@ Independently audit and consolidate completed `{{testStage}}` against `spec.md`
 before advancing.
 
 Completion criteria:
+- Reference corrections are allowed with a documented reducer and cited
+  standard/contract proof; preserve required behavior, coverage and comparison rules.
 - The actual stage architecture and representative data flow are reviewed
   against the relevant spec requirements.
 - Whole-stage defects are fixed; the spec's benchmarks establish compiler

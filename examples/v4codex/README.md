@@ -16,6 +16,12 @@ The config and all ten prompt/goal sidecars must have the same filename stem.
 Installed copies live beside the checkout as `/home/vishvananda/work/v4codex.*`.
 Keep these versioned examples in sync when editing the installed copies.
 
+All phases authorize reference-output corrections despite preservation instructions
+when a reduced reproducer and cited C++11 rules (the LowIR contract for IR-only
+cases) prove the reference incorrect. Record the proof and bundle revision;
+host-compiler agreement alone is insufficient. Required behavior, coverage and
+comparison rules must remain intact. No interactive approval is needed.
+
 Start from the Ralph repository:
 
 ```sh

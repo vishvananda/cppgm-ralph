@@ -22,6 +22,12 @@ range, findings, evidence and one ledger row. Group remaining work broadly and
 note avoidable handoff fragmentation. Commit these records without further code
 edits so the next audit has an unambiguous baseline.
 
+Exception to reference preservation: you may correct reference outputs without
+approval if a reduced reproducer and cited C++11 rules (LowIR contract for
+IR-only cases) prove them wrong. Document the proof and bundle revision;
+compiler agreement alone is insufficient. Preserve required behavior, coverage
+and comparison rules.
+
 Required exit criteria:
 {{modelValidation}}
 

@@ -3,6 +3,8 @@ Ralph loop {{turnNumber}} checkpoint audit for {{runName}}.
 Audit all `{{testStage}}` changes since the last review against `spec.md`.
 
 Completion criteria:
+- Reference corrections are allowed with a documented reducer and cited
+  standard/contract proof; preserve required behavior, coverage and comparison rules.
 - The complete accumulated range and its interactions are reviewed; affected
   ownership paths have no unresolved spec, correctness or performance issue.
 - Performance claims meet the spec's compiler and applicable executable evidence

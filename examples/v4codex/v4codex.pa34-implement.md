@@ -30,6 +30,12 @@ full inception checks below, in order. `probe-self-object` and `probe-self-link`
 are diagnostic only; finish with canonical builds. Put reducers under the
 earliest owning `student.tests/paN` and run them explicitly.
 
+Exception to reference preservation: you may correct reference outputs without
+approval if a reduced reproducer and cited C++11 rules (LowIR contract for
+IR-only cases) prove them wrong. Document the proof and bundle revision;
+compiler agreement alone is insufficient. Preserve required behavior, coverage
+and comparison rules.
+
 Required exit criteria:
 {{modelValidation}}
 
