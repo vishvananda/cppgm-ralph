@@ -26,6 +26,9 @@ during implementation.
 Follow the spec's evidence protocol for performance claims. Measure compiler
 latency/peak RSS and, where executable output exists, runtime/text size; optimization
 benefits must justify compiler work and growth within explicit budgets.
+Apply the spec's stage-scoped performance acceptance, including to inherited
+plans. Reclassify unsupported self-imposed gates with evidence; preserve
+measurements, mandated limits, correctness and coverage.
 
 At handoff, earlier PAs and file audit pass; current failures decrease or reach
 zero without reduced coverage. Adding passing tests alone is not progress.

@@ -16,6 +16,12 @@ The config and all ten prompt/goal sidecars must have the same filename stem.
 Installed copies live beside the checkout as `/home/vishvananda/work/v4codex.*`.
 Keep these versioned examples in sync when editing the installed copies.
 
+Performance acceptance is stage-scoped: preserve mandated limits and fix
+avoidable regressions, but document necessary semantic costs and later-stage
+constraints. Self-selected diagnostic targets and historical findings are not
+additional exit gates; reclassification requires evidence. The run's `spec.md`
+defines this policy, which also governs inherited plans.
+
 All phases authorize reference-output corrections despite preservation instructions
 when a reduced reproducer and cited C++11 rules (the LowIR contract for IR-only
 cases) prove the reference incorrect. Record the proof and bundle revision;

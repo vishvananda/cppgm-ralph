@@ -10,8 +10,8 @@ Completion criteria:
   focused reducers where applicable.
 - Required self, `pptoken` inception, and full inception checks pass without
   self-hosting shortcuts or weakened validation.
-- Material divergences are fixed with the spec's compiler latency/memory and
-  executable runtime/text-size evidence; optimization budgets are respected.
+- Material divergences are fixed; performance meets the spec's stage-scoped
+  acceptance and evidence rules, not self-imposed exit gates.
 - File audit and required exit criteria pass:
 {{modelValidation}}
 - The plan is current, intended changes are committed, and `git status --short`

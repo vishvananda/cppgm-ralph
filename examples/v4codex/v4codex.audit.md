@@ -17,6 +17,9 @@ tests: latency, peak memory, runtime and text size. Follow the spec's frozen A/B
 ABBA and noise-calibration protocol for claims; verify optimization legality,
 profitability, invalidation and pipeline work/growth budgets. Fewer IR nodes
 alone do not establish runtime improvement.
+Apply the spec's stage-scoped performance acceptance, including to inherited
+plans. Reclassify unsupported self-imposed gates with evidence; preserve
+measurements, mandated limits, correctness and coverage.
 
 Consolidate the plan and audit: final design/spec alignment, findings, changes,
 performance evidence, validation and ledger. Include any unaudited handoffs

@@ -19,6 +19,9 @@ cause and fix it. Follow the spec's frozen A/B, ABBA and noise-calibration
 protocol on fixed benchmarks. Compare host-seeded and self-built compiler
 latency/memory and generated runtime/text size; verify optimization legality,
 profitability, invalidation and pipeline work/growth budgets.
+Apply the spec's stage-scoped performance acceptance, including to inherited
+plans. Reclassify unsupported self-imposed gates with evidence; preserve
+measurements, mandated limits, correctness and coverage.
 
 Update `pa34/plan.md` with Architecture Review and Final Architecture Review,
 and consolidate `pa34/audit.md` into Findings, Changes, Performance Evidence,

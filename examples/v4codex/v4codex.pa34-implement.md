@@ -24,6 +24,9 @@ Use the spec's measurement protocol to separate code-quality differences from
 miscompilation or repeated work before changing valid compiler source to avoid
 a construct. Compare compiler latency/memory and generated runtime/text size;
 runtime gains must justify optimization work and growth within explicit budgets.
+Apply the spec's stage-scoped performance acceptance, including to inherited
+plans. Reclassify unsupported self-imposed gates with evidence; preserve
+measurements, mandated limits, correctness and coverage.
 
 Follow the required host regression, self-test ladder, pptoken inception and
 full inception checks below, in order. `probe-self-object` and `probe-self-link`

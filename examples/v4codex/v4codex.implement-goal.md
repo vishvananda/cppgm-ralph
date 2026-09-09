@@ -6,8 +6,8 @@ while the same understanding supports further progress.
 Completion criteria:
 - Reference corrections are allowed with a documented reducer and cited
   standard/contract proof; preserve required behavior, coverage and comparison rules.
-- Implemented behavior satisfies current-stage `spec.md`; performance claims
-  have its required compiler and applicable executable evidence.
+- Implemented behavior satisfies current-stage `spec.md`, including its
+  stage-scoped performance acceptance and evidence rules.
 - Any incomplete handoff finishes a coherent behavior group and justifies why
   further related work is impractical; meeting the progress minimum is not enough.
 - Earlier PAs pass; current failures decrease or reach zero without reduced

@@ -15,6 +15,9 @@ Apply the spec's architecture audit and fix affected ownership paths. Verify
 compiler latency/memory, applicable runtime/text size, and optimization
 legality/profitability/budgets using its evidence protocol. Earlier PAs pass;
 latest checkpoint failures must not increase and coverage must not shrink.
+Apply the spec's stage-scoped performance acceptance, including to inherited
+plans. Reclassify unsupported self-imposed gates with evidence; preserve
+measurements, mandated limits, correctness and coverage.
 
 After validating and committing code fixes, record that code tip as `Last
 reviewed commit`. Update the compact plan and `{{testStage}}/audit.md` with the

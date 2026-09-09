@@ -6,7 +6,8 @@ Completion criteria:
 - Reference corrections are allowed with a documented reducer and cited
   standard/contract proof; preserve required behavior, coverage and comparison rules.
 - The final implementation and both inception layers satisfy the spec's
-  architecture, performance, observability, and self-containment requirements.
+  architecture, stage-scoped performance, observability and self-containment
+  requirements; self-imposed targets do not add exit gates.
 - PA1-PA33 and all required PA34 checks pass reproducibly.
 - No layer divergence, PA34-only path, shortcut, nondeterminism, missing
   reducer, timeout/OOM workaround, or file-audit issue remains.
