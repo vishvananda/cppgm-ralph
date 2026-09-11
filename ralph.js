@@ -52,6 +52,11 @@ import {
   requiresCodexGoalCompletion,
 } from "./codex-goal-completion.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
+import {
+  buildSessionIsolationSpawn as buildIsolationSpawn,
+  normalizePrivateWriteSettings,
+  preparePrivateWriteDirectory,
+} from "./session-isolation.js";
 
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
@@ -217,6 +222,7 @@ const DEFAULT_BASE_BRANCH = "main";
 const CONFIG_PATH = path.resolve(process.cwd(), process.env.RALPH_CONFIG ?? "ralph.config.json");
 
 let CONFIG = null;
+let PRIVATE_WRITE_LAYOUT = null;
 let STATE_PATH = null;
 let TEST_LOG_PATH = null;
 let CHECK_LOG_DIR_PATH = null;
@@ -288,6 +294,17 @@ function buildThreadOptions(agentProfile) {
 async function main() {
   installProcessSignalHandlers();
   CONFIG = await loadConfig();
+  PRIVATE_WRITE_LAYOUT = preparePrivateWriteDirectory({
+    isolation: CONFIG.sessionIsolation,
+    workdir: CONFIG.workdir,
+    stateDir: CONFIG.stateDir,
+    additionalDirectories: CONFIG.additionalDirectories,
+    providerDirectories: providerStateDirectories(),
+  });
+  if (PRIVATE_WRITE_LAYOUT) {
+    log(`Private write root: ${PRIVATE_WRITE_LAYOUT.root} ` +
+      `(capacity guard=${CONFIG.sessionIsolation.privateWriteMaxBytes ?? "none"}; provider state excluded)`);
+  }
   PROMPT_PARTIALS = await loadPromptPartials();
   STATE_PATH = path.join(CONFIG.stateDir, "state.json");
   TEST_LOG_PATH = path.join(CONFIG.stateDir, "last-test.log");
@@ -759,12 +776,19 @@ async function main() {
       thread = null;
     }
     const hadExistingThread = Boolean(activeThreadId);
-    const prompt =
+    const basePrompt =
       cleanupOnlyTurn
         ? buildCleanWorktreePrompt(gitStatus, testStatus, turnNumber + 1, phase, phaseStatus)
         : turnNumber === 0 && !hadExistingThread
           ? buildInitialPrompt(testStatus, gitStatus, turnNumber + 1, phase, phaseStatus)
           : buildContinuePrompt(testStatus, gitStatus, turnNumber + 1, phase, phaseStatus);
+    const prompt = PRIVATE_WRITE_LAYOUT ? basePrompt + "\n\n" +
+      `Storage: checkout and scratch share ${PRIVATE_WRITE_LAYOUT.root}` +
+      (CONFIG.sessionIsolation.privateWriteMaxBytes != null
+        ? ` (capacity ceiling ${CONFIG.sessionIsolation.privateWriteMaxBytes} bytes). ` : ". ") +
+      "Temporary files and caches use the same budget; /tmp persists between turns. " +
+      "$RALPH_ARTIFACT_DIR is writable. " +
+      "Ralph state is read-only." : basePrompt;
 
     let loopGoalEventRecord = null;
     if (CONFIG.loopGoalsEnabled) {
@@ -776,6 +800,7 @@ async function main() {
         phaseStatus,
         turnNumber: turnNumber + 1,
         agentProfile,
+        preserveExistingGoal: Boolean(resumedTurnContext),
       });
       activeThreadId = preparedGoal.threadId;
       if (activeThreadId) {
@@ -783,7 +808,7 @@ async function main() {
       }
       state.threadId = activeThreadId;
       loopGoalEventRecord = buildRalphGoalEventRecord({
-        action: "set",
+        action: preparedGoal.preserved ? "resume" : "set",
         goal: preparedGoal.goal,
         threadId: activeThreadId,
         turnNumber: turnNumber + 1,
@@ -2754,6 +2779,7 @@ function installProcessSignalHandlers() {
 function spawnTracked(command, args, options = {}) {
   const {
     isolateSession,
+    isolationProvider,
     isolationWritableDirs,
     isolationFdFiles,
     limitResources,
@@ -2769,6 +2795,7 @@ function spawnTracked(command, args, options = {}) {
       spawnOptions,
       isolationWritableDirs,
       isolationFdFiles,
+      isolationProvider,
     );
     spawnCommand = wrapped.command;
     spawnArgs = wrapped.args;
@@ -2808,39 +2835,27 @@ function sessionIsolationEnabled() {
     CONFIG?.sessionIsolation?.enabled === true;
 }
 
-function buildSessionIsolationSpawn(command, args, options, writableDirs = [], fdFiles = []) {
+function buildSessionIsolationSpawn(command, args, options, writableDirs = [], fdFiles = [], provider = null) {
   const isolation = CONFIG?.sessionIsolation ?? DEFAULT_CONFIG.sessionIsolation;
-  if (isolation.backend !== "bwrap") {
-    throw new Error(`Unsupported session isolation backend: ${isolation.backend}`);
-  }
-  const cwd = options.cwd || process.cwd();
-  const bwrapArgs = [
-    "--unshare-pid",
-    "--unshare-ipc",
-    "--unshare-uts",
-    "--unshare-cgroup-try",
-    "--die-with-parent",
-    "--new-session",
-  ];
-  bwrapArgs.push(isolation.readOnlyRoot ? "--ro-bind" : "--bind", "/", "/");
-  bwrapArgs.push("--dev-bind", "/dev", "/dev");
-  bwrapArgs.push("--proc", "/proc");
-  if (isolation.privateTmp) {
-    bwrapArgs.push("--tmpfs", "/tmp");
-    bwrapArgs.push("--tmpfs", "/var/tmp");
-  }
-  for (const { fd, destination } of fdFiles ?? []) {
-    if (!Number.isInteger(fd) || fd < 3 || !path.isAbsolute(destination)) {
-      throw new Error("Isolation fd files require an fd >= 3 and an absolute destination");
-    }
-    bwrapArgs.push("--ro-bind-data", String(fd), destination);
-  }
-  for (const directory of sessionIsolationWritableDirs(writableDirs)) {
-    bwrapArgs.push("--bind-try", directory, directory);
-  }
-  bwrapArgs.push("--chdir", cwd);
-  bwrapArgs.push("--", command, ...args);
-  return { command: isolation.bwrapPath || "bwrap", args: bwrapArgs };
+  return buildIsolationSpawn(command, args, {
+    isolation,
+    cwd: options.cwd || process.cwd(),
+    writableDirectories: isolation.privateWriteDir
+      ? uniqueExistingishPaths([CONFIG.workdir, ...CONFIG.additionalDirectories, ...writableDirs])
+      : sessionIsolationWritableDirs(writableDirs),
+    providerDirectories: provider ? providerStateDirectories(provider) : [],
+    privateWriteSettings: { workdir: CONFIG.workdir, stateDir: CONFIG.stateDir },
+    fdFiles,
+  });
+}
+
+function providerStateDirectories(provider = null) {
+  const home = os.homedir();
+  return uniqueExistingishPaths([
+    ...(!provider || provider === "codex" ? [CODEX_DIR] : []),
+    ...(!provider || provider === "claude"
+      ? [process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), path.join(home, ".claude.json")] : []),
+  ]);
 }
 
 function sessionIsolationWritableDirs(extraDirs = []) {
@@ -2989,9 +3004,20 @@ async function runCommand(command, cwd, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawnTracked("bash", ["-o", "pipefail", "-lc", command], {
       cwd,
-      env: process.env,
+      env: PRIVATE_WRITE_LAYOUT ? {
+        ...process.env,
+        TMPDIR: PRIVATE_WRITE_LAYOUT.tmp,
+        TMP: PRIVATE_WRITE_LAYOUT.tmp,
+        TEMP: PRIVATE_WRITE_LAYOUT.tmp,
+        XDG_CACHE_HOME: PRIVATE_WRITE_LAYOUT.cache,
+        RALPH_WRITE_DIR: PRIVATE_WRITE_LAYOUT.root,
+        RALPH_ARTIFACT_DIR: PRIVATE_WRITE_LAYOUT.artifacts,
+      } : process.env,
       stdio: ["ignore", "pipe", "pipe"],
       limitResources: options.limitResources === true,
+      // Verification can generate as much scratch data as the agent itself.
+      // Keep legacy checks unwrapped; private-write checks share the same cap.
+      isolateSession: Boolean(PRIVATE_WRITE_LAYOUT && options.limitResources),
     });
 
     let stdout = "";
@@ -3806,6 +3832,7 @@ async function prepareLoopGoalForTurn({
   phase,
   phaseStatus,
   agentProfile,
+  preserveExistingGoal = false,
 }) {
   if (agentProfile.provider !== "codex") {
     return preparePortableLoopGoalForTurn({
@@ -3816,6 +3843,24 @@ async function prepareLoopGoalForTurn({
       phase,
       phaseStatus,
       agentProfile,
+    });
+  }
+
+  // An interrupted Ralph turn still owns its original objective and usage.
+  // Keep this outside the new-goal fallback: a failed read must never reset an
+  // existing native goal or silently replace it with a portable prompt goal.
+  if (preserveExistingGoal) {
+    if (!threadId) throw new Error("Cannot preserve a Codex goal without its thread id");
+    return withCodexAppServer(async (client) => {
+      const { goal } = await client.request("thread/goal/get", { threadId });
+      if (!goal || goal.threadId !== threadId) {
+        throw new Error(`Cannot preserve Codex goal for ${threadId}: missing or mismatched goal`);
+      }
+      if (!["active", "complete", "completed"].includes(goal.status)) {
+        throw new Error(`Cannot resume Codex goal for ${threadId}: goal is ${goal.status}`);
+      }
+      log(`Preserving existing Codex loop goal: ${previewText(goal.objective)}`);
+      return { threadId, goal, startedThread: false, preserved: true };
     });
   }
 
@@ -5289,6 +5334,7 @@ class CodexExec {
     const child = spawnTracked(this.codexPath, commandArgs, {
       env,
       isolateSession: true,
+      isolationProvider: "codex",
       limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
@@ -5516,6 +5562,7 @@ class CodexExec {
         cwd: args.workingDirectory || process.cwd(),
         env: buildCodexExecEnv(this.envOverride, args.apiKey),
         isolateSession: true,
+        isolationProvider: "codex",
         limitResources: true,
         isolationWritableDirs: [args.workingDirectory, ...(args.additionalDirectories ?? [])],
         signal: args.signal,
@@ -6494,6 +6541,7 @@ class ClaudeExec {
     const child = spawnTracked(this.claudePath, commandArgs, {
       cwd: args.workingDirectory || process.cwd(),
       isolateSession: true,
+      isolationProvider: "claude",
       limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
@@ -6568,6 +6616,7 @@ class ClaudeExec {
     const child = spawnTracked(this.claudePath, commandArgs, {
       cwd: args.workingDirectory || process.cwd(),
       isolateSession: true,
+      isolationProvider: "claude",
       limitResources: true,
       isolationWritableDirs: [
         args.workingDirectory,
@@ -6734,7 +6783,7 @@ class AntigravityExec {
       stateDir: CONFIG.stateDir,
       runName: CONFIG.runName,
       goalPath: getPortableGoalPath(),
-      goalProgressPath: path.join(CONFIG.stateDir, "goal-progress.jsonl"),
+      goalProgressPath: path.join(PRIVATE_WRITE_LAYOUT?.root ?? CONFIG.stateDir, "goal-progress.jsonl"),
       saveDir: this.options.saveDir,
       appDataDir: this.options.appDataDir,
       skillsPaths: this.options.skillsPaths ?? [],
@@ -7265,6 +7314,13 @@ async function loadConfig() {
   if (process.env.RALPH_SESSION_ISOLATION_BWRAP_PATH != null) {
     sessionIsolation.bwrapPath = process.env.RALPH_SESSION_ISOLATION_BWRAP_PATH;
   }
+  if (process.env.RALPH_SESSION_ISOLATION_PRIVATE_WRITE_DIR != null) {
+    sessionIsolation.privateWriteDir = process.env.RALPH_SESSION_ISOLATION_PRIVATE_WRITE_DIR;
+  }
+  if (process.env.RALPH_SESSION_ISOLATION_PRIVATE_WRITE_MAX_BYTES != null) {
+    sessionIsolation.privateWriteMaxBytes = Number(process.env.RALPH_SESSION_ISOLATION_PRIVATE_WRITE_MAX_BYTES);
+  }
+  const validatedSessionIsolation = normalizePrivateWriteSettings(sessionIsolation);
 
   return {
     provider,
@@ -7355,12 +7411,12 @@ async function loadConfig() {
     antigravitySaveDir: resolveOptionalPath(
       process.env.RALPH_ANTIGRAVITY_SAVE_DIR ??
         fileConfig.antigravitySaveDir ??
-        path.join(stateDir, "antigravity-save"),
+        path.join(validatedSessionIsolation.privateWriteDir ?? stateDir, "antigravity-save"),
     ),
     antigravityAppDataDir: resolveOptionalPath(
       process.env.RALPH_ANTIGRAVITY_APP_DATA_DIR ??
         fileConfig.antigravityAppDataDir ??
-        path.join(stateDir, "antigravity-app-data"),
+        path.join(validatedSessionIsolation.privateWriteDir ?? stateDir, "antigravity-app-data"),
     ),
     antigravitySkillsPaths: parsePathList(
       process.env.RALPH_ANTIGRAVITY_SKILLS_PATHS ?? fileConfig.antigravitySkillsPaths,
@@ -7408,7 +7464,7 @@ async function loadConfig() {
       process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
       DEFAULT_CONFIG.useExistingWorkdir,
     ),
-    sessionIsolation,
+    sessionIsolation: validatedSessionIsolation,
     resourceLimits,
   };
 }
@@ -9230,6 +9286,8 @@ function normalizeSessionIsolation(value) {
     readOnlyRoot: parseBoolean(value.readOnlyRoot, defaults.readOnlyRoot),
     privateTmp: parseBoolean(value.privateTmp, defaults.privateTmp),
     bwrapPath: value.bwrapPath ? String(value.bwrapPath) : defaults.bwrapPath,
+    privateWriteDir: value.privateWriteDir,
+    privateWriteMaxBytes: value.privateWriteMaxBytes,
   };
 }
 

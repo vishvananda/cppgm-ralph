@@ -60,17 +60,20 @@ test("goal outputs support direct JSON and Code Mode text blocks, with thread va
   assert.equal(codexSessionTaskCompletion([event(1000,"task_complete",{error:{codex_error_info:"usage_limit_exceeded"}})],options).status,"usage_limit");
 });
 
-for (const scenario of ["active-exit", "native-continuation", "native-isolation", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "reopened", "interactive-request"]) {
+for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "restart", "reopened", "interactive-request"]) {
   test(`native Codex goal subprocess: ${scenario}`, async (t) => {
-    const isolated = scenario === "native-isolation";
+    const privateWrite = scenario === "native-private-write";
+    const isolated = scenario === "native-isolation" || privateWrite;
     if (isolated && (!process.env.XDG_RUNTIME_DIR || spawnSync("bwrap",["--version"]).status !== 0)) {
       return t.skip("requires bubblewrap and a user systemd manager");
     }
-    const root = await fs.mkdtemp(path.join(os.tmpdir(),"ralph-native-goal-"));
+    const root = await fs.mkdtemp(path.join(privateWrite ? os.homedir() : os.tmpdir(),"ralph-native-goal-"));
     t.after(() => fs.rm(root,{recursive:true,force:true}));
-    const workdir=path.join(root,"work"), remote=path.join(root,"remote.git");
+    const privateRoot=path.join(root,"storage");
+    if (privateWrite) await fs.mkdir(privateRoot,{mode:0o700});
+    const workdir=path.join(privateWrite ? privateRoot : root,"work"), remote=path.join(root,"remote.git");
     const codexDir=path.join(root,"codex"), provider=path.join(root,"codex.cjs");
-    const trace=path.join(root,"trace.jsonl"), goalFile=path.join(root,"goal.json");
+    const trace=path.join(privateWrite ? codexDir : root,"trace.jsonl"), goalFile=path.join(privateWrite ? codexDir : root,"goal.json");
     const stateBaseDir=path.join(root,"state"), stateDir=path.join(stateBaseDir,"goal-test-fake-high");
     await fs.mkdir(path.join(workdir,"pa1"),{recursive:true});
     await fs.mkdir(path.join(codexDir,"sessions"),{recursive:true});
@@ -79,21 +82,30 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     execFileSync("git",["init","--bare","-q",remote]);
     execFileSync("git",["remote","add","origin",remote],{cwd:workdir});
     execFileSync("git",["push","-qu","origin","HEAD"],{cwd:workdir});
-    await fs.writeFile(provider, fakeCodexSource({scenario,workdir,codexDir,trace,goalFile}),{mode:0o755});
+    const providerSettings={scenario:scenario==="restart"?"exhausted":scenario,workdir,codexDir,trace,goalFile,stateDir};
+    await fs.writeFile(provider, fakeCodexSource(providerSettings),{mode:0o755});
+    const checkCounter=path.join(root,"check-runs");
     const config=path.join(root,"config.json");
     await fs.writeFile(config,JSON.stringify({name:"goal-test",provider:"codex",model:"fake",reasoningEffort:"high",
       workdir,useExistingWorkdir:true,stateBaseDir,codexPath:provider,loopGoalsEnabled:true,freshThreadPerTurn:true,
-      eventLogScope:"run",maxTurns:2,initialStage:"pa1",additionalDirectories:[root],
-      resourceLimits:isolated?{enabled:true,memoryMax:"512M",cleanupTimeoutSec:0.2}:false,sessionIsolation:isolated,
-      checks:{verify:{command:"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
+      eventLogScope:"run",maxTurns:2,initialStage:"pa1",additionalDirectories:privateWrite?[]:[root],
+      resourceLimits:isolated?{enabled:true,memoryMax:"512M",cleanupTimeoutSec:0.2}:false,
+      sessionIsolation:privateWrite?{enabled:true,privateWriteDir:privateRoot}:isolated,
+      checks:{verify:{command:(scenario==="restart"?`printf check >> '${checkCounter}' && `:"")+(privateWrite?"printf check > /tmp/check-scratch && ":"")+"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
       phases:[{name:"audit",runWhenChecksPass:true,checks:["verify"]}]}));
-    const run=spawnSync(process.execPath,[path.resolve("ralph.js")],{encoding:"utf8",timeout:25000,
-      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1"}});
-    const succeeds=["active-exit","native-continuation","native-isolation","transport-retry"].includes(scenario);
+    const runOptions={encoding:"utf8",timeout:25000,
+      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1"}};
+    const run=spawnSync(process.execPath,[path.resolve("ralph.js")],runOptions);
+    const succeeds=["active-exit","native-continuation","native-isolation","native-private-write","transport-retry"].includes(scenario);
     assert.equal(run.status,succeeds?0:1,run.stdout+"\n"+run.stderr);
+    if (privateWrite) {
+      assert.equal(await fs.readFile(path.join(privateRoot,"tmp","check-scratch"),"utf8"),"check");
+      assert.equal(await fs.readFile(path.join(privateRoot,"tmp","provider-scratch"),"utf8"),"provider");
+    }
     const traces=(await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
     const invocations=traces.filter(r=>r.kind==="exec");
-    assert.equal(invocations.length,["active-exit","transport-retry"].includes(scenario)?2:scenario==="exhausted"?3:1);
+    if (privateWrite) assert.match(invocations[0].input, /Storage: checkout and scratch share .*Ralph state is read-only\./s);
+    assert.equal(invocations.length,["active-exit","transport-retry"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
     assert.equal(traces.filter(r=>r.method==="thread/start").length,1,"incomplete work resumes even with freshThreadPerTurn");
     assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,1,"never reset or forcibly complete the model's goal");
     if(scenario==="active-exit") {
@@ -122,6 +134,46 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
       assert.ok(events.some(r=>r.event?.item?.text==='Audit done.'));
     }
     if (scenario === "interactive-request") assert.match(run.stderr,/requires host interaction/);
+    if (scenario === "restart") {
+      const existingGoal={...JSON.parse(await fs.readFile(goalFile,"utf8")),
+        objective:"Original audit objective, not regenerated on restart",tokensUsed:688895,timeUsedSeconds:5706,tokenBudget:900000};
+      const entryChecks=await fs.readFile(checkCounter,"utf8");
+      const resumeArgs=[path.resolve("ralph.js"),"--continue","--reuse-last-checks"];
+      // A failed lookup or stopped goal must not fall back to creating a new goal.
+      for (const [providerScenario,storedGoal,expected] of [
+        ["verify-error",existingGoal,/verification unavailable/],
+        ["native-continuation",null,/missing or mismatched goal/],
+        ["native-continuation",{...existingGoal,threadId:"wrong-thread"},/missing or mismatched goal/],
+        ["native-continuation",{...existingGoal,status:"blocked"},/goal is blocked/],
+      ]) {
+        await fs.writeFile(goalFile,JSON.stringify(storedGoal));
+        await fs.writeFile(provider,fakeCodexSource({...providerSettings,scenario:providerScenario,checkCounter}));
+        const failed=spawnSync(process.execPath,resumeArgs,runOptions);
+        assert.equal(failed.status,1,failed.stdout+failed.stderr);
+        assert.match(failed.stdout+failed.stderr,expected);
+        assert.deepEqual(JSON.parse(await fs.readFile(goalFile,"utf8")),storedGoal);
+        assert.equal(await fs.readFile(checkCounter,"utf8"),entryChecks,"resume reuses entry checks, even on failure");
+      }
+      await fs.writeFile(goalFile,JSON.stringify(existingGoal));
+      await fs.writeFile(provider,fakeCodexSource({...providerSettings,scenario:"native-continuation",checkCounter}));
+      const resumed=spawnSync(process.execPath,resumeArgs,runOptions);
+      assert.equal(resumed.status,0,resumed.stdout+resumed.stderr);
+      assert.match(resumed.stdout,/Preserving existing Codex loop goal/);
+      const resumedTrace=(await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
+      for (const method of ["thread/start","thread/goal/clear","thread/goal/set"]) {
+        assert.equal(resumedTrace.filter(r=>r.method===method).length,1,`${method} must not repeat on resume`);
+      }
+      const resumedExecs=resumedTrace.filter(r=>r.kind==="exec");
+      assert.equal(resumedExecs.length,invocations.length+1);
+      assert.deepEqual(resumedExecs.at(-1).goal,existingGoal,"objective, creation time, budget and usage are all preserved");
+      assert.equal(resumedExecs.at(-1).entryChecks,entryChecks,"no entry checks before the resumed model turn");
+      const resumedState=JSON.parse(await fs.readFile(path.join(stateDir,"state.json"),"utf8"));
+      assert.equal(resumedState.turnsCompleted,1);
+      const resumedEvents=(await fs.readFile(path.join(stateDir,"events","run.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
+      const resumedGoal=resumedEvents.find(r=>r.eventType==="ralph.goal"&&r.event.action==="resume");
+      assert.deepEqual(resumedGoal.event.goal,existingGoal);
+      assert.ok(resumedEvents.filter(r=>r.eventType==="ralph.prompt").every(r=>r.turnNumber===1));
+    }
   });
 }
 
@@ -129,7 +181,7 @@ function fakeCodexSource(settings) {
   return `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
 const {execFileSync,spawn}=require('node:child_process');
-const {scenario,workdir,codexDir,trace,goalFile}=${JSON.stringify(settings)};
+const {scenario,workdir,codexDir,trace,goalFile,stateDir,checkCounter}=${JSON.stringify(settings)};
 const native=scenario.startsWith('native-');
 const threadId=${JSON.stringify(threadId)};
 const emit=x=>console.log(JSON.stringify(x));
@@ -147,9 +199,14 @@ const end=(text,turnId)=>{
  notify('turn/completed',{turn:{id:turnId,status:'completed',error:null}});
 };
 async function runTurn(r) {
+ if(scenario==='native-private-write') {
+  require('node:assert/strict').throws(()=>fs.writeFileSync(path.join(stateDir,'forbidden'),'bad'),e=>e.code==='EROFS');
+  fs.writeFileSync('/tmp/provider-scratch','provider');
+ }
  const input=r.params.input.map(x=>x.text??'').join('\\n');
  const attempt=history().filter(x=>x.kind==='exec').length;
- log({kind:'exec',args:process.argv.slice(2),threadId,input,pid:process.pid});
+ log({kind:'exec',args:process.argv.slice(2),threadId,input,pid:process.pid,goal:getGoal(),
+  entryChecks:checkCounter?fs.readFileSync(checkCounter,'utf8'):null});
  const turnId='attempt-'+attempt;
  record('task_started',{turn_id:turnId});notify('turn/started',{turn:{id:turnId,status:'inProgress'}});
  emit({id:r.id,result:{turn:{id:turnId,status:'inProgress'}}});

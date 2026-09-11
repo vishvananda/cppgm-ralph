@@ -98,6 +98,9 @@ When restarting only to pick up changed prompt files, add
 compatible recorded phase check result instead of rerunning the startup checks.
 This is intended for same-turn restarts; after that first resumed turn Ralph
 runs checks normally again.
+When `--continue` matches an interrupted Codex turn, Ralph also preserves its
+existing native goal, including objective, budget and usage counters. It fails
+closed if that goal cannot be read or is stopped; it never resets it on resume.
 
 To stop a run cleanly at the next turn boundary, create a `stop-after-turn`
 file in the run's state directory (e.g.
@@ -411,6 +414,7 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   namespace, and the run checkout, Ralph state, configured additional
   directories, provider state/cache directories, and user cache are writable.
   This requires `bwrap` on `PATH`.
+  For persistent, restricted scratch storage, see **Private write storage** below.
 - `resourceLimits`
   Default: enabled with the `systemd-run` backend, `memoryMax: "64G"`,
   `memorySwapMax: "0"`, `oomGroup: false`, and `cleanupTimeoutSec: 2`.
@@ -425,6 +429,71 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 Ralph builds a per-run name as `<name>-<model>-<reasoningEffort>`. That value is
 used for the git branch, checkout directory under `baseDir`, and state directory
 under `stateBaseDir`.
+
+### Private write storage
+
+An opt-in private write root puts the checkout, verification artifacts, caches,
+`/tmp`, `/var/tmp`, and `/dev/shm` on the same backing filesystem. Provider
+processes **and Ralph verification checks** use these bindings; native goal
+continuations keep using the same storage. Scratch persists across turns and
+restarts, so the agent can inspect or remove its earlier artifacts.
+
+```json
+{
+  "workdir": "/mnt/ralph-v4codex/checkout",
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "sessionIsolation": {
+    "enabled": true,
+    "readOnlyRoot": true,
+    "privateTmp": true,
+    "privateWriteDir": "/mnt/ralph-v4codex",
+    "privateWriteMaxBytes": 10737418240
+  }
+}
+```
+
+The root must already exist, be owned by the runner with mode `0700`, and be a
+canonical path (not a symlink). The checkout and any `additionalDirectories`
+must resolve beneath it. An existing checkout path may be a symlink into the
+root. Ralph creates `tmp`, `var-tmp`, `shm`, `cache`, and `artifacts` directories
+there; it never moves or deletes existing data. `TMPDIR`, `TMP`, and `TEMP`
+point to private `/tmp`, `XDG_CACHE_HOME` to the private cache, and
+`RALPH_WRITE_DIR` / `RALPH_ARTIFACT_DIR` expose the root / artifact directory.
+The normal `~/.cache` path also maps to that private cache.
+The turn prompt describes the bounded storage environment only when this mode is enabled.
+
+`privateWriteMaxBytes` is a **capacity guard, not a directory quota**. Provision
+a dedicated bounded filesystem first—for example, a preallocated 10 GiB ext4
+loop volume mounted at the root. Ralph refuses to start or spawn another
+isolated host/check if the mount is missing, its reported total capacity
+exceeds the guard, or it contains nested mounts. It never falls back to the
+unbounded host directory. Omit the guard to use an ordinary private directory
+without a size limit. This feature does not provision/mount a filesystem or
+reserve disk space automatically. A preallocated volume is preferable to a
+sparse image, which can still fail when the host filesystem fills up.
+
+When full, writes fail with `ENOSPC`; the process is not killed and can delete
+disposable scratch to continue. Filesystem metadata and the checkout share the
+budget, so usable scratch is less than 10 GiB. Before migrating a stopped run,
+archive disposable verification data until its checkout and retained scratch
+fit, then copy them onto the prepared volume and update the workdir (or its
+symlink). Keep Ralph state/logs **outside** the root. Do not migrate a live run.
+
+Unlike legacy isolation, private-write mode does not expose Ralph state or all
+provider homes as writable. Ralph state stays readable but read-only to the
+child. Only the **active provider's** session/auth storage remains writable
+outside the budget: `CODEX_HOME` (default `~/.codex`), or `CLAUDE_CONFIG_DIR`
+(default `~/.claude`) plus `~/.claude.json`. Verification checks get no such
+exception. Session trajectories, databases, and Ralph's own logs therefore
+still need separate disk accounting; this is not a hard limit on every byte
+the run produces, nor a security boundary against hostile code using host
+services. Antigravity's save/app-data directories default inside the private
+root in this mode (explicit overrides must also be inside it); its portable
+goal-progress file goes there too.
+
+Ralph's own git/setup operations remain outside Bubblewrap, with their temp
+and cache environment redirected to the private root. Existing configurations
+without `privateWriteDir` retain their previous isolation behavior.
 
 ## Environment overrides
 
@@ -517,6 +586,11 @@ under `stateBaseDir`.
   Override `sessionIsolation.readOnlyRoot`
 - `RALPH_SESSION_ISOLATION_PRIVATE_TMP`
   Override `sessionIsolation.privateTmp`
+- `RALPH_SESSION_ISOLATION_PRIVATE_WRITE_DIR`
+  Absolute persistent private write root; requires enabled, read-only-root,
+  private-tmp isolation on Linux
+- `RALPH_SESSION_ISOLATION_PRIVATE_WRITE_MAX_BYTES`
+  Positive integer capacity guard for an already-mounted private write filesystem
 - `RALPH_SESSION_ISOLATION_BWRAP_PATH`
   Override the Bubblewrap executable path
 - `RALPH_RESOURCE_LIMITS`

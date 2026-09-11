@@ -5372,11 +5372,17 @@ function progressBestCacheKey(runKey, progress) {
   if (!runKey || !progress || !Number.isInteger(progress.turn) || !progress.stage) {
     return null;
   }
+  // Rollbacks reuse turn numbers. Only reuse a browser high-water mark when
+  // it belongs to the same turn-start baseline, not a discarded execution.
+  const startedAt = cleanText(progress.start?.recordedAt);
+  if (!startedAt) {
+    return null;
+  }
   const total = finitePositiveNumber(progress.current?.total) ?? finitePositiveNumber(progress.best?.total);
   if (!total) {
     return null;
   }
-  return `${runKey}\0${progress.turn}\0${progress.stage}\0${total}`;
+  return `${runKey}\0${progress.turn}\0${startedAt}\0${progress.stage}\0${total}`;
 }
 
 function progressBestCandidate(progress) {
