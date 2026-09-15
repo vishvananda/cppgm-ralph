@@ -203,6 +203,12 @@ not chronological spending (notably V2 places ABI naming at PA30). Event logs
 and exported rows retain native PA numbers, so archived data needs no migration.
 The export `--through` cutoff remains in canonical V3 numbering.
 
+Live test progress recognizes direct PA tests and test output redirected to a
+log and subsequently displayed by `cat`, `tail`, or summary filters. Log reads
+must match a test invocation observed in the same turn/thread; an arbitrary old
+log does not count as fresh progress. This works with batched commands and
+artifact-directory paths, and the association survives incremental refreshes.
+
 The [V4 Codex scaffold](examples/v4codex/README.md) contains an Astra/xhigh
 config and the complete spec-aware prompt/goal family, including PA34
 inception checks.

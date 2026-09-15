@@ -54,6 +54,7 @@ const ENTRY_DEDUPE = globalThis.RALPH_ENTRY_DEDUPE;
 const SAFE_MARKDOWN = globalThis.RALPH_SAFE_MARKDOWN;
 const TEST_STATUS_SUMMARY = globalThis.RALPH_TEST_STATUS_SUMMARY;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
+const TEST_COMMAND_PROVENANCE = globalThis.RALPH_TEST_COMMAND_PROVENANCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 
 const API_PRICE_MODEL_ALIASES = [
@@ -5214,7 +5215,7 @@ function buildAgentTestProgressState(records) {
   };
   const byTurn = new Map();
   const testStatusesByTurn = new Map();
-  const testReportLogCommands = new Map();
+  const testCommands = TEST_COMMAND_PROVENANCE.createTracker();
   const commandsByAsyncCell = new Map();
   const commandsBySessionStoreKey = new Map();
   const commandStartsById = new Map();
@@ -5265,31 +5266,31 @@ function buildAgentTestProgressState(records) {
       );
     }
 
-    rememberTestReportLogCommands(testReportLogCommands, record, commandForProgress);
-    const commandInfo = parseAgentTestCommand(commandForProgress) ??
-      inferAgentTestCommandFromReferencedLog(testReportLogCommands, record, commandForProgress);
-    if (!commandInfo) {
-      continue;
-    }
+    const sources = testCommands.sources(commandForProgress, `${record.threadId ?? ""}:${record.turnNumber}`);
+    for (const evidence of TEST_COMMAND_PROVENANCE.outputEvidence(sources, commandOutputText(item.aggregated_output))) {
+      const commandInfo = evidence.info;
+      const evidenceRecord = { ...record, event: { ...record.event,
+        item: { ...item, aggregated_output: evidence.output } } };
 
-    const derivedTestStatus = deriveTestStatusFromCommand(record, commandForProgress, commandInfo);
-    if (derivedTestStatus) {
-      const turn = displayTurnForRecord(record);
-      const statuses = testStatusesByTurn.get(turn) ?? [];
-      statuses.push(derivedTestStatus);
-      testStatusesByTurn.set(turn, statuses);
-    }
+      const derivedTestStatus = deriveTestStatusFromCommand(evidenceRecord, evidence.command, commandInfo);
+      if (derivedTestStatus) {
+        const turn = displayTurnForRecord(record);
+        const statuses = testStatusesByTurn.get(turn) ?? [];
+        statuses.push(derivedTestStatus);
+        testStatusesByTurn.set(turn, statuses);
+      }
 
-    const observation = deriveAgentTestProgress(record, commandInfo, tracker);
-    if (!observation) {
-      continue;
-    }
+      const observation = deriveAgentTestProgress(evidenceRecord, commandInfo, tracker);
+      if (!observation) {
+        continue;
+      }
 
-    const progress = applyAgentTestProgressObservation(tracker, observation);
-    if (!progress) {
-      continue;
+      const progress = applyAgentTestProgressObservation(tracker, observation);
+      if (!progress) {
+        continue;
+      }
+      byTurn.set(progress.turn, progress);
     }
-    byTurn.set(progress.turn, progress);
   }
 
   return { byTurn, latest: tracker.latest, testStatusesByTurn };
@@ -5731,155 +5732,7 @@ function hasTrustworthyStageTotals(testStatus) {
 }
 
 function parseAgentTestCommand(command) {
-  const text = unwrapCommand(command).replace(/\s+\(continued session \d+\)\s*$/, "");
-  if (hasProgressUnsafeShellOperator(text)) {
-    return null;
-  }
-  return parseAgentTestCommandTarget(text);
-}
-
-function parseAgentTestCommandTarget(text) {
-  let match = text.match(/\bmake\b[\s\S]*?\btest-report\b/);
-  if (match) {
-    const stages = parseActiveTestReportStages(text);
-    if (stages.length > 0) {
-      const lastStage = stages.at(-1);
-      return {
-        kind: "selected",
-        stage: lastStage,
-        stageNumber: stageNumber(lastStage),
-        stages,
-        target: `test-report ${stages.join(" ")}`,
-        hasSubset: hasTestGlob(text),
-      };
-    }
-  }
-
-  match = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
-  if (match) {
-    const number = Number.parseInt(match[1], 10);
-    return {
-      kind: "through",
-      stage: `pa${number}`,
-      stageNumber: number,
-      target: `test-report-through-pa${number}`,
-      hasSubset: false,
-    };
-  }
-
-  match = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
-  if (match) {
-    const number = Number.parseInt(match[1], 10);
-    return {
-      kind: "single",
-      stage: `pa${number}`,
-      stageNumber: number,
-      target: `test-pa${number}`,
-      hasSubset: false,
-      failFast: false,
-    };
-  }
-
-  const direct = TEST_PROGRESS_EVIDENCE?.directStageTestCommand(text);
-  if (!direct) {
-    return null;
-  }
-  return {
-    kind: "stage",
-    stage: direct.stage,
-    stageNumber: stageNumber(direct.stage),
-    target: /(?:^|\s)check(?=\s|$)/.test(text)
-      ? `make -C ${direct.stage} check`
-      : `make -C ${direct.stage} test`,
-    hasSubset: direct.hasSubset,
-    failFast: direct.failFast,
-  };
-}
-
-function rememberTestReportLogCommands(logCommands, record, command) {
-  const text = unwrapCommand(command).replace(/\s+\(continued session \d+\)\s*$/, "");
-  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
-    return;
-  }
-  const commandInfo = parseAgentTestCommandTarget(text);
-  if (!commandInfo) {
-    return;
-  }
-  for (const logPath of extractRedirectedTempLogPaths(text)) {
-    logCommands.set(testReportLogCommandKey(record, logPath), {
-      ...commandInfo,
-      target: `${commandInfo.target} via ${logPath}`,
-    });
-  }
-}
-
-function inferAgentTestCommandFromReferencedLog(logCommands, record, command) {
-  for (const logPath of extractReferencedTempLogPaths(command)) {
-    const commandInfo = logCommands.get(testReportLogCommandKey(record, logPath));
-    if (commandInfo) {
-      return commandInfo;
-    }
-  }
-  return null;
-}
-
-function testReportLogCommandKey(record, logPath) {
-  return [
-    Number.isInteger(record?.turnNumber) ? record.turnNumber : "",
-    normalizeTempLogPath(logPath),
-  ].join("\0");
-}
-
-function extractRedirectedTempLogPaths(text) {
-  const paths = [];
-  const regex = /(?:^|[\s;])(?:\d?>{1,2}|&>{1,2})\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
-  let match;
-  while ((match = regex.exec(String(text ?? ""))) !== null) {
-    const logPath = normalizeTempLogPath(match[1] ?? match[2] ?? match[3] ?? "");
-    if (logPath) {
-      paths.push(logPath);
-    }
-  }
-  return [...new Set(paths)];
-}
-
-function extractReferencedTempLogPaths(text) {
-  const paths = [...String(text ?? "").matchAll(/\/tmp\/[A-Za-z0-9._/-]+\.log\b/g)]
-    .map((match) => normalizeTempLogPath(match[0]))
-    .filter(Boolean);
-  return [...new Set(paths)];
-}
-
-function normalizeTempLogPath(logPath) {
-  const path = String(logPath ?? "").trim();
-  return /^\/tmp\/[A-Za-z0-9._/-]+\.log$/.test(path) ? path : "";
-}
-
-function hasProgressUnsafeShellOperator(text) {
-  const scanText = shellOperatorScanText(text);
-  if (!/[|<>]/.test(scanText)) {
-    return false;
-  }
-  return !isSafeFilteredTestReportCommand(text);
-}
-
-function isSafeFilteredTestReportCommand(text) {
-  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
-    return false;
-  }
-  const scanText = shellOperatorScanText(text);
-  const withoutSafeRedirects = scanText
-    .replace(/\s*\d?>&\d+/g, "")
-    .replace(/\s*\d?>\s*\/dev\/null\b/g, "");
-  if (/[<>]/.test(withoutSafeRedirects)) {
-    return false;
-  }
-  const pipeSegments = scanText.split("|").slice(1);
-  if (pipeSegments.length === 0) {
-    return true;
-  }
-  return pipeSegments.every((segment) =>
-    /^\s*(grep|egrep|fgrep|sed|tail|head|awk|sort|uniq|wc|cat|cut|tr)\b/.test(segment));
+  return TEST_COMMAND_PROVENANCE.directCommand(unwrapCommand(command));
 }
 
 function shellOperatorScanText(text) {
@@ -5909,15 +5762,6 @@ function shellOperatorScanText(text) {
   return result;
 }
 
-function parseActiveTestReportStages(text) {
-  const match = text.match(/\bACTIVE_TEST_REPORT_PAS\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/);
-  const raw = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
-  return [...raw.matchAll(/\bpa\d+\b/g)].map((stage) => stage[0]);
-}
-
-function hasTestGlob(text) {
-  return /\bGLOB\s*=/.test(text);
-}
 
 function deriveAgentTestProgress(record, commandInfo, tracker) {
   const item = record.event?.item ?? {};
@@ -5932,12 +5776,12 @@ function deriveAgentTestProgress(record, commandInfo, tracker) {
   const direct = stageProgress.get(commandInfo.stage);
   if (
     direct?.total > 0 &&
-    !((commandInfo.kind === "selected" || commandInfo.kind === "single") && direct.partialStage)
+    !(["selected", "single", "stage"].includes(commandInfo.kind) && direct.partialStage)
   ) {
     return buildAgentTestProgressObservation(record, commandInfo, direct);
   }
 
-  if (commandInfo.kind === "selected" || commandInfo.kind === "single") {
+  if (["selected", "single", "stage"].includes(commandInfo.kind)) {
     if (direct?.partialStage) {
       const summaryProgress = inferSelectedReportSummaryProgress(
         output,
@@ -6109,7 +5953,7 @@ function normalizeSelectedReportStages(output, commandInfo) {
   if (configured.length > 0) {
     return configured;
   }
-  if (commandInfo.kind === "single" && commandInfo.stage) {
+  if ((commandInfo.kind === "single" || commandInfo.kind === "stage") && commandInfo.stage) {
     return [commandInfo.stage];
   }
   return parseStageSections(output).map((section) => section.name);

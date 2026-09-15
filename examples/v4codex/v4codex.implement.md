@@ -17,6 +17,10 @@ supports further fixes. Commit coherent increments throughout the turn.
 The initial plan, a commit or minimum test progress is not a stopping boundary.
 An incomplete handoff must finish a coherent behavior group and explain the
 concrete boundary making further related work impractical.
+Resolve known correctness and spec defects in that group. Distinguish unfinished
+implementation from questions for independent audit; record both without waiving
+requirements. Do not repeatedly open independent architecture investigations
+solely because further improvements might exist.
 
 Keep `{{testStage}}/plan.md` compact: design/spec alignment, remaining groups,
 performance evidence and a handoff ledger. On first entry, before stage edits,
@@ -32,8 +36,11 @@ measurements, mandated limits, correctness and coverage.
 
 At handoff, earlier PAs and file audit pass; current failures decrease or reach
 zero without reduced coverage. Adding passing tests alone is not progress.
-Refresh the plan and leave committed, clean changes. Ralph audits every three
-accepted incomplete handoffs and performs a full audit when the stage passes.
+Refresh the plan, leave committed, clean changes and mark the implementation
+handoff goal complete. This returns control to Ralph; it does not certify the
+whole assignment. Ralph audits every three accepted incomplete handoffs and
+performs a full audit when the stage passes. That audit resolves whole-stage
+findings before advancement.
 
 Exception to reference preservation: you may correct reference outputs without
 approval if a reduced reproducer and cited C++11 rules (LowIR contract for

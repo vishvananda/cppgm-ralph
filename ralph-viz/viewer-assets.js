@@ -9,6 +9,7 @@ export const VIEWER_ASSETS = Object.freeze([
   { name: "model-pricing.js", pathname: "/model-pricing.js", contentType: "application/javascript; charset=utf-8" },
   { name: "safe-markdown.js", pathname: "/safe-markdown.js", contentType: "application/javascript; charset=utf-8" },
   { name: "test-progress-evidence.js", pathname: "/test-progress-evidence.js", contentType: "application/javascript; charset=utf-8" },
+  { name: "test-command-provenance.js", pathname: "/test-command-provenance.js", contentType: "application/javascript; charset=utf-8" },
   { name: "test-status-summary.js", pathname: "/test-status-summary.js", contentType: "application/javascript; charset=utf-8" },
   { name: "styles.css", pathname: "/styles.css", contentType: "text/css; charset=utf-8" },
 ]);

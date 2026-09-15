@@ -14,6 +14,7 @@ import path from "node:path";
 test("viewer serves shared browser helpers as JavaScript", async () => {
   for (const [url, marker] of [
     ["/test-progress-evidence.js", /RALPH_TEST_PROGRESS_EVIDENCE/],
+    ["/test-command-provenance.js", /RALPH_TEST_COMMAND_PROVENANCE/],
     ["/command-status.js", /RALPH_COMMAND_STATUS/],
     ["/model-pricing.js", /RALPH_MODEL_PRICING/],
   ]) {
@@ -314,4 +315,66 @@ test("extracts child progress from batched code-mode make commands", async (t) =
   assert.equal(observations.length, 1);
   assert.ok(observations.every((entry) =>
     entry.stage === "pa1" && entry.passed === 53 && entry.total === 53 && entry.status === "pass"));
+});
+
+test("incremental native scans retain silent test writers and defer partial JSON lines", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-log-progress-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const transcript = path.join(dir, "session.jsonl");
+  const record = (type, payload) => JSON.stringify({ timestamp: "2026-09-12T17:00:00Z", type, payload }) + "\n";
+  const call = (id, cmd) => record("response_item", { type: "function_call", name: "exec_command", call_id: id,
+    arguments: JSON.stringify({ cmd }) });
+  const output = (id, text) => record("response_item", { type: "function_call_output", call_id: id, output: text });
+  const summary = "===== TEST SUMMARY: 218 / 314 TESTS PASSED =====\n";
+  const first = record("turn_context", { turn_id: "turn27" }) +
+    call("writer", "make -j6 build >/tmp/build.log 2>&1 && make test-pa14 >/tmp/stage.log 2>&1") + output("writer", "");
+  await fs.writeFile(transcript, first);
+  const state = {};
+  assert.deepEqual(await scanCodexSessionProgressObservations(transcript, 0, state), []);
+  assert.equal(state.offset, Buffer.byteLength(first));
+  // The reader occurs long after the writer; no overlap window contains both.
+  const second = call("reader", "tail -3 /tmp/stage.log; make test-report-through-pa13 >/tmp/prior.log 2>&1");
+  const result = output("reader", summary);
+  await fs.appendFile(transcript, second + result.slice(0, -12));
+  const restored = JSON.parse(JSON.stringify(state));
+  assert.deepEqual(await scanCodexSessionProgressObservations(transcript, restored.offset, restored), []);
+  assert.equal(restored.offset, Buffer.byteLength(first + second));
+  await fs.appendFile(transcript, result.slice(-12));
+  const observations = await scanCodexSessionProgressObservations(transcript, restored.offset, restored);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].stage, "pa14");
+  assert.equal(observations[0].passed, 218);
+  assert.equal(observations[0].total, 314);
+  await fs.appendFile(transcript, record("turn_context", { turn_id: "turn28" }) +
+    call("stale", "tail -3 /tmp/stage.log") + output("stale", summary));
+  assert.deepEqual(await scanCodexSessionProgressObservations(transcript, restored.offset, restored), []);
+});
+
+test("native Code Mode wait plus log reader attributes the summary to the log writer", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-batch-progress-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const transcript = path.join(dir, "session.jsonl");
+  const record = payload => ({ timestamp: "2026-09-12T17:29:09Z", type: "response_item", payload });
+  const records = [
+    record({ type: "custom_tool_call", name: "exec", call_id: "writer",
+      input: 'text(await tools.exec_command({cmd:"make test-pa14 >/tmp/stage.log 2>&1"}));' }),
+    record({ type: "custom_tool_call_output", call_id: "writer", output: [
+      { type: "input_text", text: JSON.stringify({ session_id: 62377, output: "" }) },
+    ] }),
+    record({ type: "custom_tool_call", name: "exec", call_id: "reader", input:
+      'text(await tools.write_stdin({session_id:62377,chars:""}));\n' +
+      'text(await tools.exec_command({cmd:"tail -3 /tmp/stage.log; make test-report-through-pa13 >/tmp/prior.log 2>&1"}));' }),
+    record({ type: "custom_tool_call_output", call_id: "reader", output: [
+      { type: "input_text", text: "Script completed\nOutput:\n" },
+      { type: "input_text", text: JSON.stringify({ exit_code: 2, output: "" }) },
+      { type: "input_text", text: JSON.stringify({ session_id: 26775,
+        output: "===== TEST SUMMARY: 218 / 314 TESTS PASSED =====\nmake: *** [Makefile:483: test-pa14] Error 2\n" }) },
+    ] }),
+  ];
+  await fs.writeFile(transcript, records.map(JSON.stringify).join("\n") + "\n");
+  const observations = await scanCodexSessionProgressObservations(transcript);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].stage, "pa14");
+  assert.equal(observations[0].passed, 218);
+  assert.equal(observations[0].total, 314);
 });

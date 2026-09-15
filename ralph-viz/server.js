@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import "./assignment-layouts.js";
 import "./model-pricing.js";
 import "./test-progress-evidence.js";
+import "./test-command-provenance.js";
 import "./turn-lifecycle.js";
 import {
   VIEWER_ASSET_NAMES,
@@ -36,6 +37,7 @@ const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
+const TEST_COMMAND_PROVENANCE = globalThis.RALPH_TEST_COMMAND_PROVENANCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 const ACTIVE_EVENT_GAP_MS = 10 * 60 * 1000;
 const ACTIVE_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -46,7 +48,6 @@ const CODEX_SESSION_OUTPUT_LIMIT = 12_000;
 const CODEX_FAST_USAGE_TAIL_BYTES = 16 * 1024 * 1024;
 const CODEX_TAIL_SESSION_CHUNK_BYTES = 1024 * 1024;
 const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
-const CODEX_SESSION_PROGRESS_OVERLAP_BYTES = 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
@@ -56,7 +57,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 17;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 18;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -777,8 +778,9 @@ function filterEventsToWindows(events, selectedWindows) {
   });
 }
 
-function progressEventsFromRunEvents(events) {
+export function progressEventsFromRunEvents(events) {
   const progressEvents = [];
+  const testCommands = TEST_COMMAND_PROVENANCE.createTracker();
   const commandsByAsyncCell = new Map();
   const commandsBySessionStoreKey = new Map();
   const commandStartsById = new Map();
@@ -821,31 +823,34 @@ function progressEventsFromRunEvents(events) {
     if (sessionStoreKey) {
       commandsBySessionStoreKey.set(asyncRecordMapKey(record, sessionStoreKey), command);
     }
+    const sources = testCommands.sources(command, `${record.threadId ?? ""}:${record.turnNumber}`);
     if (!output) {
       continue;
     }
-    const observation = progressObservationFromSessionOutput(
-      output,
-      record.recordedAt,
-      command,
-    );
-    if (!observation) {
-      continue;
-    }
-    progressEvents.push({
-      recordedAt: observation.recordedAt,
-      threadId: record.threadId ?? null,
-      turnNumber: record.turnNumber,
-      eventType: "ralph.agent-progress",
-      event: {
-        type: "ralph.agent-progress",
-        progress: {
-          ...observation,
-          commandKind: "run-log",
-          commandTarget: "command output summary",
+    for (const evidence of TEST_COMMAND_PROVENANCE.outputEvidence(sources, output)) {
+      const observation = progressObservationFromSessionOutput(
+        evidence.output,
+        record.recordedAt,
+        evidence.command,
+      );
+      if (!observation) {
+        continue;
+      }
+      progressEvents.push({
+        recordedAt: observation.recordedAt,
+        threadId: record.threadId ?? null,
+        turnNumber: record.turnNumber,
+        eventType: "ralph.agent-progress",
+        event: {
+          type: "ralph.agent-progress",
+          progress: {
+            ...observation,
+            commandKind: "run-log",
+            commandTarget: "command output summary",
+          },
         },
-      },
-    });
+      });
+    }
   }
   return compactBestProgressEvents(progressEvents);
 }
@@ -4947,15 +4952,17 @@ async function readCodexSessionProgressObservations(filePath) {
 
   let observations = [];
   let startOffset = 0;
+  let scanState = {};
   if (cached && Number(cached.file?.size) > 0 && Number(cached.file.size) < stat.size) {
     observations = cached.observations;
-    startOffset = Math.max(0, Number(cached.file.size) - CODEX_SESSION_PROGRESS_OVERLAP_BYTES);
+    scanState = cached.scanState ?? {};
+    startOffset = Number.isInteger(scanState.offset) ? scanState.offset : 0;
   }
 
-  const scanned = await scanCodexSessionProgressObservations(filePath, startOffset);
+  const scanned = await scanCodexSessionProgressObservations(filePath, startOffset, scanState);
   observations = dedupeProgressObservations([...observations, ...scanned]);
   if (cachePath) {
-    await writeCodexSessionProgressCache(cachePath, filePath, stat, observations);
+    await writeCodexSessionProgressCache(cachePath, filePath, stat, observations, scanState);
   }
   return observations;
 }
@@ -4979,11 +4986,12 @@ async function readCodexSessionProgressCache(cachePath, filePath) {
   }
   return {
     file: parsed.file,
+    scanState: parsed.scanState ?? {},
     observations: dedupeProgressObservations(parsed.observations.map(normalizeProgressObservation).filter(Boolean)),
   };
 }
 
-async function writeCodexSessionProgressCache(cachePath, filePath, stat, observations) {
+async function writeCodexSessionProgressCache(cachePath, filePath, stat, observations, scanState) {
   const body = JSON.stringify({
     version: CODEX_SESSION_PROGRESS_CACHE_VERSION,
     generatedAt: new Date().toISOString(),
@@ -4994,6 +5002,7 @@ async function writeCodexSessionProgressCache(cachePath, filePath, stat, observa
       mtime: stat.mtime.toISOString(),
     },
     observations,
+    scanState,
   });
   const dir = path.dirname(cachePath);
   const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
@@ -5013,16 +5022,38 @@ function codexSessionProgressCachePath(filePath) {
   return path.join(RALPH_DIR, CODEX_SESSION_PROGRESS_CACHE_DIR, `${key}.json`);
 }
 
-export async function scanCodexSessionProgressObservations(filePath, startOffset = 0) {
+export async function scanCodexSessionProgressObservations(filePath, startOffset = 0, scanState = {}) {
   const observations = [];
-  const callsById = new Map();
-  const commandsBySessionId = new Map();
-  const sessionIdsByStoreKey = new Map();
+  const callsById = new Map(scanState.calls ?? []);
+  const commandsBySessionId = new Map(scanState.sessions ?? []);
+  const sessionIdsByStoreKey = new Map(scanState.stores ?? []);
+  const testCommands = TEST_COMMAND_PROVENANCE.createTracker(scanState.logs ?? []);
+  let scope = scanState.scope ?? "";
   const commandContext = { commandsBySessionId, sessionIdsByStoreKey };
-  const stream = createReadStream(filePath, { encoding: "utf8", start: Math.max(0, startOffset) });
-  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let offset = Math.max(0, startOffset);
+  async function* completeLines() {
+    let pending = "";
+    for await (const chunk of createReadStream(filePath, { encoding: "utf8", start: offset })) {
+      pending += chunk;
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline + 1);
+        pending = pending.slice(newline + 1);
+        offset += Buffer.byteLength(line);
+        yield line;
+      }
+    }
+    // A partially appended JSON line is retried at the next refresh. Persist
+    // command provenance at this exact boundary, without replaying old reads
+    // against newer log writers from an overlap window.
+  }
+  const lines = completeLines();
   for await (const rawLine of lines) {
     const line = String(rawLine ?? "").trim();
+    if (line.includes('"type":"turn_context"')) {
+      try { const context = JSON.parse(line); scope = context.payload?.turn_id ?? scope; } catch {}
+      continue;
+    }
     if (!line || !line.includes('"type":"response_item"')) {
       continue;
     }
@@ -5072,6 +5103,11 @@ export async function scanCodexSessionProgressObservations(filePath, startOffset
     if (sessionId && sessionStoreKey) {
       sessionIdsByStoreKey.set(sessionStoreKey, sessionId);
     }
+    const commands = call?.batchCommands?.length
+      ? call.batchCommands
+      : [parentCommand ?? call?.command ?? ""];
+    // Even silent/redirected commands establish provenance for a later log read.
+    const sources = testCommands.sources(commands.join("\n"), scope);
     if (
       !line.includes("TEST SUMMARY") &&
       !line.includes("ALL TESTS PASSED SUCCESSFULLY") &&
@@ -5081,18 +5117,15 @@ export async function scanCodexSessionProgressObservations(filePath, startOffset
     ) {
       continue;
     }
-    const commands = call?.batchCommands?.length
-      ? call.batchCommands
-      : [parentCommand
-          ? `${parentCommand} (continued session ${parentSessionId})`
-          : call?.command ?? ""];
-    for (const command of commands) {
-      const observation = progressObservationFromCodexOutputRecord(record, command);
+    for (const evidence of TEST_COMMAND_PROVENANCE.outputEvidence(sources, commandOutputText(payload.output))) {
+      const observation = progressObservationFromSessionOutput(evidence.output, record.timestamp, evidence.command);
       if (observation) {
         observations.push(observation);
       }
     }
   }
+  Object.assign(scanState, { calls: [...callsById].slice(-64), sessions: [...commandsBySessionId].slice(-128),
+    stores: [...sessionIdsByStoreKey].slice(-128), logs: testCommands.entries(), scope, offset });
   return observations;
 }
 
@@ -5135,7 +5168,7 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
         passed: progress.passed,
         total: progress.total,
         status: summary.allTestsPassed && progress.status === "pass" ? "pass" : progress.status,
-        hasSubset: false,
+        hasSubset: commandInfo.hasSubset === true,
       });
     }
   }
@@ -5167,7 +5200,7 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
     passed: progress.passed,
     total: progress.total,
     status: summary.allTestsPassed && progress.status === "pass" ? "pass" : progress.status,
-    hasSubset: false,
+    hasSubset: commandInfo.hasSubset === true,
   });
 }
 
@@ -5235,10 +5268,10 @@ function parseSingleStageSummaryProgressFromSessionOutput(summary, command, expe
       status: summary.allTestsPassed || summary.testsPassed === summary.testsTotal ? "pass" : "fail",
     };
   }
-  if (commandInfo.stage !== expectedStage || commandInfo.hasSubset) {
+  if (commandInfo.stage !== expectedStage) {
     return null;
   }
-  if (commandInfo.kind !== "selected" && commandInfo.kind !== "single") {
+  if (!["selected", "single", "stage"].includes(commandInfo.kind)) {
     return null;
   }
   const outputStages = [...new Set(parseStageSections(output).map((section) => section.name))];
@@ -5314,72 +5347,8 @@ function inferSingleSessionProgressStageFromCommand(command) {
 }
 
 function parseSingleStageProgressCommand(command) {
-  const text = String(command ?? "").replace(/\s+\(continued session \d+\)\s*$/, "");
-  if (hasProgressUnsafeShellOperator(text)) {
-    return null;
-  }
-  const selected = parseActiveTestReportStagesFromCommand(text);
-  if (selected.length === 1 && /\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
-    return {
-      kind: "selected",
-      stage: selected[0],
-      hasSubset: /\bGLOB\s*=/.test(text),
-    };
-  }
-  const through = text.match(/\bmake\b[\s\S]*?\btest-report-through-pa(\d+)\b/);
-  if (through) {
-    return {
-      kind: "through",
-      stage: `pa${Number.parseInt(through[1], 10)}`,
-      hasSubset: false,
-    };
-  }
-  const single = text.match(/\bmake\b[\s\S]*?\btest-pa(\d+)\b/);
-  if (single) {
-    return {
-      kind: "single",
-      stage: `pa${Number.parseInt(single[1], 10)}`,
-      hasSubset: false,
-      failFast: false,
-    };
-  }
-  const direct = TEST_PROGRESS_EVIDENCE.directStageTestCommand(text);
-  if (direct) {
-    return {
-      kind: "stage",
-      stage: direct.stage,
-      hasSubset: direct.hasSubset,
-      failFast: direct.failFast,
-    };
-  }
-  return null;
-}
-
-function hasProgressUnsafeShellOperator(text) {
-  const scanText = shellOperatorScanText(text);
-  if (!/[|<>]/.test(scanText)) {
-    return false;
-  }
-  return !isSafeFilteredTestReportCommand(text);
-}
-
-function isSafeFilteredTestReportCommand(text) {
-  if (!/\bmake\b[\s\S]*?\btest-report\b/.test(text)) {
-    return false;
-  }
-  const scanText = shellOperatorScanText(text);
-  const withoutSafeRedirects = scanText
-    .replace(/\s*\d?>&\d+/g, "")
-    .replace(/\s*\d?>\s*\/dev\/null\b/g, "");
-  if (/[<>]/.test(withoutSafeRedirects)) {
-    return false;
-  }
-  const pipeSegments = scanText.split("|").slice(1);
-  if (pipeSegments.length === 0) {
-    return true;
-  }
-  return pipeSegments.every((segment) =>
-    /^\s*(grep|egrep|fgrep|sed|tail|head|awk|sort|uniq|wc|cat|cut|tr)\b/.test(segment));
+  const info = TEST_COMMAND_PROVENANCE.directCommand(command);
+  return info?.stages.length === 1 ? info : null;
 }
 
 function shellOperatorScanText(text) {
