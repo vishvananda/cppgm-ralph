@@ -19,8 +19,9 @@ The backend uses the ChatGPT-authenticated Codex login from `CODEX_HOME` or
 shell, read, write, edit, and web-fetch tools. Ralph supplies the same
 portable goal text and external checks as v4unreal. The transport restores
 encrypted reasoning across tool calls within a turn, but Strands' Responses
-adapter still drops it when a session resumes in a new process. The direct
-Codex transport does not refresh an expired login itself.
+adapter still drops it when a session resumes in a new process. If the Codex
+access token expires, the bridge asks the Codex CLI to refresh it, then retries
+once. That short refresh turn is outside Ralph's token accounting.
 
 To start the run from the Ralph repository:
 

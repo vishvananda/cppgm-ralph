@@ -5280,6 +5280,7 @@ class StrandsAgentThread {
       model: this.threadOptions.model,
       effort: this.threadOptions.modelReasoningEffort ?? "high",
       webSearchEnabled: CONFIG.webSearchEnabled,
+      codexPath: CONFIG.codexPath,
       sessionId: this._id,
       sessionDir,
     }));

@@ -30,6 +30,7 @@ async function main() {
     model: request.model,
     effort: request.effort,
     webSearch: request.webSearchEnabled === true,
+    codexPath: request.codexPath,
     onUsage: (usage) => emit({ type: "model.usage", usage: {
       input_tokens: usage.input_tokens,
       input_tokens_details: usage.input_tokens_details,

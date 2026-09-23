@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { OpenAIModel } from "@strands-agents/sdk/models/openai";
@@ -24,6 +25,29 @@ async function subscriptionCredentials() {
     throw new Error("Codex ChatGPT credentials are incomplete; run `codex login`.");
   }
   return { accessToken, accountId };
+}
+
+async function refreshSubscriptionWithCodex(codexPath, model) {
+  const file = authPath();
+  if (path.basename(file) !== "auth.json") {
+    throw new Error("Codex CLI can refresh only an auth.json login; refresh the configured auth file externally.");
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      const child = execFile(codexPath, [
+        "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+        "--sandbox", "read-only", "--model", model,
+        "-c", "model_reasoning_effort=low", "Reply OK.",
+      ], { cwd: os.tmpdir(), env: { ...process.env, CODEX_HOME: path.dirname(file) },
+        timeout: 120_000, maxBuffer: 128_000 }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+      child.stdin?.end();
+    });
+  } catch {
+    throw new Error("Codex login could not be refreshed; run `codex login` and retry.");
+  }
 }
 
 function tapResponsesEvents(response, { onUsage, reasoningReplay }) {
@@ -67,7 +91,7 @@ function tapResponsesEvents(response, { onUsage, reasoningReplay }) {
   });
 }
 
-export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "max", webSearch = false, onUsage } = {}) {
+export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "max", webSearch = false, onUsage, codexPath = "codex" } = {}) {
   const reasoningReplay = new ReasoningReplay();
   return new OpenAIModel({
     api: "responses",
@@ -93,12 +117,26 @@ export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "m
         body.store = false;
         body.include = [...new Set([...(body.include ?? []), "reasoning.encrypted_content"])];
         body.input = reasoningReplay.apply(body.input);
-        const response = await fetch(url, {
+        const options = {
           ...init,
           headers,
           body: JSON.stringify(body),
           redirect: "manual",
-        });
+        };
+        let response = await fetch(url, options);
+        if (response.status === 401) {
+          let refreshed = await subscriptionCredentials();
+          if (refreshed.accessToken === accessToken) {
+            await refreshSubscriptionWithCodex(codexPath, model);
+            refreshed = await subscriptionCredentials();
+          }
+          if (refreshed.accessToken === accessToken) {
+            throw new Error("Codex login is expired; run `codex login` and retry.");
+          }
+          headers.set("Authorization", `Bearer ${refreshed.accessToken}`);
+          headers.set("ChatGPT-Account-ID", refreshed.accountId);
+          response = await fetch(url, options);
+        }
         return tapResponsesEvents(response, { onUsage, reasoningReplay });
       },
     },
