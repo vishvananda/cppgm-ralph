@@ -185,7 +185,7 @@
     "readOnlyRoot": true,
     "privateTmp": true,
     "privateWriteDir": "/home/vishvananda/work/private/v4strands",
-    "privateWriteMaxBytes": 21474836480
+    "privateWriteMaxBytes": 8589934592
   },
   "additionalDirectories": [],
   "outputTailChars": 20000,

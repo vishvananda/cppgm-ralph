@@ -9,7 +9,7 @@ v4unreal. The checkout is backed by
 [cppgm-run-v4strands](https://github.com/vishvananda/cppgm-run-v4strands).
 
 The prepared checkout is `/home/vishvananda/work/v4strands`, inside the
-dedicated `/home/vishvananda/work/private/v4strands` 20 GiB filesystem. The
+dedicated `/home/vishvananda/work/private/v4strands` 8 GiB filesystem. The
 installed config and sidecars are `/home/vishvananda/work/v4strands.*`; keep
 them in sync with this example. Ralph state and Strands sessions are stored
 under `/home/vishvananda/work/.ralph` outside the private write volume.
@@ -22,6 +22,11 @@ encrypted reasoning across tool calls within a turn, but Strands' Responses
 adapter still drops it when a session resumes in a new process. If the Codex
 access token expires, the bridge asks the Codex CLI to refresh it, then retries
 once. That short refresh turn is outside Ralph's token accounting.
+
+Strands and Unreal receive their loop goal as prompt context; neither has a
+native `update_goal` tool in this bridge. Ralph verifies the handoff with its
+configured checks after the model ends the turn. Native Codex uses its own goal
+machinery in the separate v4luna run.
 
 To start the run from the Ralph repository:
 

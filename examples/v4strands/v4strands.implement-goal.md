@@ -20,7 +20,7 @@ Completion criteria:
 {{modelValidation}}
 - Intended changes are committed; `git status --short` is empty.
 
-When these criteria are met, call `update_goal` with status `complete` to return
-control to Ralph, even if the assignment remains incomplete. Ralph verifies the
-handoff and schedules further implementation or audit; audit must resolve
-whole-stage findings before advancement.
+When these criteria are met, finish the turn with a concise handoff, even if
+the assignment remains incomplete. Ralph verifies the handoff and schedules
+further implementation or audit; audit must resolve whole-stage findings
+before advancement.
