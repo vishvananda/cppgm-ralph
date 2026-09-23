@@ -25,7 +25,10 @@ test("Astra usage keeps its own pricing when combined with a Luna worker", () =>
   const combined = pricing.addUsage(astra, luna);
   assert.equal(combined.cost_usd, 8.435);
   assert.equal(pricing.costBreakdown(combined).find(entry => entry.model === "gpt-6-astra").cost_usd, 8.25);
-  assert.equal(pricing.estimateCost({ cost_usd: 12.34, input_tokens: 100 }, "gpt-6-astra"), 12.34);
+  // A provider-reported cost passes through for Anthropic-hosted models; for a
+  // non-Anthropic model it is ignored in favour of our own rate card.
+  assert.equal(pricing.estimateCost({ cost_usd: 12.34, input_tokens: 100 }, "claude-opus-4-8"), 12.34);
+  assert.equal(pricing.estimateCost({ cost_usd: 12.34, input_tokens: 100 }, "gpt-6-astra"), 0.001);
 });
 
 test("Fable 5.1 uses its reduced cache-read price without repricing Fable 5", () => {
@@ -218,4 +221,40 @@ test("incremental cumulative thread usage replaces the cached counter", () => {
 
   assert.equal(byThread.get("thread").input_tokens, 1200);
   assert.equal(byThread.get("thread").total_tokens, 1320);
+});
+
+test("provider cost is trusted only for Anthropic-hosted models", () => {
+  const usage = {
+    input_tokens: 20_002,
+    cached_input_tokens: 0,
+    output_tokens: 2,
+    cost_usd: 0.10006,
+  };
+
+  // Anthropic-hosted: Claude's own accounting is authoritative.
+  assert.equal(pricing.providerCost(usage, "claude-fable-5"), 0.10006);
+  assert.equal(pricing.estimateCost(usage, "claude-fable-5"), 0.10006);
+
+  // Third-party model routed through Claude Code: Claude prices it from a
+  // generic fallback card, so the cost must come from our rate card instead.
+  assert.equal(pricing.providerCost(usage, "~deepseek/deepseek-flash-latest"), null);
+  const estimated = pricing.estimateCost(usage, "~deepseek/deepseek-flash-latest");
+  assert.ok(Math.abs(estimated - 0.0020012) < 1e-12, `unexpected estimate ${estimated}`);
+});
+
+test("an unknown model id does not discard a provider-reported cost", () => {
+  const usage = { input_tokens: 1_000, output_tokens: 10, cost_usd: 0.5 };
+  assert.equal(pricing.providerCost(usage, null), 0.5);
+  assert.equal(pricing.providerCost(usage, ""), 0.5);
+});
+
+test("a third-party model without provider cost falls back to its rate card", () => {
+  const usage = {
+    input_tokens: 30_399_076,
+    cached_input_tokens: 29_555_584,
+    output_tokens: 180_137,
+    cost_usd: 23.842537000000014,
+  };
+  const estimated = pricing.estimateCost(usage, "~deepseek/deepseek-flash-latest");
+  assert.ok(Math.abs(estimated - 0.46997354) < 1e-12, `unexpected estimate ${estimated}`);
 });

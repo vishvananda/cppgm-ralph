@@ -14,8 +14,9 @@ import {
 
 const CLAUDE_INDEX_TTL_MS = 5_000;
 const DEFAULT_RESULT_LIMIT = 12_000;
-let sessionIndex = null;
-let sessionIndexBuiltAt = 0;
+// Keyed by root: a single global cache would serve one directory's index to a
+// different projects root (and to tests that use their own fixture trees).
+const sessionIndexes = new Map();
 
 export const DEFAULT_CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
@@ -139,7 +140,7 @@ export async function collectClaudeSubagentEvents(events, options = {}) {
       threadId,
       resolveTurn,
       existing,
-      { ...options, closedTurns },
+      { ...options, closedTurns, parentFile: filePath },
     );
     for (const event of threadAdditions) additions.push(event);
   }
@@ -244,8 +245,13 @@ async function readClaudeSubagentEvents(filePath, threadId, resolveTurn, existin
       continue;
     }
     existing.add(key);
+    // The notification only carries a coarse token count. Recover the agent's
+    // real per-request usage from its transcript so subagent work is priced.
+    const childUsage = await childTranscriptUsage(item.id, options);
     additions.push(runRecord(recordedAt, threadId, turnNumber, "item.completed", {
       ...item,
+      ...(childUsage?.model ? { model: childUsage.model } : {}),
+      ...(childUsage?.usage ? { usage: childUsage.usage } : {}),
       synthetic: true,
     }));
   }
@@ -261,6 +267,68 @@ async function readClaudeSubagentEvents(filePath, threadId, resolveTurn, existin
     for (const event of fallbacks) additions.push(event);
   }
   return additions;
+}
+
+// Notification items know only the spawning tool-use id. The sibling
+// `<agent>.meta.json` records that same id, so it is the reliable link from a
+// notification to the child transcript that holds the real usage.
+const childTranscriptIndex = new Map();
+
+async function childTranscriptUsage(toolUseId, options) {
+  if (!toolUseId || !options?.parentFile) {
+    return null;
+  }
+  let index = childTranscriptIndex.get(options.parentFile);
+  if (!index) {
+    index = await buildChildTranscriptIndex(options.parentFile);
+    childTranscriptIndex.set(options.parentFile, index);
+  }
+  let childFile = index.get(toolUseId);
+  if (!childFile) {
+    // An earlier scan may have preceded the child meta file in a live run.
+    index = await buildChildTranscriptIndex(options.parentFile);
+    childTranscriptIndex.set(options.parentFile, index);
+    childFile = index.get(toolUseId);
+  }
+  if (!childFile) {
+    return null;
+  }
+  options.onSourceFile?.(childFile);
+  const completion = await readChildTranscriptCompletion(childFile, options);
+  if (!completion?.usage) {
+    return null;
+  }
+  return { model: completion.model, usage: completion.usage };
+}
+
+async function buildChildTranscriptIndex(parentFile) {
+  const index = new Map();
+  const subagentDir = path.join(
+    path.dirname(parentFile),
+    path.basename(parentFile, ".jsonl"),
+    "subagents",
+  );
+  let entries;
+  try {
+    entries = await fs.readdir(subagentDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return index;
+    throw error;
+  }
+  for (const entry of entries) {
+    const match = entry.isFile() ? entry.name.match(/^agent-(.+)\.meta\.json$/) : null;
+    if (!match) continue;
+    try {
+      const meta = JSON.parse(await fs.readFile(path.join(subagentDir, entry.name), "utf8"));
+      const toolUseId = textValue(meta?.toolUseId);
+      if (toolUseId) {
+        index.set(toolUseId, path.join(subagentDir, `agent-${match[1]}.jsonl`));
+      }
+    } catch (_) {
+      // A missing or malformed meta file just means no usage recovery.
+    }
+  }
+  return index;
 }
 
 async function childTranscriptCompletionFallbacks(
@@ -326,6 +394,8 @@ async function childTranscriptCompletionFallbacks(
         result: completion.result,
         duration_ms: completion.durationMs,
         tool_uses: completion.toolUses,
+        ...(completion.model ? { model: completion.model } : {}),
+        ...(completion.usage ? { usage: completion.usage } : {}),
         synthetic: true,
         derived_from_child_transcript: true,
       },
@@ -379,6 +449,10 @@ async function readChildTranscriptCompletion(filePath, options) {
   let agentId = "";
   let result = "";
   let toolUses = 0;
+  // Claude appends the same assistant message more than once (streaming
+  // snapshots), so key usage by message id and keep the most complete copy.
+  const usageByMessageId = new Map();
+  let model = "";
   for await (const line of lines) {
     let raw;
     try {
@@ -393,7 +467,18 @@ async function readChildTranscriptCompletion(filePath, options) {
     }
     agentId ||= textValue(raw.agentId);
     if (raw.type !== "assistant" || !Array.isArray(raw.message?.content)) continue;
-    for (const block of raw.message.content) {
+    const message = raw.message;
+    if (typeof message.model === "string" && message.model) {
+      model = message.model;
+    }
+    const messageId = textValue(message.id);
+    if (messageId && message.usage && typeof message.usage === "object") {
+      const current = usageByMessageId.get(messageId);
+      if (!current || claudeUsageMagnitude(message.usage) > claudeUsageMagnitude(current)) {
+        usageByMessageId.set(messageId, message.usage);
+      }
+    }
+    for (const block of message.content) {
       if (block?.type === "tool_use") toolUses += 1;
       if (block?.type === "text" && textValue(block.text).trim()) {
         result = block.text;
@@ -410,7 +495,42 @@ async function readChildTranscriptCompletion(filePath, options) {
     toolUses,
     result: compactText(result, options.resultLimit),
     status: result ? "completed" : "failed",
+    model,
+    usage: sumClaudeMessageUsage([...usageByMessageId.values()]),
   };
+}
+
+// The subagent's own per-request usage, in the shape the pricing/aggregation
+// code expects. Cache reads and cache writes are counted as input so the run
+// total matches the parent turn's accounting.
+function sumClaudeMessageUsage(usages) {
+  let input = 0;
+  let cachedInput = 0;
+  let output = 0;
+  for (const usage of usages) {
+    if (!usage || typeof usage !== "object") continue;
+    input += (Number(usage.input_tokens) || 0) +
+      (Number(usage.cache_creation_input_tokens) || 0);
+    cachedInput += Number(usage.cache_read_input_tokens) || 0;
+    output += Number(usage.output_tokens) || 0;
+  }
+  if (!input && !cachedInput && !output) {
+    return null;
+  }
+  return {
+    input_tokens: input + cachedInput,
+    cached_input_tokens: cachedInput,
+    output_tokens: output,
+    reasoning_output_tokens: 0,
+    total_tokens: input + cachedInput + output,
+  };
+}
+
+function claudeUsageMagnitude(usage) {
+  return (Number(usage?.input_tokens) || 0) +
+    (Number(usage?.cache_creation_input_tokens) || 0) +
+    (Number(usage?.cache_read_input_tokens) || 0) +
+    (Number(usage?.output_tokens) || 0);
 }
 
 async function findClaudeSessionFiles(root, threadIds) {
@@ -427,13 +547,13 @@ async function findClaudeSessionFiles(root, threadIds) {
 
 async function claudeSessionIndex(root) {
   const now = Date.now();
-  if (sessionIndex && now - sessionIndexBuiltAt < CLAUDE_INDEX_TTL_MS) {
-    return sessionIndex;
+  const cached = sessionIndexes.get(root);
+  if (cached && now - cached.builtAt < CLAUDE_INDEX_TTL_MS) {
+    return cached.index;
   }
   const index = new Map();
   await walkClaudeProjects(root, index, 0);
-  sessionIndex = index;
-  sessionIndexBuiltAt = now;
+  sessionIndexes.set(root, { index, builtAt: now });
   return index;
 }
 

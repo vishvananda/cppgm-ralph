@@ -370,6 +370,9 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Default: `false`
 - `codexPath`
   Default: `codex`
+- `codexHome`
+  Optional Codex state directory. Overrides an ambient `CODEX_HOME` for Codex
+  child processes and Ralph's session tracking; the directory must exist.
 - `claudePath`
   Default: `claude`
 - `claudeCompactOnIncompleteGoal`
@@ -525,6 +528,8 @@ without `privateWriteDir` retain their previous isolation behavior.
   Override `model`
 - `RALPH_PROVIDER`
   Override `provider`
+- `RALPH_CODEX_HOME`
+  Override `codexHome`
 - `RALPH_REASONING_EFFORT`
   Override `reasoningEffort`: `minimal`, `low`, `medium`, `high`, `xhigh`
 - `RALPH_SANDBOX_MODE`

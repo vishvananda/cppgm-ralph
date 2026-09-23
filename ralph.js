@@ -62,7 +62,7 @@ const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
 const TURN_LIFECYCLE = globalThis.RALPH_TURN_LIFECYCLE;
 
 const RALPH_DIR = path.dirname(fileURLToPath(import.meta.url));
-const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+let CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 const CODEX_TASK_COMPLETE_SETTLE_MS = 2000;
 const CODEX_GOAL_CONTINUATION_GRACE_MS = 60_000;
 const CODEX_SESSION_WATCH_TAIL_BYTES = 4 * 1024 * 1024;
@@ -167,6 +167,7 @@ const DEFAULT_CONFIG = {
   additionalDirectories: [],
   outputTailChars: 20000,
   codexPath: "codex",
+  codexHome: null,
   claudePath: "claude",
   claudeDefaultModel: "claude-fable-5",
   claudeCompactOnIncompleteGoal: true,
@@ -7218,6 +7219,19 @@ function combineOutput(stdout, stderr) {
 
 async function loadConfig() {
   const fileConfig = await loadConfigFile();
+  const codexHome = resolveOptionalPath(
+    process.env.RALPH_CODEX_HOME ?? fileConfig.codexHome ?? DEFAULT_CONFIG.codexHome,
+  );
+  if (codexHome) {
+    if (!existsSync(codexHome)) {
+      throw new Error(`Config codexHome does not exist: ${codexHome}`);
+    }
+    // Pin the provider state directory for this run instead of relying on the
+    // ambient shell (an alias or exported CODEX_HOME). Child Codex processes
+    // inherit it through process.env; Ralph's own session tailing uses CODEX_DIR.
+    CODEX_DIR = codexHome;
+    process.env.CODEX_HOME = codexHome;
+  }
   const provider = normalizeProvider(process.env.RALPH_PROVIDER ?? fileConfig.provider ?? DEFAULT_CONFIG.provider);
   const model =
     process.env.RALPH_MODEL ??
@@ -7464,6 +7478,7 @@ async function loadConfig() {
       process.env.RALPH_USE_EXISTING_WORKDIR ?? fileConfig.useExistingWorkdir,
       DEFAULT_CONFIG.useExistingWorkdir,
     ),
+    codexHome,
     sessionIsolation: validatedSessionIsolation,
     resourceLimits,
   };

@@ -1651,9 +1651,9 @@ function turnUsageCost(usage, model) {
   if (!hasTokenUsage(normalized)) {
     return null;
   }
-  if (normalized.cost_usd > 0) {
-    return normalized.cost_usd;
-  }
+  // Cost always comes from the shared pricing helper, which trusts a
+  // provider-reported figure only for Anthropic-hosted models. A third-party
+  // model routed through Claude Code is priced from a generic fallback card.
   return apiCostEstimate(normalized, model);
 }
 

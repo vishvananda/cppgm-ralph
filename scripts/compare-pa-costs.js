@@ -347,23 +347,40 @@ function usageDelta(current, previous) {
 
 function estimateCost(usage, model) {
   const normalized = normalizeUsage(usage) ?? emptyUsage();
+  // Mixed-model usage already carries per-model components. Price each with its
+  // own model so a subagent's model is never re-priced at the root model.
+  const components = normalized.model_usage ?? [];
+  if (components.length) {
+    return components.reduce(
+      (total, entry) => total + estimateComponentCost(entry, entry.model),
+      0,
+    );
+  }
+  return estimateComponentCost(normalized, model);
+}
+
+function estimateComponentCost(usage, model) {
+  const normalized = normalizeUsage(usage) ?? emptyUsage();
+  // Claude's per-turn total_cost_usd is authoritative only for Anthropic-hosted
+  // models. Third-party models routed through Claude Code are priced from a
+  // generic fallback rate card, so they must come from our own rate card.
+  const trustedProviderCost = MODEL_PRICING.providerCost(normalized, model);
+  if (trustedProviderCost != null) {
+    return trustedProviderCost;
+  }
   const rates = model ? DEFAULT_RATES[model] : null;
   if (!rates) {
-    // No rate card: fall back to the provider-reported cost (Claude runs
-    // record total_cost_usd per turn) or zero.
+    // No rate card and no trusted provider figure: nothing better is available.
     return normalized.cost_usd ?? 0;
   }
   const cached = Math.min(normalized.cached_input_tokens, normalized.input_tokens);
   const uncached = Math.max(0, normalized.input_tokens - cached);
-  const estimate =
+  return (
     (uncached * rates.input +
       cached * rates.cachedInput +
       normalized.output_tokens * rates.output) /
-    1_000_000;
-  // Prefer provider-reported cost when present. Claude turn results can report
-  // substantially lower actual cost than a rough rate-card estimate from the
-  // live token counters.
-  return normalized.cost_usd > 0 ? normalized.cost_usd : estimate;
+    1_000_000
+  );
 }
 
 function eventThreadId(record) {

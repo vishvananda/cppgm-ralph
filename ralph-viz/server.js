@@ -1371,6 +1371,7 @@ async function extendRunUsageSummaryFromEvents(summary, filePath, events, usageM
     turnExecutionDurationEntries(events, sessionTiming),
   );
   const threadUsageById = new Map(summary.threadUsages.map((entry) => [entry.threadId, entry.usage]));
+  const threadModels = threadModelById(events);
   let unthreadedUsage = summary.unthreadedUsage;
   if (usageMode !== "skip") {
     const tokenUsage = usageFromTokenEventsByThread(events);
@@ -1389,8 +1390,9 @@ async function extendRunUsageSummaryFromEvents(summary, filePath, events, usageM
       }
       const existing = threadUsageById.get(threadId);
       if (existing) {
-        if (usage.cost_usd > 0 && !((existing.cost_usd ?? 0) > 0)) {
-          threadUsageById.set(threadId, { ...(normalizeUsage(existing) ?? emptyUsage()), cost_usd: usage.cost_usd });
+        const providerCost = MODEL_PRICING.providerCost(usage, threadModels.get(threadId));
+        if (providerCost != null && !((existing.cost_usd ?? 0) > 0)) {
+          threadUsageById.set(threadId, { ...(normalizeUsage(existing) ?? emptyUsage()), cost_usd: providerCost });
         }
       } else if (hasTokenUsage(usage)) {
         threadUsageById.set(threadId, usage);
@@ -1765,10 +1767,17 @@ function usageWithProviderCost(attributed, aggregate) {
     return normalizedAttributed;
   }
   const [component] = normalizedAttributed.model_usage;
+  // Only Anthropic-hosted models report a trustworthy per-turn cost. A
+  // third-party model routed through Claude Code is priced from a generic
+  // fallback rate card, so keep our own rate-card estimate instead.
+  const costUsd = MODEL_PRICING.providerCost(normalizedAggregate, component.model);
+  if (costUsd == null) {
+    return normalizedAttributed;
+  }
   return {
     ...normalizedAttributed,
-    cost_usd: normalizedAggregate.cost_usd,
-    model_usage: [{ ...component, cost_usd: normalizedAggregate.cost_usd }],
+    cost_usd: costUsd,
+    model_usage: [{ ...component, cost_usd: costUsd }],
   };
 }
 
@@ -1955,15 +1964,17 @@ async function buildRunUsageSummary(filePath, fileBase, stat, events, precision)
   // emitted live counts) fall back to their turn.completed usage; threads that
   // are covered still harvest the exact turn cost from turn.completed.
   const turnUsageByThread = turnCompletedUsageByThread(events);
+  const threadModels = threadModelById(events);
   for (const [threadId, usage] of turnUsageByThread.entries()) {
     if (!threadId) {
       continue;
     }
     if (coveredThreadIds.has(threadId)) {
-      if (usage.cost_usd > 0) {
+      const providerCost = MODEL_PRICING.providerCost(usage, threadModels.get(threadId));
+      if (providerCost != null) {
         const entry = threadUsages.find((candidate) => candidate.threadId === threadId);
         if (entry && !((entry.usage?.cost_usd ?? 0) > 0)) {
-          entry.usage = { ...(normalizeUsage(entry.usage) ?? emptyUsage()), cost_usd: usage.cost_usd };
+          entry.usage = { ...(normalizeUsage(entry.usage) ?? emptyUsage()), cost_usd: providerCost };
         }
       }
       continue;
@@ -2145,6 +2156,19 @@ function usageFromTurnUsageEntries(entries) {
     usage = addUsage(usage, entry.usage);
   }
   return hasTokenUsage(usage) ? usage : null;
+}
+
+function threadModelById(events) {
+  const byThread = new Map();
+  for (const record of events ?? []) {
+    const agent = record.eventType === "ralph.phase-status" ? record.event?.agentProfile : null;
+    const model = typeof agent?.model === "string" && agent.model ? agent.model : null;
+    const threadId = eventThreadId(record);
+    if (threadId && model) {
+      byThread.set(threadId, model);
+    }
+  }
+  return byThread;
 }
 
 function turnCompletedUsageByThread(events) {
