@@ -33,7 +33,7 @@ test("an active Unreal turn shows persisted command results and readable reasoni
       { ProviderID: "tool-1", Type: "tool_call", Data: {
         CallID: "call-1", Name: "Bash", Arguments: '{"command":"echo checked"}',
       } },
-    ] } },
+    ], Usage: { InputTokens: 100, CachedInputTokens: 80, OutputTokens: 20, ReasoningTokens: 15 } } },
   } } };
   const completed = { type: "item", data: {
     Item: { RecordedAt: "2026-09-23T01:00:02Z", Kind: "tool_call_status",
@@ -46,16 +46,20 @@ test("an active Unreal turn shows persisted command results and readable reasoni
 
   assert.deepEqual(await unrealSessionPathsForEvents([start], { filePath: eventPath }), [sessionPath]);
   const events = await addUnrealSessionDisplayEvents([start], { filePath: eventPath });
-  assert.equal(events.length, 3);
+  assert.equal(events.length, 4);
   assert.equal(events.find((record) => record.event?.item?.type === "reasoning")?.event.item.text,
     "**Checking files**");
   assert.equal(events.find((record) => record.event?.item?.type === "reasoning")?.event.item.response_step, 1);
   assert.equal(events.find((record) => record.event?.item?.type === "reasoning")?.event.item.response_command_count, 1);
   assert.equal(events.find((record) => record.eventType === "item.started")?.event.item.response_step, 1);
+  assert.deepEqual(events.find((record) => record.eventType === "codex.session.token_count")?.event.usage, {
+    input_tokens: 100, cached_input_tokens: 80, output_tokens: 20,
+    reasoning_output_tokens: 15, total_tokens: 120,
+  });
   assert.equal(JSON.stringify(events).includes("private"), false);
   assert.equal(events.find((record) => record.eventType === "item.completed" &&
     record.event.item.type === "command_execution")?.event.item.aggregated_output, "checked\n");
-  assert.equal((await addUnrealSessionDisplayEvents(events, { filePath: eventPath })).length, 3);
+  assert.equal((await addUnrealSessionDisplayEvents(events, { filePath: eventPath })).length, 4);
 
   const outDir = path.join(root, "export");
   await exportViz(["--out", outDir, "--run", runName, "--ralph-dir", ralphDir,

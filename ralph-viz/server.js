@@ -1130,8 +1130,8 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
       summary.threadUsages.map((entry) => [entry.threadId, entry.usage]),
     );
     const seenThreadIds = new Set(summary.threadIds);
-    let liveCodexUsageDelta = null;
-    let liveCodexCompleteUsage = null;
+    let liveSessionUsageDelta = null;
+    let liveSessionCompleteUsage = null;
     const latestTurnNumber = latestEventTurnNumber(events);
     const latestTurnThreadIds = new Set(
       events
@@ -1142,15 +1142,16 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
     if (usageMode !== "skip") {
       for (const threadId of selectedThreadIds) {
         seenThreadIds.add(threadId);
-        const usage = await readCodexThreadUsageFast(threadId);
+        const usage = await readCodexThreadUsageFast(threadId) ??
+          latestTokenUsageForThread(events, threadId);
         if (hasTokenUsage(usage)) {
           const previous = threadUsageById.get(threadId);
           if (latestTurnThreadIds.has(threadId)) {
             if (!previous || usageCounterReset(usage, previous)) {
-              liveCodexCompleteUsage = addUsage(liveCodexCompleteUsage, usage);
+              liveSessionCompleteUsage = addUsage(liveSessionCompleteUsage, usage);
             } else {
-              liveCodexUsageDelta = addUsage(
-                liveCodexUsageDelta,
+              liveSessionUsageDelta = addUsage(
+                liveSessionUsageDelta,
                 usageDelta(usage, previous),
               );
             }
@@ -1186,8 +1187,8 @@ async function readFastShapeUsage(shape, fileBase, events, usageMode) {
       summary.turnUsages = addLiveUsageDeltaToLatestTurn(
         summary.turnUsages,
         events,
-        liveCodexCompleteUsage,
-        liveCodexUsageDelta,
+        liveSessionCompleteUsage,
+        liveSessionUsageDelta,
       );
     }
     await augmentRunUsageSummaryFromCompareCache(shape, fileBase, stat, summary);

@@ -3,7 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
-import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
+import { UnrealAgentEventConverter, addUsage, normalizeUnrealUsage } from "./unreal-agent-events.js";
 
 function pendingCommands(events) {
   const byThread = new Map();
@@ -86,13 +86,17 @@ export async function unrealSessionPathsForEvents(events, { filePath, workDir = 
 }
 
 export async function addUnrealSessionDisplayEvents(events, { filePath, workDir = null, onSourceFile = null }) {
-  const pending = new Map(pendingCommands(events));
-  const threads = unrealThreadTurns(events);
-  if (!threads.size) return events;
+  // Replacing our own synthetic usage keeps repeated augmentation idempotent
+  // while allowing the next poll to see additional model responses.
+  const sourceEvents = events.filter((record) =>
+    !(record.eventType === "codex.session.token_count" && record.event?.source === "unreal"));
+  const pending = new Map(pendingCommands(sourceEvents));
+  const threads = unrealThreadTurns(sourceEvents);
+  if (!threads.size) return sourceEvents;
   const directory = await sessionDirectory(filePath, workDir);
   const synthetic = [];
   const responseGroups = new Map();
-  const existingReasoning = new Set(events.filter((record) =>
+  const existingReasoning = new Set(sourceEvents.filter((record) =>
     record.eventType === "item.completed" && record.event?.item?.type === "reasoning")
     .map((record) => `${record.threadId}\0${record.event.item.id}`));
   for (const [threadId, turns] of threads) {
@@ -101,6 +105,8 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
     onSourceFile?.(sessionPath);
     const converter = new UnrealAgentEventConverter();
     let responseStep = 0;
+    let cumulativeUsage = null;
+    let latestUsageAt = null;
     for (const [id, record] of pending.get(threadId) ?? []) converter.commands.set(id, record.event.item);
     const lines = readline.createInterface({
       input: createReadStream(sessionPath, { encoding: "utf8" }),
@@ -116,6 +122,11 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
       const item = sessionRecord.data?.Item;
       if (item?.Kind === "model_response") {
         responseStep += 1;
+        const responseUsage = normalizeUnrealUsage(item.Data?.Response?.Usage);
+        if (responseUsage) {
+          cumulativeUsage = addUsage(cumulativeUsage, responseUsage);
+          latestUsageAt = item.RecordedAt;
+        }
         const outputs = item.Data?.Response?.Output ?? [];
         const commandCount = outputs.filter((output) =>
           output?.Type === "tool_call" && output.Data?.Name === "Bash").length;
@@ -154,6 +165,15 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
         });
       }
     }
+    if (cumulativeUsage && latestUsageAt) {
+      synthetic.push({
+        recordedAt: latestUsageAt,
+        threadId,
+        turnNumber: turnForTimestamp(turns, latestUsageAt),
+        eventType: "codex.session.token_count",
+        event: { type: "codex.session.token_count", source: "unreal", usage: cumulativeUsage },
+      });
+    }
   }
   const withResponseGroup = (record) => {
     const item = record.event?.item;
@@ -163,7 +183,7 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
       ? { ...record, event: { ...record.event, item: { ...item, ...group } } }
       : record;
   };
-  const groupedEvents = events.map(withResponseGroup);
+  const groupedEvents = sourceEvents.map(withResponseGroup);
   if (!synthetic.length) return groupedEvents;
   return [...groupedEvents, ...synthetic.map(withResponseGroup)].sort((left, right) =>
     String(left.recordedAt ?? "").localeCompare(String(right.recordedAt ?? "")));

@@ -275,8 +275,9 @@ the runner. Unreal's session files and logs live under `unrealStateDir`, which
 defaults to `<stateBaseDir>/unreal-provider/<run-name>`. Ralph translates the
 runner's JSONL responses, token usage, and completed command results into its
 event log. During an active turn, the viewer and static exporter also read
-Unreal's session file for completed command output and readable reasoning
-summaries. Raw reasoning payloads are not displayed. To make a static export,
+Unreal's session file for completed command output, readable reasoning
+summaries, and current token usage. Raw reasoning payloads are not displayed.
+To make a static export,
 run `npm run export-viz -- --run <run-name> --ralph-dir <stateBaseDir>
 --work-dir <baseDir> --out <output-dir> --no-compare --no-published-base`.
 The loop goal is included in the prompt, while Ralph's checks and clean-worktree

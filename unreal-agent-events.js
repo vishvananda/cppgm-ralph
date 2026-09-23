@@ -124,7 +124,7 @@ function toolCommand(call) {
   }
 }
 
-function normalizeUnrealUsage(usage) {
+export function normalizeUnrealUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
   const input = Math.max(0, Number(usage.InputTokens) || 0);
   const cached = Math.min(input, Math.max(0, Number(usage.CachedInputTokens) || 0));
@@ -139,7 +139,7 @@ function normalizeUnrealUsage(usage) {
   };
 }
 
-function addUsage(left, right) {
+export function addUsage(left, right) {
   if (!right) return left;
   if (!left) return right;
   return {
