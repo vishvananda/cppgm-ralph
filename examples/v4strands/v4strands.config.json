@@ -171,6 +171,7 @@
     "pa34"
   ],
   "maxTurns": 500,
+  "stopAfterStage": "pa7",
   "stateBaseDir": "/home/vishvananda/work/.ralph",
   "model": "gpt-6-luna",
   "reasoningEffort": "max",

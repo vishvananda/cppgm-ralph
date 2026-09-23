@@ -111,6 +111,12 @@ starting the next provider turn. Restarting later resumes from saved state.
 Creating the file while Ralph is stopped and then launching it verifies the
 last turn and exits without starting a new one.
 
+To stop automatically after a completed PA, set `"stopAfterStage": "pa7"` in
+the run config or `RALPH_STOP_AFTER_STAGE=pa7`. Ralph waits for all phases of
+PA7 to pass (including its audit phase, if configured), saves PA8 as the next
+target, and exits before starting PA8. Remove the setting to resume. Keeping
+it set also prevents a later restart from beginning PA8.
+
 The first-turn default prompt can be customized with a Markdown sidecar file next
 to the config file. For a config named `goals-2026-05-14.config.json`, Ralph
 looks for `goals-2026-05-14.default.md`. If it is missing, Ralph falls back to

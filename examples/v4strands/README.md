@@ -32,3 +32,5 @@ RALPH_CONFIG=/home/vishvananda/work/v4strands.config.json npm run ralph
 Its state path is
 `/home/vishvananda/work/.ralph/v4strands-gpt-6-luna-max`.
 Create `stop-after-turn` in that directory to stop after the current turn.
+The config sets `stopAfterStage` to `"pa7"`, so Ralph stops after the PA7 audit
+passes and before PA8 begins. Remove that setting to continue beyond PA7.

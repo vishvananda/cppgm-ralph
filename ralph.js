@@ -158,6 +158,7 @@ const DEFAULT_CONFIG = {
   extraStages: [],
   initialStage: null,
   initialSubset: null,
+  stopAfterStage: null,
   maxTurns: 1000,
   stateBaseDir: ".ralph",
   model: "gpt-5.3-codex",
@@ -431,6 +432,11 @@ async function main() {
       await consumeStopAfterTurnRequest();
       return;
     }
+    if (isStopAfterStageReached(state)) {
+      log(`Configured stopAfterStage=${CONFIG.stopAfterStage} is already complete; exiting before ${state.activeStage}.`);
+      await consumeStopAfterTurnRequest();
+      return;
+    }
     const phase = resolveActivePhase(state);
     const agentProfile = resolvePhaseAgentProfile(phase);
     const threadOptions = buildThreadOptions(agentProfile);
@@ -699,6 +705,10 @@ async function main() {
 
       const nextTarget = getNextTargetAfterCompletedPhase(state, testStatus);
       if (nextTarget) {
+        const completedStage = normalizeStageName(state.activeStage) ??
+          normalizeStageName(testStatus.targetStage);
+        const stopAfterThisStage = CONFIG.stopAfterStage === completedStage &&
+          nextTarget.stage !== completedStage;
         const firstPhase = CONFIG.phases[0];
         await saveState({
           threadId,
@@ -729,6 +739,12 @@ async function main() {
           `Phase ${phase.name} completed for ${formatTargetLabel(testStatus.targetStage, testStatus.targetSubset)}. ` +
             `Advancing to ${formatTargetLabel(nextTarget.stage, nextTarget.subset)}.`,
         );
+        if (stopAfterThisStage) {
+          await consumeStopAfterTurnRequest();
+          log(`Configured stopAfterStage=${completedStage} reached after phase ${phase.name}; ` +
+            `exiting before ${formatTargetLabel(nextTarget.stage, nextTarget.subset)}.`);
+          return;
+        }
         continue;
       }
 
@@ -4724,6 +4740,12 @@ function isCompletedRunState(state) {
   );
 }
 
+function isStopAfterStageReached(state) {
+  const target = stageNumber(CONFIG.stopAfterStage);
+  const active = stageNumber(state?.activeStage);
+  return target != null && active != null && active > target;
+}
+
 function getNextPhase(phase, state = null) {
   const index = CONFIG.phases.findIndex((candidate) => candidate.name === phase?.name);
   if (index < 0) {
@@ -7623,6 +7645,10 @@ async function loadConfig() {
     ),
     initialStage: normalizeStageName(process.env.RALPH_INITIAL_STAGE ?? fileConfig.initialStage),
     initialSubset: normalizeTestSubset(process.env.RALPH_INITIAL_SUBSET ?? fileConfig.initialSubset),
+    stopAfterStage: normalizeOptionalStageConfig(
+      process.env.RALPH_STOP_AFTER_STAGE ?? fileConfig.stopAfterStage ?? DEFAULT_CONFIG.stopAfterStage,
+      "stopAfterStage",
+    ),
     maxTurns: parsePositiveInt(
       process.env.RALPH_MAX_TURNS ?? fileConfig.maxTurns,
       DEFAULT_CONFIG.maxTurns,
