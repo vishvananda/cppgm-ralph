@@ -1,0 +1,58 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { StrandsAgentEventConverter } from "../strands-agent-events.js";
+
+test("Strands groups reasoning with its shell command and counts raw Codex usage", () => {
+  const converter = new StrandsAgentEventConverter();
+  const toolUse = { toolUseId: "call-1", name: "shell", input: { command: "pwd" } };
+  const events = [
+    { type: "model.start" },
+    { type: "model.content", block: { reasoning: { text: "Checking the working directory." } } },
+    { type: "model.content", block: { toolUse } },
+    { type: "model.usage", usage: {
+      input_tokens: 100, input_tokens_details: { cached_tokens: 40 },
+      output_tokens: 20, output_tokens_details: { reasoning_tokens: 7 },
+    } },
+    { type: "model.complete" },
+    { type: "tool.start", toolUse },
+    { type: "tool.complete", toolUse, result: { toolResult: {
+      status: "success", content: [{ json: { output: "/work\n", error: "", exit_code: 0 } }],
+    } } },
+    { type: "model.start" },
+    { type: "model.content", block: { text: "The directory is /work." } },
+    { type: "model.usage", usage: {
+      input_tokens: 80, input_tokens_details: { cached_tokens: 60 },
+      output_tokens: 10, output_tokens_details: { reasoning_tokens: 2 },
+    } },
+    { type: "model.complete" },
+    { type: "driver.completed", usage: { inputTokens: 180, outputTokens: 30 } },
+  ].flatMap((record) => converter.convert(record));
+
+  assert.deepEqual(events.map((event) => event.type), [
+    "item.completed", "item.started", "item.completed", "item.completed",
+  ]);
+  assert.equal(events[0].item.type, "reasoning");
+  assert.equal(events[0].item.response_step, 1);
+  assert.equal(events[0].item.response_command_count, 1);
+  assert.equal(events[1].item.command, "pwd");
+  assert.equal(events[2].item.aggregated_output, "/work\n");
+  assert.equal(events[2].item.exit_code, 0);
+  assert.equal(events[3].item.response_step, 2);
+  assert.deepEqual(converter.usage, {
+    input_tokens: 180, cached_input_tokens: 100, output_tokens: 30,
+    reasoning_output_tokens: 9, total_tokens: 210,
+  });
+  assert.equal(converter.completed, true);
+});
+
+test("Strands failure closes an active command", () => {
+  const converter = new StrandsAgentEventConverter();
+  converter.convert({ type: "model.start" });
+  converter.convert({ type: "model.content", block: {
+    toolUse: { toolUseId: "call-1", name: "shell", input: { command: "sleep 1" } },
+  } });
+  converter.convert({ type: "model.complete" });
+  const events = converter.convert({ type: "driver.failed", message: "limit reached" });
+  assert.equal(events[0].item.status, "failed");
+  assert.match(events[0].item.aggregated_output, /limit reached/);
+});

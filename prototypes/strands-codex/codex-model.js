@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { OpenAIModel } from "@strands-agents/sdk/models/openai";
+import { ReasoningReplay } from "./reasoning-replay.js";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex";
 
@@ -25,10 +26,53 @@ async function subscriptionCredentials() {
   return { accessToken, accountId };
 }
 
-export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "max" } = {}) {
+function tapResponsesEvents(response, { onUsage, reasoningReplay }) {
+  if (!response.ok || !response.body) return response;
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const inspect = (frame) => {
+    const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart()).join("\n");
+    if (!data || data === "[DONE]") return;
+    let event;
+    try { event = JSON.parse(data); } catch { return; }
+    if ((event.type === "response.completed" || event.type === "response.incomplete") &&
+        event.response?.usage) {
+      onUsage?.(event.response.usage);
+    }
+    if (event.type === "response.completed") reasoningReplay.remember(event.response?.output);
+  };
+  const scan = (text) => {
+    buffered += text;
+    let match;
+    while ((match = /\r?\n\r?\n/.exec(buffered))) {
+      inspect(buffered.slice(0, match.index));
+      buffered = buffered.slice(match.index + match[0].length);
+    }
+  };
+  const body = response.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      scan(decoder.decode(chunk, { stream: true }));
+      controller.enqueue(chunk);
+    },
+    flush() {
+      scan(decoder.decode());
+      if (buffered) inspect(buffered);
+    },
+  }));
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "max", webSearch = false, onUsage } = {}) {
+  const reasoningReplay = new ReasoningReplay();
   return new OpenAIModel({
     api: "responses",
     modelId: model,
+    contextWindowLimit: 200_000,
     // OpenAI's client requires an API key at construction. The custom fetch
     // replaces this placeholder with the current Codex subscription token.
     apiKey: "codex-subscription-placeholder",
@@ -48,14 +92,19 @@ export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "m
         const body = JSON.parse(String(init?.body));
         body.store = false;
         body.include = [...new Set([...(body.include ?? []), "reasoning.encrypted_content"])];
-        return fetch(url, {
+        body.input = reasoningReplay.apply(body.input);
+        const response = await fetch(url, {
           ...init,
           headers,
           body: JSON.stringify(body),
           redirect: "manual",
         });
+        return tapResponsesEvents(response, { onUsage, reasoningReplay });
       },
     },
-    params: { reasoning: { effort, summary: "auto" } },
+    params: {
+      reasoning: { effort, summary: "auto" },
+      ...(webSearch ? { tools: [{ type: "web_search" }] } : {}),
+    },
   });
 }

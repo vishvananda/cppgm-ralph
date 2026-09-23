@@ -5,6 +5,7 @@ const agent = await createHarness({
   model: createCodexSubscriptionModel({
     model: process.env.STRANDS_CODEX_MODEL ?? "gpt-6-luna",
     effort: process.env.STRANDS_CODEX_EFFORT ?? "max",
+    webSearch: process.env.STRANDS_CODEX_WEB_SEARCH === "1",
   }),
   builtinTools: process.env.STRANDS_CODEX_TOOLS === "1" ? ["shell"] : [],
   builtinPlugins: [],
@@ -18,6 +19,9 @@ const agent = await createHarness({
 
 const prompt = process.argv.slice(2).join(" ") || "Reply with exactly: Strands Codex subscription works.";
 for await (const event of agent.stream(prompt)) {
+  if (process.env.STRANDS_CODEX_DEBUG_EVENTS === "1") {
+    process.stderr.write(`${JSON.stringify(event)}\n`);
+  }
   if (event.type === "contentBlockEvent" && event.contentBlock?.type === "textBlock") {
     process.stdout.write(event.contentBlock.text);
   } else if (event.type === "beforeToolCallEvent") {

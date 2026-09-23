@@ -211,7 +211,8 @@ artifact-directory paths, and the association survives incremental refreshes.
 
 The [V4 Codex scaffold](examples/v4codex/README.md) contains an Astra/xhigh
 config and the complete spec-aware prompt/goal family, including PA34
-inception checks.
+inception checks. The [V4 Strands scaffold](examples/v4strands/README.md) uses
+the same Luna/max Codex subscription model and V4 checks as v4unreal.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;

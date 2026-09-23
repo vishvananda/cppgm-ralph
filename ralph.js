@@ -53,6 +53,7 @@ import {
 } from "./codex-goal-completion.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
+import { StrandsAgentEventConverter } from "./strands-agent-events.js";
 import {
   buildSessionIsolationSpawn as buildIsolationSpawn,
   normalizePrivateWriteSettings,
@@ -170,6 +171,8 @@ const DEFAULT_CONFIG = {
   codexPath: "codex",
   codexHome: null,
   unrealPath: "unreal-agent-runner",
+  strandsPath: path.join(RALPH_DIR, "prototypes", "strands-codex", "runner.js"),
+  strandsDefaultModel: "gpt-6-luna",
   claudePath: "claude",
   claudeDefaultModel: "claude-fable-5",
   claudeCompactOnIncompleteGoal: true,
@@ -244,6 +247,9 @@ function defaultModelForProvider(provider) {
   }
   if (provider === "antigravity") {
     return DEFAULT_CONFIG.antigravityDefaultModel;
+  }
+  if (provider === "strands") {
+    return DEFAULT_CONFIG.strandsDefaultModel;
   }
   return DEFAULT_CONFIG.model;
 }
@@ -1248,7 +1254,7 @@ function sigtermRecoveryMax() {
 
 function shouldRetryTransientProviderError(error, provider = CONFIG.provider) {
   const message = formatErrorMessage(error);
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "strands") {
     return isCodexTransientProviderMessage(message);
   }
   if (provider === "claude") {
@@ -1258,7 +1264,7 @@ function shouldRetryTransientProviderError(error, provider = CONFIG.provider) {
 }
 
 function isCodexUsageLimitError(error, provider = CONFIG.provider) {
-  if (provider !== "codex") {
+  if (provider !== "codex" && provider !== "strands") {
     return false;
   }
   if (error?.codexUsageLimit === true) {
@@ -1801,7 +1807,7 @@ function attachPortableGoalPrompt(prompt, goal, agentProfile = null) {
     "## Ralph Portable Goal",
     "",
     "This is the active Ralph loop goal. Treat it as mandatory state for this turn.",
-    provider === "codex" || provider === "unreal"
+    provider === "codex" || provider === "unreal" || provider === "strands"
       ? "Ralph will verify the external checks after this turn; keep working until the goal and prompt criteria are actually satisfied."
       : "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
     "",
@@ -2855,9 +2861,10 @@ function buildSessionIsolationSpawn(command, args, options, writableDirs = [], f
 function providerStateDirectories(provider = null) {
   const home = os.homedir();
   return uniqueExistingishPaths([
-    ...(!provider || provider === "codex" || provider === "unreal" ? [CODEX_DIR] : []),
+    ...(!provider || provider === "codex" || provider === "unreal" || provider === "strands" ? [CODEX_DIR] : []),
     ...(!provider || provider === "unreal" ? [CONFIG?.unrealStateDir] : []),
-    ...(!provider || provider === "unreal" ? [process.env.OPENAI_CODEX_AUTH_FILE] : []),
+    ...(!provider || provider === "strands" ? [CONFIG?.strandsStateDir] : []),
+    ...(!provider || provider === "unreal" || provider === "strands" ? [process.env.OPENAI_CODEX_AUTH_FILE] : []),
     ...(!provider || provider === "claude"
       ? [process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), path.join(home, ".claude.json")] : []),
   ]);
@@ -5104,6 +5111,9 @@ function createAgentBackend(provider = CONFIG.provider) {
   if (provider === "unreal") {
     return new UnrealAgent();
   }
+  if (provider === "strands") {
+    return new StrandsAgent();
+  }
   if (provider === "antigravity") {
     return new Antigravity(buildAntigravityOptions());
   }
@@ -5210,6 +5220,91 @@ class UnrealAgentThread {
       return;
     }
     for (const event of converter.completePendingCommands()) yield event;
+    yield { type: "turn.completed", usage: converter.usage };
+  }
+}
+
+class StrandsAgent {
+  startThread(options = {}) {
+    return new StrandsAgentThread(options);
+  }
+
+  resumeThread(id, options = {}) {
+    return new StrandsAgentThread(options, id);
+  }
+}
+
+class StrandsAgentThread {
+  constructor(threadOptions, id = null) {
+    this.threadOptions = threadOptions;
+    this._id = id ?? randomUUID();
+  }
+
+  get id() {
+    return this._id;
+  }
+
+  async runStreamed(input, turnOptions = {}) {
+    return { events: this.runStreamedInternal(input, turnOptions) };
+  }
+
+  async *runStreamedInternal(input, turnOptions = {}) {
+    const { prompt } = normalizeCodexInput(input);
+    const sessionDir = path.join(CONFIG.strandsStateDir, "sessions");
+    await fs.mkdir(sessionDir, { recursive: true });
+    const { OPENAI_API_KEY: _unusedApiKey, ...subscriptionEnv } = process.env;
+    const child = spawnTracked(process.execPath, [CONFIG.strandsPath], {
+      cwd: this.threadOptions.workingDirectory,
+      env: subscriptionEnv,
+      isolateSession: true,
+      isolationProvider: "strands",
+      isolationWritableDirs: [this.threadOptions.workingDirectory],
+      limitResources: true,
+      signal: turnOptions.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const converter = new StrandsAgentEventConverter();
+    const stderr = [];
+    child.stderr?.on("data", (chunk) => {
+      stderr.push(String(chunk));
+      if (stderr.length > 40) stderr.shift();
+    });
+    let stdinError = null;
+    child.stdin?.on("error", (error) => { stdinError = error; });
+    const exit = new Promise((resolve) => {
+      child.once("error", (error) => resolve({ error }));
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    child.stdin?.end(JSON.stringify({
+      prompt,
+      model: this.threadOptions.model,
+      effort: this.threadOptions.modelReasoningEffort ?? "high",
+      webSearchEnabled: CONFIG.webSearchEnabled,
+      sessionId: this._id,
+      sessionDir,
+    }));
+    yield { type: "thread.started", thread_id: this._id };
+    for await (const line of readline.createInterface({ input: child.stdout, crlfDelay: Infinity })) {
+      if (!line.trim()) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_) {
+        converter.error = `Strands emitted invalid JSONL: ${line.slice(0, 200)}`;
+        continue;
+      }
+      for (const event of converter.convert(record)) yield event;
+    }
+    const result = await exit;
+    const failure = result.error?.message ?? stdinError?.message ?? converter.error ??
+      (result.code !== 0
+        ? `Strands exited ${result.signal ?? result.code}: ${stderr.join("").trim().slice(-2000)}`
+        : !converter.completed ? "Strands returned no completion event" : null);
+    if (failure) {
+      for (const event of converter.completePending(failure)) yield event;
+      yield { type: "turn.failed", error: { message: failure } };
+      return;
+    }
     yield { type: "turn.completed", usage: converter.usage };
   }
 }
@@ -7348,6 +7443,8 @@ async function loadConfig() {
       ? DEFAULT_CONFIG.antigravityDefaultModel
       : provider === "claude"
         ? DEFAULT_CONFIG.claudeDefaultModel
+        : provider === "strands"
+          ? DEFAULT_CONFIG.strandsDefaultModel
         : DEFAULT_CONFIG.model);
   const reasoningEffort =
     process.env.RALPH_REASONING_EFFORT ??
@@ -7381,6 +7478,10 @@ async function loadConfig() {
   const unrealStateDir = resolveOptionalPath(
     process.env.RALPH_UNREAL_STATE_DIR ?? fileConfig.unrealStateDir ??
       path.join(stateBaseDir, "unreal-provider", runName),
+  );
+  const strandsStateDir = resolveOptionalPath(
+    process.env.RALPH_STRANDS_STATE_DIR ?? fileConfig.strandsStateDir ??
+      path.join(stateBaseDir, "strands-provider", runName),
   );
 
   const configuredTestCommand =
@@ -7517,6 +7618,10 @@ async function loadConfig() {
     codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
     unrealPath: process.env.RALPH_UNREAL_PATH ?? fileConfig.unrealPath ?? DEFAULT_CONFIG.unrealPath,
     unrealStateDir,
+    strandsPath: resolveOptionalPath(
+      process.env.RALPH_STRANDS_PATH ?? fileConfig.strandsPath ?? DEFAULT_CONFIG.strandsPath,
+    ),
+    strandsStateDir,
     claudePath: process.env.RALPH_CLAUDE_PATH ?? fileConfig.claudePath ?? DEFAULT_CONFIG.claudePath,
     claudeCompactOnIncompleteGoal: parseBoolean(
       process.env.RALPH_CLAUDE_COMPACT_ON_INCOMPLETE_GOAL ??
@@ -8995,6 +9100,9 @@ function formatProviderLabel(provider) {
   if (provider === "unreal") {
     return "Unreal Agent";
   }
+  if (provider === "strands") {
+    return "Strands";
+  }
   if (provider === "antigravity") {
     return "Antigravity";
   }
@@ -9392,10 +9500,10 @@ function normalizeStageList(value, label) {
 
 function normalizeProvider(value) {
   const provider = String(value ?? "").trim().toLowerCase();
-  if (provider === "codex" || provider === "antigravity" || provider === "claude" || provider === "unreal") {
+  if (provider === "codex" || provider === "antigravity" || provider === "claude" || provider === "unreal" || provider === "strands") {
     return provider;
   }
-  throw new Error("Config provider must be `codex`, `antigravity`, `claude`, or `unreal`");
+  throw new Error("Config provider must be `codex`, `antigravity`, `claude`, `unreal`, or `strands`");
 }
 
 function normalizeSessionIsolation(value) {
