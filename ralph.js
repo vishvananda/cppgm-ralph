@@ -52,6 +52,7 @@ import {
   requiresCodexGoalCompletion,
 } from "./codex-goal-completion.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
+import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
 import {
   buildSessionIsolationSpawn as buildIsolationSpawn,
   normalizePrivateWriteSettings,
@@ -168,6 +169,7 @@ const DEFAULT_CONFIG = {
   outputTailChars: 20000,
   codexPath: "codex",
   codexHome: null,
+  unrealPath: "unreal-agent-runner",
   claudePath: "claude",
   claudeDefaultModel: "claude-fable-5",
   claudeCompactOnIncompleteGoal: true,
@@ -1799,7 +1801,7 @@ function attachPortableGoalPrompt(prompt, goal, agentProfile = null) {
     "## Ralph Portable Goal",
     "",
     "This is the active Ralph loop goal. Treat it as mandatory state for this turn.",
-    provider === "codex"
+    provider === "codex" || provider === "unreal"
       ? "Ralph will verify the external checks after this turn; keep working until the goal and prompt criteria are actually satisfied."
       : "Use `get_ralph_goal` if you need the current goal repeated. Use `report_ralph_progress` for notable progress. Call `complete_ralph_goal` only when you believe the goal is ready for Ralph's external checks; Ralph will still verify with real commands before advancing.",
     "",
@@ -2853,7 +2855,9 @@ function buildSessionIsolationSpawn(command, args, options, writableDirs = [], f
 function providerStateDirectories(provider = null) {
   const home = os.homedir();
   return uniqueExistingishPaths([
-    ...(!provider || provider === "codex" ? [CODEX_DIR] : []),
+    ...(!provider || provider === "codex" || provider === "unreal" ? [CODEX_DIR] : []),
+    ...(!provider || provider === "unreal" ? [CONFIG?.unrealStateDir] : []),
+    ...(!provider || provider === "unreal" ? [process.env.OPENAI_CODEX_AUTH_FILE] : []),
     ...(!provider || provider === "claude"
       ? [process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), path.join(home, ".claude.json")] : []),
   ]);
@@ -5097,6 +5101,9 @@ function createAgentBackend(provider = CONFIG.provider) {
   if (provider === "codex") {
     return new Codex(buildCodexOptions());
   }
+  if (provider === "unreal") {
+    return new UnrealAgent();
+  }
   if (provider === "antigravity") {
     return new Antigravity(buildAntigravityOptions());
   }
@@ -5104,6 +5111,107 @@ function createAgentBackend(provider = CONFIG.provider) {
     return new Claude(buildClaudeOptions());
   }
   throw new Error(`Unsupported provider ${provider}`);
+}
+
+class UnrealAgent {
+  startThread(options = {}) {
+    return new UnrealAgentThread(options);
+  }
+
+  resumeThread(id, options = {}) {
+    return new UnrealAgentThread(options, id);
+  }
+}
+
+class UnrealAgentThread {
+  constructor(threadOptions, id = null) {
+    this.threadOptions = threadOptions;
+    this._id = id ?? randomUUID();
+  }
+
+  get id() {
+    return this._id;
+  }
+
+  async runStreamed(input, turnOptions = {}) {
+    return { events: this.runStreamedInternal(input, turnOptions) };
+  }
+
+  async *runStreamedInternal(input, turnOptions = {}) {
+    const { prompt } = normalizeCodexInput(input);
+    const stateDir = CONFIG.unrealStateDir;
+    await fs.mkdir(stateDir, { recursive: true });
+    const child = spawnTracked(CONFIG.unrealPath, [
+      "-workspace", this.threadOptions.workingDirectory,
+      "-session-directory", path.join(stateDir, "sessions"),
+      "-log-directory", path.join(stateDir, "logs"),
+    ], {
+      cwd: this.threadOptions.workingDirectory,
+      env: { ...process.env, UNREAL_HARNESS_LLM_PROVIDER: "openai-codex" },
+      isolateSession: true,
+      isolationProvider: "unreal",
+      isolationWritableDirs: [this.threadOptions.workingDirectory],
+      limitResources: true,
+      signal: turnOptions.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const converter = new UnrealAgentEventConverter();
+    const stderr = [];
+    child.stderr?.on("data", (chunk) => {
+      stderr.push(String(chunk));
+      if (stderr.length > 40) stderr.shift();
+    });
+    let stdinError = null;
+    child.stdin?.on("error", (error) => { stdinError = error; });
+    const exit = new Promise((resolve) => {
+      child.once("error", (error) => resolve({ error }));
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    child.stdin?.end(JSON.stringify({
+      prompt,
+      model: this.threadOptions.model,
+      thinking_level: this.threadOptions.modelReasoningEffort ?? "high",
+      session_id: this._id,
+    }));
+    yield { type: "thread.started", thread_id: this._id };
+    for await (const line of readline.createInterface({ input: child.stdout, crlfDelay: Infinity })) {
+      if (!line.trim()) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_) {
+        converter.error = `Unreal Agent emitted invalid JSONL: ${line.slice(0, 200)}`;
+        continue;
+      }
+      for (const event of converter.convert(record)) yield event;
+    }
+    const result = await exit;
+    const sessionPath = path.join(stateDir, "sessions", `${this._id}.session.jsonl`);
+    if (existsSync(sessionPath)) {
+      for await (const line of readline.createInterface({
+        input: createReadStream(sessionPath, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      })) {
+        let record;
+        try {
+          record = JSON.parse(line);
+        } catch (_) {
+          continue;
+        }
+        for (const event of converter.completeFromSessionRecord(record)) yield event;
+      }
+    }
+    const failure = result.error?.message ?? stdinError?.message ?? converter.error ??
+      (result.code !== 0
+        ? `Unreal Agent exited ${result.signal ?? result.code}: ${stderr.join("").trim().slice(-2000)}`
+        : converter.responses === 0 ? "Unreal Agent returned no model response" : null);
+    if (failure) {
+      yield { type: "turn.failed", error: { message: failure } };
+      return;
+    }
+    for (const event of converter.completePendingCommands()) yield event;
+    yield { type: "turn.completed", usage: converter.usage };
+  }
 }
 
 function buildClaudeOptions() {
@@ -7270,6 +7378,10 @@ async function loadConfig() {
   const stateDir = explicitStateDir
     ? path.resolve(process.cwd(), explicitStateDir)
     : path.join(stateBaseDir, runName);
+  const unrealStateDir = resolveOptionalPath(
+    process.env.RALPH_UNREAL_STATE_DIR ?? fileConfig.unrealStateDir ??
+      path.join(stateBaseDir, "unreal-provider", runName),
+  );
 
   const configuredTestCommand =
     process.env.RALPH_TEST_COMMAND ?? fileConfig.testCommand ?? DEFAULT_CONFIG.testCommand;
@@ -7403,6 +7515,8 @@ async function loadConfig() {
       DEFAULT_CONFIG.outputTailChars,
     ),
     codexPath: process.env.RALPH_CODEX_PATH ?? fileConfig.codexPath ?? DEFAULT_CONFIG.codexPath,
+    unrealPath: process.env.RALPH_UNREAL_PATH ?? fileConfig.unrealPath ?? DEFAULT_CONFIG.unrealPath,
+    unrealStateDir,
     claudePath: process.env.RALPH_CLAUDE_PATH ?? fileConfig.claudePath ?? DEFAULT_CONFIG.claudePath,
     claudeCompactOnIncompleteGoal: parseBoolean(
       process.env.RALPH_CLAUDE_COMPACT_ON_INCOMPLETE_GOAL ??
@@ -8878,6 +8992,9 @@ function formatProviderLabel(provider) {
   if (provider === "codex") {
     return "Codex";
   }
+  if (provider === "unreal") {
+    return "Unreal Agent";
+  }
   if (provider === "antigravity") {
     return "Antigravity";
   }
@@ -9275,10 +9392,10 @@ function normalizeStageList(value, label) {
 
 function normalizeProvider(value) {
   const provider = String(value ?? "").trim().toLowerCase();
-  if (provider === "codex" || provider === "antigravity" || provider === "claude") {
+  if (provider === "codex" || provider === "antigravity" || provider === "claude" || provider === "unreal") {
     return provider;
   }
-  throw new Error("Config provider must be `codex`, `antigravity`, or `claude`");
+  throw new Error("Config provider must be `codex`, `antigravity`, `claude`, or `unreal`");
 }
 
 function normalizeSessionIsolation(value) {

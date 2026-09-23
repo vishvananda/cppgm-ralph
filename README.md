@@ -250,6 +250,37 @@ that means:
 - an API key is already configured for Codex, such as `OPENAI_API_KEY` or
   `CODEX_API_KEY`
 
+### Unreal Agent with Codex
+
+Set `"provider": "unreal"` to drive `unreal-agent-runner` with its
+`openai-codex` LLM provider. Build the runner from Unreal Agent's `main` with
+Go 1.27+ (`make build` in the Unreal Agent repository), then set `unrealPath`
+to its `bin/unreal-agent-runner` if it is not on `PATH`. For a small trial:
+
+```json
+{
+  "provider": "unreal",
+  "model": "gpt-5.6-luna",
+  "unrealPath": "/path/to/unreal-agent/bin/unreal-agent-runner",
+  "maxTurns": 2
+}
+```
+
+The second loop iteration lets Ralph recheck work completed in the first turn.
+Unreal Agent reads an existing ChatGPT Codex login from `CODEX_HOME/auth.json`
+(or `OPENAI_CODEX_AUTH_FILE`); it does not refresh expired credentials.
+
+Ralph passes each prompt, model, reasoning effort, and a stable session ID to
+the runner. Unreal's session files and logs live under `unrealStateDir`, which
+defaults to `<stateBaseDir>/unreal-provider/<run-name>`. Ralph translates the
+runner's JSONL responses, token usage, and completed command results into its
+event log. The local viewer reads that log directly. To make a static export,
+run `npm run export-viz -- --run <run-name> --ralph-dir <stateBaseDir>
+--work-dir <baseDir> --out <output-dir> --no-compare --no-published-base`.
+The loop goal is included in the prompt, while Ralph's checks and clean-worktree
+gate determine when the run advances. This provider does not use Codex app-server
+goals.
+
 ### Antigravity provider
 
 Set `provider` to `antigravity` to run turns through the Google Antigravity SDK
@@ -291,7 +322,7 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Default: `gpt-5.3-codex` for `codex`, `gemini-3.5-flash` for
   `antigravity`, and `claude-fable-5` for `claude`.
 - `provider`
-  Default: `codex`. Supported values: `codex`, `antigravity`, `claude`.
+  Default: `codex`. Supported values: `codex`, `unreal`, `antigravity`, `claude`.
 - `reasoningEffort`
   Default: `high`
 - `name`
@@ -370,6 +401,10 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   Default: `false`
 - `codexPath`
   Default: `codex`
+- `unrealPath`
+  Default: `unreal-agent-runner`.
+- `unrealStateDir`
+  Default: `<stateBaseDir>/unreal-provider/<run-name>`.
 - `codexHome`
   Optional Codex state directory. Overrides an ambient `CODEX_HOME` for Codex
   child processes and Ralph's session tracking; the directory must exist.
@@ -528,6 +563,8 @@ without `privateWriteDir` retain their previous isolation behavior.
   Override `model`
 - `RALPH_PROVIDER`
   Override `provider`
+- `RALPH_UNREAL_PATH`, `RALPH_UNREAL_STATE_DIR`
+  Override the Unreal runner executable and its session/log directory.
 - `RALPH_CODEX_HOME`
   Override `codexHome`
 - `RALPH_REASONING_EFFORT`

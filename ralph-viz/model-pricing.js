@@ -5,8 +5,10 @@
   const ANTHROPIC_MODEL_PATTERN = /^(claude-|anthropic[/-])/i;
   const rates = Object.freeze({
     // Standard short-context API-equivalent estimate (USD per 1M tokens).
-    // https://developers.openai.com/api/docs/pricing (2026-09-07)
+    // https://developers.openai.com/api/docs/pricing (2026-09-23)
     "gpt-6-astra": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
+    "gpt-6-sol": Object.freeze({ input: 2.00, cachedInput: 0.20, output: 10.00 }),
+    "gpt-6-luna": Object.freeze({ input: 0.10, cachedInput: 0.01, output: 0.50 }),
     "gpt-5.6-sol": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 30.00 }),
     "gpt-5.6-terra": Object.freeze({ input: 2.00, cachedInput: 0.25, output: 12.00 }),
     "gpt-5.6-luna": Object.freeze({ input: 0.20, cachedInput: 0.02, output: 1.20 }),
@@ -26,6 +28,8 @@
     "claude-fable-5-1": Object.freeze({ input: 10.00, cachedInput: 0.25, output: 50.00 }),
     "claude-fable-5": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
     "claude-opus-5": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 25.00 }),
+    // https://platform.claude.com/docs/en/models/opus-5-5/overview (2026-09-23)
+    "claude-opus-5-5": Object.freeze({ input: 4.00, cachedInput: 0.20, output: 20.00 }),
     "claude-opus-4-8": Object.freeze({ input: 5.00, cachedInput: 0.50, output: 25.00 }),
     "claude-haiku-4-5": Object.freeze({ input: 1.00, cachedInput: 0.10, output: 5.00 }),
   });

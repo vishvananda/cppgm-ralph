@@ -9,6 +9,17 @@ import {
 
 const pricing = globalThis.RALPH_MODEL_PRICING;
 
+test("new Sol, Luna, and Opus rates use the standard short-context cards", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 500_000,
+    output_tokens: 100_000,
+  };
+  assert.equal(pricing.estimateCost(usage, "gpt-6-sol"), 2.1);
+  assert.equal(pricing.estimateCost(usage, "gpt-6-luna"), 0.105);
+  assert.equal(pricing.estimateCost(usage, "claude-opus-5-5"), 4.1);
+});
+
 test("Astra usage keeps its own pricing when combined with a Luna worker", () => {
   const astra = pricing.attributeUsage({
     input_tokens: 1_000_000,
