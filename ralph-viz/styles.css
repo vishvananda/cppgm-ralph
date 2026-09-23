@@ -1967,6 +1967,12 @@ pre.file-diff .token.prefix {
   color: #a7b;
 }
 
+.thought-step {
+  color: #a7b;
+  font-size: 0.7rem;
+  margin-bottom: 0.15rem;
+}
+
 .thought-body {
   font-size: 0.78rem;
   white-space: pre-wrap;

@@ -23,6 +23,7 @@ import {
   collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../subagent-events.js";
+import { addUnrealSessionDisplayEvents } from "../unreal-session-events.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -230,7 +231,9 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
     }
   }
 
-  const events = await readRunFile(filePath);
+  const events = await addUnrealSessionDisplayEvents(await readRunFile(filePath), {
+    filePath, workDir: ROOT_DIR,
+  });
   await augmentLatestTestStatusFromLog(events, filePath);
   // Mid-turn progress for providers without session-file scanning (Claude,
   // Antigravity): derive observations from command outputs already present in
@@ -287,7 +290,10 @@ async function readRunWithCodexSession(filePath, detailOptions = defaultCodexDet
 }
 
 async function readTailRunWithCodexSession(filePath, detailOptions) {
-  const runEvents = await readRecentRunTailEvents(filePath, detailOptions);
+  const runEvents = await addUnrealSessionDisplayEvents(
+    await readRecentRunTailEvents(filePath, detailOptions),
+    { filePath, workDir: ROOT_DIR },
+  );
   if (!runEvents.length) {
     return null;
   }

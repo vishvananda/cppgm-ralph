@@ -11,14 +11,19 @@ test("Unreal session responses become Ralph messages and aggregate usage", () =>
     Data: { Response: {
       Output: [
         { ProviderID: "msg-1", Type: "message", Data: { Role: "assistant", Text: "Working", Phase: "commentary" } },
+        { ProviderID: "thought-1", Type: "reasoning", Data: { Summary: ["Checking files"], Raw: { encrypted: "private" } } },
         { ProviderID: "call-1", Type: "tool_call", Data: { CallID: "call-1", Name: "Bash", Arguments: '{"command":"make test"}' } },
       ],
       Usage: { InputTokens: 100, CachedInputTokens: 40, CacheWriteInputTokens: 10, OutputTokens: 20, ReasoningTokens: 5 },
     } },
   });
-  assert.deepEqual(first.map((event) => event.type), ["item.completed", "item.started"]);
+  assert.deepEqual(first.map((event) => event.type), ["item.completed", "item.completed", "item.started"]);
   assert.equal(first[0].item.text, "Working");
-  assert.equal(first[1].item.command, "make test");
+  assert.equal(first[1].item.text, "Checking files");
+  assert.equal(first[2].item.command, "make test");
+  assert.equal(first[1].item.response_step, 1);
+  assert.equal(first[1].item.response_command_count, 1);
+  assert.equal(first[2].item.response_step, 1);
 
   const second = converter.convert({
     type: "item", data: { Item: { Sequence: 5, Kind: "model_response", Data: { Response: {

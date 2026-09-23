@@ -2169,6 +2169,14 @@ function renderCommandCard(entry) {
     summary.append(batch);
   }
 
+  if (Number.isInteger(startItem.response_step)) {
+    const step = document.createElement("span");
+    step.className = "cmd-cell";
+    step.textContent = `step ${startItem.response_step}`;
+    step.title = "Model response that requested this command";
+    summary.append(step);
+  }
+
   if (Number.isFinite(entry.batchDurationSeconds)) {
     const duration = document.createElement("span");
     duration.className = "cmd-cell";
@@ -2731,6 +2739,17 @@ function renderReasoningCard(record) {
   const card = document.createElement("div");
   card.className = "ev ev-thought";
   appendCornerTimestamp(card, record.recordedAt);
+
+  const item = record.event?.item ?? {};
+  if (Number.isInteger(item.response_step)) {
+    const label = document.createElement("div");
+    label.className = "thought-step";
+    const count = Number(item.response_command_count) || 0;
+    label.textContent = `Step ${item.response_step}${count
+      ? ` · ${count} command${count === 1 ? "" : "s"} requested`
+      : ""}`;
+    card.append(label);
+  }
 
   appendExpandableText(card, text, `out:${recordScrollKey(record, "reasoning")}`, "thought-body");
 

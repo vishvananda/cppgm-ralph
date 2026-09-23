@@ -15,6 +15,10 @@ import {
   collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../subagent-events.js";
+import {
+  addUnrealSessionDisplayEvents,
+  unrealSessionPathsForEvents,
+} from "../unreal-session-events.js";
 
 const execFileAsync = promisify(execFile);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
@@ -515,8 +519,15 @@ function assignmentReadmePaths(run, options) {
 }
 
 async function staticRunSourcePaths(run, options) {
+  const unrealDirectory = path.join(options.ralphDir, "unreal-provider", run.shape);
+  const unrealSessions = fsSync.existsSync(unrealDirectory)
+    ? await unrealSessionPathsForEvents(await readJsonl(run.filePath), {
+        filePath: run.filePath, workDir: options.workDir,
+      })
+    : [];
   return [
     run.filePath,
+    ...unrealSessions,
     ...await runDocCandidatePaths(run, options),
     ...assignmentReadmePaths(run, options),
   ];
@@ -569,6 +580,8 @@ async function exportImplementationFingerprint() {
     SCRIPT_FILE,
     path.join(REPO_ROOT, "scripts", "compare-pa-costs.js"),
     path.join(REPO_ROOT, "subagent-events.js"),
+    path.join(REPO_ROOT, "unreal-agent-events.js"),
+    path.join(REPO_ROOT, "unreal-session-events.js"),
     path.join(REPO_ROOT, "subagent-event-utils.js"),
     path.join(REPO_ROOT, "codex-subagent-events.js"),
     path.join(REPO_ROOT, "claude-subagent-events.js"),
@@ -815,7 +828,11 @@ async function exportRun(run, options, comparison, prepared, implementation) {
       initialSources.set(resolved, sourceFileSnapshotSync(resolved));
     }
   };
-  const runEvents = await readJsonl(run.filePath);
+  const runEvents = await addUnrealSessionDisplayEvents(await readJsonl(run.filePath), {
+    filePath: run.filePath,
+    workDir: options.workDir,
+    onSourceFile,
+  });
   const codexUsageEvents = await collectCodexUsageEvents(runEvents, options, onSourceFile);
   const subagentEvents = await collectSubagentEvents(runEvents, {
     claudeDir: options.claudeDir,

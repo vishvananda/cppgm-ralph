@@ -30,12 +30,24 @@ export class UnrealAgentEventConverter {
     this.responses += 1;
     this.usage = addUsage(this.usage, normalizeUnrealUsage(response.Usage));
     const events = [];
+    const responseGroup = {
+      response_step: this.responses,
+      response_command_count: (response.Output ?? []).filter((output) =>
+        output?.Type === "tool_call" && output.Data?.Name === "Bash").length,
+    };
     for (const [index, output] of (response.Output ?? []).entries()) {
       const id = String(output?.ProviderID || `${item.Sequence}-${index}`);
       if (output?.Type === "message" && output.Data?.Role === "assistant") {
         events.push({ type: "item.completed", item: {
-          id, type: "agent_message", text: String(output.Data.Text ?? ""),
+          id, type: "agent_message", text: String(output.Data.Text ?? ""), ...responseGroup,
           ...(output.Data.Phase ? { phase: output.Data.Phase } : {}),
+        } });
+      } else if (output?.Type === "reasoning") {
+        const summary = Array.isArray(output.Data?.Summary)
+          ? output.Data.Summary.filter((part) => typeof part === "string" && part.trim()).join("\n")
+          : "";
+        if (summary) events.push({ type: "item.completed", item: {
+          id, type: "reasoning", text: summary, ...responseGroup,
         } });
       } else if (output?.Type === "tool_call") {
         const callId = String(output.Data?.CallID || id);
@@ -46,6 +58,7 @@ export class UnrealAgentEventConverter {
           status: "in_progress",
           command,
           tool_name: String(output.Data?.Name ?? ""),
+          ...responseGroup,
         };
         this.commands.set(callId, started);
         events.push({ type: "item.started", item: started });
