@@ -16,6 +16,15 @@ export class StrandsAgentEventConverter {
     switch (record?.type) {
       case "driver.started":
         return [];
+      case "driver.retry":
+        return [{ type: "item.completed", item: {
+          id: `strands-retry-${record.retry}-${this.step}`,
+          type: "agent_message",
+          text: `Strands model stream disconnected (${record.error}); ` +
+            `retrying in the same session (${record.retry}/${record.maxRetries}).`,
+          response_step: this.step,
+          response_command_count: 0,
+        } }];
       case "model.start":
         this.step += 1;
         this.blocks = [];

@@ -56,3 +56,13 @@ test("Strands failure closes an active command", () => {
   assert.equal(events[0].item.status, "failed");
   assert.match(events[0].item.aggregated_output, /limit reached/);
 });
+
+test("Strands exports a model-stream reconnect notice", () => {
+  const converter = new StrandsAgentEventConverter();
+  const events = converter.convert({
+    type: "driver.retry", retry: 1, maxRetries: 2,
+    error: "TypeError: terminated; caused by SocketError [UND_ERR_SOCKET]",
+  });
+  assert.equal(events[0].item.type, "agent_message");
+  assert.match(events[0].item.text, /retrying in the same session \(1\/2\)/);
+});

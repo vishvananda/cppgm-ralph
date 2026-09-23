@@ -4,6 +4,7 @@ import { createHarness } from "@strands-agents/harness";
 import { makeShell } from "@strands-agents/sdk/vended-tools/bash";
 import { z } from "zod";
 import { createCodexSubscriptionModel } from "./codex-model.js";
+import { describeStreamError, streamWithReconnect } from "./stream-retry.js";
 
 // Ralph consumes stdout as JSONL. Keep Strands' diagnostic logging on stderr.
 for (const method of ["log", "info", "warn", "debug"]) {
@@ -53,7 +54,10 @@ async function main() {
     printer: false,
   });
   emit({ type: "driver.started", sessionId: agent.sessionId ?? request.sessionId });
-  for await (const event of agent.stream(request.prompt)) {
+  for await (const event of streamWithReconnect(agent, request.prompt, {
+    onRetry: ({ retry, maxRetries, error }) =>
+      emit({ type: "driver.retry", retry, maxRetries, error }),
+  })) {
     switch (event.type) {
       case "beforeModelCallEvent":
         emit({ type: "model.start" });
@@ -87,6 +91,6 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  emit({ type: "driver.failed", message: error?.message ?? String(error) });
+  emit({ type: "driver.failed", message: describeStreamError(error) });
   process.exitCode = 1;
 }

@@ -22,6 +22,8 @@ encrypted reasoning across tool calls within a turn, but Strands' Responses
 adapter still drops it when a session resumes in a new process. If the Codex
 access token expires, the bridge asks the Codex CLI to refresh it, then retries
 once. That short refresh turn is outside Ralph's token accounting.
+Transient model-stream disconnects retry twice in the same Strands session;
+the turn display records each reconnect attempt.
 
 Strands and Unreal receive their loop goal as prompt context; neither has a
 native `update_goal` tool in this bridge. Ralph verifies the handoff with its
