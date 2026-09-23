@@ -104,9 +104,12 @@ closed if that goal cannot be read or is stopped; it never resets it on resume.
 
 To stop a run cleanly at the next turn boundary, create a `stop-after-turn`
 file in the run's state directory (e.g.
-`touch .ralph/<run-name>/stop-after-turn`). Ralph consumes the file and exits
-before starting the next provider turn; restarting later resumes from the
-saved state.
+`touch .ralph/<run-name>/stop-after-turn`). Ralph lets the current turn finish,
+verifies it by running the exit-criteria checks and recording the result,
+accepts a checkpoint or advances the stage if earned, and then exits before
+starting the next provider turn. Restarting later resumes from saved state.
+Creating the file while Ralph is stopped and then launching it verifies the
+last turn and exits without starting a new one.
 
 The first-turn default prompt can be customized with a Markdown sidecar file next
 to the config file. For a config named `goals-2026-05-14.config.json`, Ralph

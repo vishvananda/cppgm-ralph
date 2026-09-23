@@ -422,14 +422,13 @@ async function main() {
   let reuseLastChecksForNextTurn = reuseLastChecksRequested;
   let pendingRecoveryNote = null;
   let consecutiveOomRecoveries = 0;
+  // Prevent a stop from writing a second check record for an accepted turn.
+  let checkedTurnNumber = null;
   turnLoop:
-  while (turnNumber < CONFIG.maxTurns) {
-    if (await consumeStopAfterTurnRequest()) {
-      log("Found stop-after-turn file; exiting cleanly before the next turn.");
-      return;
-    }
+  while (turnNumber <= CONFIG.maxTurns) {
     if (isCompletedRunState(state)) {
       log("Run state is already complete; exiting.");
+      await consumeStopAfterTurnRequest();
       return;
     }
     const phase = resolveActivePhase(state);
@@ -541,6 +540,7 @@ async function main() {
           action: "checked",
         }),
       );
+      checkedTurnNumber = turnNumber;
       await appendRalphEventRecord(
         buildRalphTestStatusEventRecord({
           testStatus,
@@ -759,8 +759,46 @@ async function main() {
       state.checkpointReview = null;
       state.turnsCompleted = turnNumber;
       log(`All required checks passed for final phase ${phase.name}. Exiting.`);
+      await consumeStopAfterTurnRequest();
       return;
     }
+
+    // The checks above verify the previous turn. Stop only after they and any
+    // resulting checkpoint or phase advancement have been recorded.
+    if (await consumeStopAfterTurnRequest()) {
+      const threadId = activeThreadId ?? state.threadId ?? null;
+      if (turnNumber > 0 && checkedTurnNumber !== turnNumber) {
+        await appendRalphEventRecord(
+          buildRalphPhaseStatusEventRecord({
+            phaseStatus,
+            agentProfile,
+            threadId,
+            turnNumber,
+            action: "stop-checked",
+          }),
+        );
+        await appendRalphEventRecord(buildRalphTestStatusEventRecord({ testStatus, threadId, turnNumber }));
+      }
+      state.lastTestStatus = testStatus;
+      state.lastExitCode = phaseStatus.allRequiredPassed
+        ? 0 : phaseStatus.failedRequiredChecks[0]?.exitCode ?? testStatus.exitCode;
+      state.activeStage = activeStageForTurn;
+      state.activeSubset = activeSubsetForTurn;
+      await saveState({ ...state, updatedAt: new Date().toISOString() });
+      const next = `${phase.name} ${normalizeStageName(testStatus?.targetStage) ?? ""}`.trim();
+      log(
+        `Found stop-after-turn file; ` +
+          (checkedTurnNumber === turnNumber
+            ? `turn ${turnNumber} met its exit criteria and is recorded; next would be ${next}`
+            : `turn ${turnNumber} verified: ${next} required checks still incomplete`) +
+          `. Exiting before turn ${turnNumber + 1}.`,
+      );
+      return;
+    }
+
+    // The last allowed turn also needs its post-turn checks. Once those have
+    // run, do not start an additional provider turn merely to reach the limit.
+    if (turnNumber >= CONFIG.maxTurns) break;
 
     if (shouldRunRequiredPhaseTurn) {
       log(
