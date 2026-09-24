@@ -6,6 +6,9 @@ import { OpenAIModel } from "@strands-agents/sdk/models/openai";
 import { ReasoningReplay } from "./reasoning-replay.js";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex";
+// Strands' auto context manager summarizes at 85% utilization. Budget below
+// the prior 200k setting so max-effort reasoning has room to finish a response.
+const EFFECTIVE_CONTEXT_WINDOW = 140_000;
 
 function authPath() {
   return process.env.OPENAI_CODEX_AUTH_FILE ?? path.join(
@@ -96,7 +99,7 @@ export function createCodexSubscriptionModel({ model = "gpt-6-luna", effort = "m
   return new OpenAIModel({
     api: "responses",
     modelId: model,
-    contextWindowLimit: 200_000,
+    contextWindowLimit: EFFECTIVE_CONTEXT_WINDOW,
     // OpenAI's client requires an API key at construction. The custom fetch
     // replaces this placeholder with the current Codex subscription token.
     apiKey: "codex-subscription-placeholder",

@@ -83,3 +83,11 @@ test("Strands exports a model-stream reconnect notice", () => {
   assert.equal(events[0].item.type, "agent_message");
   assert.match(events[0].item.text, /retrying in the same session \(1\/2\)/);
 });
+
+test("Strands labels output-limit continuations without calling them disconnects", () => {
+  const converter = new StrandsAgentEventConverter();
+  const [event] = converter.convert({ type: "driver.retry", reason: "max_tokens",
+    retry: 1, maxRetries: 1, error: "MaxTokensError: limit" });
+  assert.match(event.item.text, /output-token limit/);
+  assert.doesNotMatch(event.item.text, /disconnected/);
+});

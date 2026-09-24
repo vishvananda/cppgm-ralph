@@ -5,6 +5,12 @@ import path from "node:path";
 import test from "node:test";
 import { createCodexSubscriptionModel } from "../prototypes/strands-codex/codex-model.js";
 
+test("Strands reserves output headroom in its proactive context budget", () => {
+  const model = createCodexSubscriptionModel({ model: "gpt-6-luna", effort: "max" });
+  assert.equal(model.getConfig().contextWindowLimit, 140_000);
+  assert.equal(model.getConfig().params.reasoning.effort, "max");
+});
+
 test("a 401 asks Codex to refresh the login and retries with the new token", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "ralph-strands-auth-"));
   const authFile = path.join(dir, "auth.json");

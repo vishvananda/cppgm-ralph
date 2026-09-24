@@ -40,3 +40,34 @@ test("Strands does not retry non-network failures or exceed its retry limit", as
   }, /terminated/);
   assert.equal(calls, 3);
 });
+
+test("Strands makes one bounded same-session continuation after output-token exhaustion", async () => {
+  const prompts = [];
+  const notices = [];
+  const agent = { async *stream(prompt) {
+    prompts.push(prompt);
+    if (prompts.length === 1) {
+      yield { type: "beforeModelCallEvent" };
+      throw Object.assign(new Error("Model reached maximum token limit"), { name: "MaxTokensError" });
+    }
+    yield { type: "agentResultEvent", result: { stopReason: "endTurn" } };
+  } };
+  const events = [];
+  for await (const event of streamWithReconnect(agent, "Do PA4", {
+    onRetry: (notice) => notices.push(notice), pause: async () => {},
+  })) events.push(event);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /output-token limit/);
+  assert.equal(notices[0].reason, "max_tokens");
+  assert.equal(events.at(-1).type, "agentResultEvent");
+
+  let calls = 0;
+  const alwaysLimited = { async *stream() {
+    calls += 1;
+    throw Object.assign(new Error("still limited"), { name: "MaxTokensError" });
+  } };
+  await assert.rejects(async () => {
+    for await (const _event of streamWithReconnect(alwaysLimited, "Do PA4")) { /* drain */ }
+  }, /still limited/);
+  assert.equal(calls, 2);
+});

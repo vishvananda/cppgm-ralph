@@ -23,8 +23,11 @@ export class StrandsAgentEventConverter {
         return [{ type: "item.completed", item: {
           id: `strands-retry-${record.retry}-${this.step}`,
           type: "agent_message",
-          text: `Strands model stream disconnected (${record.error}); ` +
-            `retrying in the same session (${record.retry}/${record.maxRetries}).`,
+          text: record.reason === "max_tokens"
+            ? `Strands model response reached its output-token limit; ` +
+              `continuing in the same session (${record.retry}/${record.maxRetries}).`
+            : `Strands model stream disconnected (${record.error}); ` +
+              `retrying in the same session (${record.retry}/${record.maxRetries}).`,
           response_step: this.step,
           response_command_count: 0,
         } }];

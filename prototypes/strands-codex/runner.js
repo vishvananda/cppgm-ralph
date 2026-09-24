@@ -55,8 +55,8 @@ async function main() {
   });
   emit({ type: "driver.started", sessionId: agent.sessionId ?? request.sessionId });
   for await (const event of streamWithReconnect(agent, request.prompt, {
-    onRetry: ({ retry, maxRetries, error }) =>
-      emit({ type: "driver.retry", retry, maxRetries, error }),
+    onRetry: ({ reason, retry, maxRetries, error }) =>
+      emit({ type: "driver.retry", reason, retry, maxRetries, error }),
   })) {
     switch (event.type) {
       case "beforeModelCallEvent":
