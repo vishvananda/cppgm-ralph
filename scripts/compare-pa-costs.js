@@ -950,9 +950,13 @@ function readRunEventUsageIntoTurns(events, byTurn) {
       continue;
     }
     const threadId = eventThreadId(record) ?? "";
-    const previous = previousByThread.get(threadId) ?? null;
+    const counterKey = record.event?.counter_id
+      ? `${threadId}\u0000${record.event.counter_id}`
+      : record.event?.counter_scope === "turn"
+        ? `${threadId}\u0000${record.turnNumber ?? ""}` : threadId;
+    const previous = previousByThread.get(counterKey) ?? null;
     const delta = usageDelta(current, previous);
-    previousByThread.set(threadId, current);
+    previousByThread.set(counterKey, current);
     const slot = slotFor(record);
     if (slot && hasUsage(delta)) {
       slot.usage = addUsage(slot.usage, delta);

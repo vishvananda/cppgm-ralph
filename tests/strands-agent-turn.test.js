@@ -93,6 +93,10 @@ emit({ type: 'driver.completed', usage: { inputTokens: 100, outputTokens: 12 } }
   assert.ok(events.some((record) => record.event?.item?.type === "reasoning" &&
     record.event.item.response_command_count === 1));
   assert.ok(events.some((record) => record.event?.item?.aggregated_output === "checked\n"));
+  assert.deepEqual(events.find((record) => record.eventType === "codex.session.token_count")?.event.usage, {
+    input_tokens: 100, cached_input_tokens: 40, output_tokens: 12,
+    reasoning_output_tokens: 2, total_tokens: 112,
+  });
   assert.deepEqual(events.find((record) => record.eventType === "turn.completed")?.event.usage, {
     input_tokens: 100, cached_input_tokens: 40, output_tokens: 12,
     reasoning_output_tokens: 2, total_tokens: 112,
@@ -109,4 +113,5 @@ emit({ type: 'driver.completed', usage: { inputTokens: 100, outputTokens: 12 } }
   assert.ok(turnPath);
   const exported = JSON.parse(await fs.readFile(path.join(exportDir, "data", turnPath), "utf8"));
   assert.ok(exported.events.some((record) => record.event?.item?.aggregated_output === "checked\n"));
+  assert.ok(exported.events.some((record) => record.eventType === "codex.session.token_count"));
 });

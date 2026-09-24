@@ -1,8 +1,11 @@
 // Convert unreal-agent-runner's persisted session items into Ralph's event
 // vocabulary. The runner writes these items to stdout as they are committed;
 // its on-disk session files wrap the same item under data.Item.
+import { randomUUID } from "node:crypto";
+
 export class UnrealAgentEventConverter {
   constructor() {
+    this.counterId = randomUUID();
     this.usage = null;
     this.responses = 0;
     this.error = null;
@@ -28,7 +31,8 @@ export class UnrealAgentEventConverter {
     const response = item.Data?.Response;
     if (!response || typeof response !== "object") return [];
     this.responses += 1;
-    this.usage = addUsage(this.usage, normalizeUnrealUsage(response.Usage));
+    const responseUsage = normalizeUnrealUsage(response.Usage);
+    this.usage = addUsage(this.usage, responseUsage);
     const events = [];
     const responseGroup = {
       response_step: this.responses,
@@ -67,6 +71,13 @@ export class UnrealAgentEventConverter {
     if (response.Failure?.Message) {
       this.error = String(response.Failure.Message);
     }
+    if (responseUsage) events.push({
+      type: "codex.session.token_count",
+      source: "unreal-live",
+      counter_scope: "turn",
+      counter_id: this.counterId,
+      usage: { ...this.usage },
+    });
     return events;
   }
 

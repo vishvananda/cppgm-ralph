@@ -1662,6 +1662,7 @@ function turnUsageCost(usage, model) {
 function buildDisplayEntries(records, options = {}) {
   const entries = [];
   const cmdStarts = new Map();
+  const toolStarts = new Map();
   const subagentEntries = new Map();
   const asyncEntriesByCell = new Map();
   const asyncEntriesByStoreKey = new Map();
@@ -1862,6 +1863,25 @@ function buildDisplayEntries(records, options = {}) {
       continue;
     }
 
+    if (item?.type === "tool_call" &&
+        (record.eventType === "item.started" || record.eventType === "item.completed")) {
+      const key = `${record.threadId ?? ""}\u0000${record.turnNumber ?? ""}\u0000${item.id ?? ""}`;
+      if (record.eventType === "item.started") {
+        const entry = { kind: "tool", startRecord: record, endRecord: null };
+        entries.push(entry);
+        if (item.id) toolStarts.set(key, entry);
+      } else {
+        const entry = item.id ? toolStarts.get(key) : null;
+        if (entry) {
+          entry.endRecord = record;
+          toolStarts.delete(key);
+        } else {
+          entries.push({ kind: "tool", startRecord: null, endRecord: record });
+        }
+      }
+      continue;
+    }
+
     if (
       item?.type === "todo_list" &&
       (record.eventType === "item.started" ||
@@ -1947,7 +1967,7 @@ function displayEntryIdentity(entry) {
 }
 
 function displayEntryItem(entry) {
-  if (entry.kind === "command" || entry.kind === "subagent") {
+  if (entry.kind === "command" || entry.kind === "subagent" || entry.kind === "tool") {
     return entry.asyncCompletedRecord?.event?.item ??
       entry.endRecord?.event?.item ??
       entry.updateRecord?.event?.item ??
@@ -1993,7 +2013,7 @@ function displayEntryRichnessSignature(entry) {
 }
 
 function displayEntryRecords(entry) {
-  if (entry.kind === "command" || entry.kind === "subagent") {
+  if (entry.kind === "command" || entry.kind === "subagent" || entry.kind === "tool") {
     return [
       entry.startRecord,
       entry.updateRecord,
@@ -3193,7 +3213,8 @@ function subagentStatsText(stats) {
 function renderMcpToolCard(record) {
   const item = record.event?.item ?? {};
   const failed = item.status === "failed" || Boolean(item.error);
-  const label = item.server && item.server !== "claude-code"
+  const running = item.status === "in_progress";
+  const label = item.server && item.server !== "claude-code" && item.server !== "harness"
     ? `${item.server}/${item.tool ?? "tool"}`
     : item.tool ?? "tool";
   const errorText = cleanText(item.error?.message ?? "");
@@ -3240,15 +3261,38 @@ function renderMcpToolCard(record) {
   }
 
   const badge = document.createElement("span");
-  badge.className = failed ? "pill pill-bad" : "pill pill-ok";
-  badge.textContent = failed ? "error" : "ok";
+  badge.className = failed ? "pill pill-bad" : running ? "pill pill-running" : "pill pill-ok";
+  badge.textContent = failed ? "error" : running ? "running" : "ok";
   summary.append(badge);
+
+  if (item.server === "harness" && item.input != null) {
+    appendExpandableText(body, JSON.stringify(item.input, null, 2),
+      `input:${mcpToolEntryKey(record)}`, "cmd-output");
+  }
 
   if (output) {
     appendExpandableText(body, output, `out:${mcpToolEntryKey(record)}`, "cmd-output");
   }
 
   return card;
+}
+
+function renderHarnessToolCard(entry) {
+  const record = entry.endRecord ?? entry.startRecord;
+  const item = record?.event?.item ?? {};
+  let input = item.command ?? "";
+  try {
+    input = JSON.parse(input);
+  } catch (_) {
+    input = { value: input };
+  }
+  return renderMcpToolCard({ ...record, event: { ...record.event, item: {
+    ...item,
+    server: "harness",
+    tool: item.tool_name ?? "tool",
+    input,
+    result: item.output ?? item.aggregated_output ?? "",
+  } } });
 }
 
 function mcpToolDetailText(item) {
@@ -3606,6 +3650,7 @@ function appendCornerTimestamp(card, recordedAt) {
 
 function renderDisplayEntry(entry) {
   if (entry.kind === "command") return renderCommandCard(entry);
+  if (entry.kind === "tool") return renderHarnessToolCard(entry);
   if (entry.kind === "subagent") return renderSubagentCard(entry);
   if (entry.kind === "todo") return renderTodoCard(entry.record);
   if (entry.kind === "gemini-message") return renderGeminiMessageCard(entry);
@@ -3645,6 +3690,7 @@ function renderDisplayEntry(entry) {
 
 function scrollKeyForEntry(entry, index = null) {
   if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "tool") return mcpToolEntryKey(entry.endRecord ?? entry.startRecord);
   if (entry.kind === "subagent") return subagentEntryKey(entry);
   if (entry.kind === "todo") return todoEntryKey(entry.record);
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
@@ -3674,6 +3720,7 @@ function recordScrollKey(record, prefix = "event", index = null) {
 
 function expandableEntryKey(entry) {
   if (entry.kind === "command") return commandEntryKey(entry);
+  if (entry.kind === "tool") return mcpToolEntryKey(entry.endRecord ?? entry.startRecord);
   if (entry.kind === "subagent") return subagentEntryKey(entry);
   if (entry.kind === "gemini-tool-call") return geminiToolEntryKey(entry);
   if (entry.kind === "event" && entry.record?.eventType === "item.completed" && entry.record?.event?.item?.type === "file_change") {
@@ -3756,7 +3803,8 @@ function shouldShow(record) {
     // Keep item.started for work cards that merge with their completion.
     if (
       record.eventType === "item.started" &&
-      (record.event?.item?.type === "command_execution" || record.event?.item?.type === "subagent")
+      (record.event?.item?.type === "command_execution" || record.event?.item?.type === "subagent" ||
+        record.event?.item?.type === "tool_call")
     )
       return true;
     // Keep gemini content/tool_call_response — they get merged by buildDisplayEntries
@@ -4336,7 +4384,11 @@ function tokenCountRecords(records) {
 }
 
 function tokenCountThreadKey(record) {
-  return eventThreadId(record) ?? "";
+  const threadId = eventThreadId(record) ?? "";
+  if (record.event?.counter_id) return `${threadId}\u0000${record.event.counter_id}`;
+  return record.event?.counter_scope === "turn"
+    ? `${threadId}\u0000${displayTurnForRecord(record) ?? ""}`
+    : threadId;
 }
 
 function eventThreadId(record) {

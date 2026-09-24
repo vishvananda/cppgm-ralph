@@ -29,20 +29,37 @@ test("Strands groups reasoning with its shell command and counts raw Codex usage
   ].flatMap((record) => converter.convert(record));
 
   assert.deepEqual(events.map((event) => event.type), [
-    "item.completed", "item.started", "item.completed", "item.completed",
+    "codex.session.token_count", "item.completed", "item.started", "item.completed",
+    "codex.session.token_count", "item.completed",
   ]);
-  assert.equal(events[0].item.type, "reasoning");
-  assert.equal(events[0].item.response_step, 1);
-  assert.equal(events[0].item.response_command_count, 1);
-  assert.equal(events[1].item.command, "pwd");
-  assert.equal(events[2].item.aggregated_output, "/work\n");
-  assert.equal(events[2].item.exit_code, 0);
-  assert.equal(events[3].item.response_step, 2);
+  assert.equal(events[0].counter_scope, "turn");
+  assert.equal(events[0].usage.total_tokens, 120);
+  assert.equal(events[1].item.type, "reasoning");
+  assert.equal(events[1].item.response_step, 1);
+  assert.equal(events[1].item.response_command_count, 1);
+  assert.equal(events[2].item.command, "pwd");
+  assert.equal(events[3].item.aggregated_output, "/work\n");
+  assert.equal(events[3].item.exit_code, 0);
+  assert.equal(events[4].usage.total_tokens, 210);
+  assert.equal(events[5].item.response_step, 2);
   assert.deepEqual(converter.usage, {
     input_tokens: 180, cached_input_tokens: 100, output_tokens: 30,
     reasoning_output_tokens: 9, total_tokens: 210,
   });
   assert.equal(converter.completed, true);
+});
+
+test("Strands preserves read tool inputs and outputs for viewer cards", () => {
+  const converter = new StrandsAgentEventConverter();
+  const toolUse = { toolUseId: "read-1", name: "read", input: { path: "spec.md", offset: 10 } };
+  const [started] = converter.convert({ type: "tool.start", toolUse });
+  const [completed] = converter.convert({ type: "tool.complete", toolUse,
+    result: { toolResult: { status: "success", content: [{ text: "the spec" }] } } });
+  assert.equal(started.item.type, "tool_call");
+  assert.equal(started.item.tool_name, "read");
+  assert.deepEqual(JSON.parse(started.item.command), { path: "spec.md", offset: 10 });
+  assert.equal(completed.item.output, "the spec");
+  assert.equal(completed.item.status, "completed");
 });
 
 test("Strands failure closes an active command", () => {

@@ -61,6 +61,19 @@ test("an active Unreal turn shows persisted command results and readable reasoni
     record.event.item.type === "command_execution")?.event.item.aggregated_output, "checked\n");
   assert.equal((await addUnrealSessionDisplayEvents(events, { filePath: eventPath })).length, 4);
 
+  const liveUsage = {
+    ...start, recordedAt: "2026-09-23T01:00:01Z",
+    eventType: "codex.session.token_count",
+    event: { type: "codex.session.token_count", source: "unreal-live",
+      counter_scope: "turn", usage: {
+        input_tokens: 100, cached_input_tokens: 80, output_tokens: 20,
+        reasoning_output_tokens: 15, total_tokens: 120,
+      } },
+  };
+  const withLiveUsage = await addUnrealSessionDisplayEvents([start, liveUsage], { filePath: eventPath });
+  assert.deepEqual(withLiveUsage.filter((record) => record.eventType === "codex.session.token_count")
+    .map((record) => record.event.source), ["unreal-live"]);
+
   const outDir = path.join(root, "export");
   await exportViz(["--out", outDir, "--run", runName, "--ralph-dir", ralphDir,
     "--work-dir", root, "--no-compare", "--no-published-base"]);

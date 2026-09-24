@@ -17,7 +17,11 @@ test("Unreal session responses become Ralph messages and aggregate usage", () =>
       Usage: { InputTokens: 100, CachedInputTokens: 40, CacheWriteInputTokens: 10, OutputTokens: 20, ReasoningTokens: 5 },
     } },
   });
-  assert.deepEqual(first.map((event) => event.type), ["item.completed", "item.completed", "item.started"]);
+  assert.deepEqual(first.map((event) => event.type), [
+    "item.completed", "item.completed", "item.started", "codex.session.token_count",
+  ]);
+  assert.equal(first[3].counter_scope, "turn");
+  assert.equal(first[3].usage.total_tokens, 120);
   assert.equal(first[0].item.text, "Working");
   assert.equal(first[1].item.text, "Checking files");
   assert.equal(first[2].item.command, "make test");
@@ -32,6 +36,7 @@ test("Unreal session responses become Ralph messages and aggregate usage", () =>
     } } } },
   });
   assert.equal(second[0].item.text, "Done");
+  assert.equal(second[1].usage.total_tokens, 215);
   assert.equal(converter.responses, 2);
   assert.deepEqual(converter.usage, {
     input_tokens: 180,

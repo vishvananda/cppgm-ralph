@@ -2203,13 +2203,14 @@ function usageFromTokenEventsByThread(events) {
       continue;
     }
     const threadId = eventThreadId(record) ?? "";
+    const counterKey = usageCounterKey(record);
     if (isUsageBaselineRecord(record)) {
-      previousByThread.set(threadId, current);
+      previousByThread.set(counterKey, current);
       continue;
     }
-    const previous = previousByThread.get(threadId) ?? null;
+    const previous = previousByThread.get(counterKey) ?? null;
     const delta = usageDelta(current, previous);
-    previousByThread.set(threadId, current);
+    previousByThread.set(counterKey, current);
     totalsByThread.set(threadId, addUsage(totalsByThread.get(threadId), delta));
   }
 
@@ -2250,14 +2251,14 @@ function usageFromEventsByTurn(events) {
       if (!hasTokenUsage(current)) {
         continue;
       }
-      const threadId = eventThreadId(record) ?? "";
+      const counterKey = usageCounterKey(record);
       if (isUsageBaselineRecord(record)) {
-        previousByThread.set(threadId, current);
+        previousByThread.set(counterKey, current);
         continue;
       }
-      const previous = previousByThread.get(threadId) ?? null;
+      const previous = previousByThread.get(counterKey) ?? null;
       const delta = usageDelta(current, previous);
-      previousByThread.set(threadId, current);
+      previousByThread.set(counterKey, current);
       if (!hasTokenUsage(delta)) {
         continue;
       }
@@ -3184,14 +3185,14 @@ function usageFromVizEvents(events) {
       if (!hasTokenUsage(usage)) {
         continue;
       }
-      const threadId = eventThreadId(record) ?? "";
+      const counterKey = usageCounterKey(record);
       if (isUsageBaselineRecord(record)) {
-        previousByThread.set(threadId, usage);
+        previousByThread.set(counterKey, usage);
         continue;
       }
-      const previous = previousByThread.get(threadId) ?? null;
+      const previous = previousByThread.get(counterKey) ?? null;
       total = addUsage(total, usageDelta(usage, previous));
-      previousByThread.set(threadId, usage);
+      previousByThread.set(counterKey, usage);
     }
     return hasTokenUsage(total) ? total : null;
   }
@@ -4197,6 +4198,14 @@ function eventThreadId(event) {
     event?.event?.threadId ??
     event?.event?.goal?.threadId ??
     null;
+}
+
+function usageCounterKey(record) {
+  const threadId = eventThreadId(record) ?? "";
+  if (record.event?.counter_id) return `${threadId}\u0000${record.event.counter_id}`;
+  return record.event?.counter_scope === "turn"
+    ? `${threadId}\u0000${eventTurnNumber(record) ?? ""}`
+    : threadId;
 }
 
 function isUsageBaselineRecord(event) {

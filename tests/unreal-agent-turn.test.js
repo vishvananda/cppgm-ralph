@@ -121,6 +121,8 @@ fs.writeFileSync(path.join(flag('-session-directory'), request.session_id + '.se
     record.event.item.aggregated_output === "checked\n" &&
     record.event.item.exit_code === 0));
   const completed = events.find((record) => record.eventType === "turn.completed");
+  assert.ok(events.some((record) => record.eventType === "codex.session.token_count" &&
+    record.event?.source === "unreal-live"));
   assert.deepEqual(completed.event.usage, {
     input_tokens: 100, cached_input_tokens: 40, output_tokens: 12,
     reasoning_output_tokens: 2, total_tokens: 112,

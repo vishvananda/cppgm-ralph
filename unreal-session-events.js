@@ -12,7 +12,8 @@ function pendingCommands(events) {
     const item = record?.event?.item;
     if (typeof threadId !== "string" || !threadId.startsWith("unreal-") || !item?.id) continue;
     const commands = byThread.get(threadId) ?? new Map();
-    if (record.eventType === "item.started" && item.type === "command_execution") {
+    if (record.eventType === "item.started" &&
+        (item.type === "command_execution" || item.type === "tool_call")) {
       commands.set(item.id, record);
     } else if (record.eventType === "item.completed") {
       commands.delete(item.id);
@@ -91,6 +92,10 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
   const sourceEvents = events.filter((record) =>
     !(record.eventType === "codex.session.token_count" && record.event?.source === "unreal"));
   const pending = new Map(pendingCommands(sourceEvents));
+  const threadsWithLiveUsage = new Set(sourceEvents
+    .filter((record) => record.eventType === "codex.session.token_count" &&
+      record.event?.source === "unreal-live")
+    .map((record) => record.threadId));
   const threads = unrealThreadTurns(sourceEvents);
   if (!threads.size) return sourceEvents;
   const directory = await sessionDirectory(filePath, workDir);
@@ -165,7 +170,7 @@ export async function addUnrealSessionDisplayEvents(events, { filePath, workDir 
         });
       }
     }
-    if (cumulativeUsage && latestUsageAt) {
+    if (cumulativeUsage && latestUsageAt && !threadsWithLiveUsage.has(threadId)) {
       synthetic.push({
         recordedAt: latestUsageAt,
         threadId,

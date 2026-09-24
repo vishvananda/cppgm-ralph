@@ -1,8 +1,11 @@
 // Convert the Strands harness runner's JSONL records to Ralph's event format.
 // Buffer each model response until it completes so reasoning and commands share
 // the same response_step and response_command_count in the viewer.
+import { randomUUID } from "node:crypto";
+
 export class StrandsAgentEventConverter {
   constructor() {
+    this.counterId = randomUUID();
     this.step = 0;
     this.blocks = [];
     this.commands = new Map();
@@ -34,7 +37,13 @@ export class StrandsAgentEventConverter {
         return [];
       case "model.usage":
         this.rawUsage = addUsage(this.rawUsage, normalizeRawUsage(record.usage));
-        return [];
+        return this.rawUsage ? [{
+          type: "codex.session.token_count",
+          source: "strands",
+          counter_scope: "turn",
+          counter_id: this.counterId,
+          usage: { ...this.rawUsage },
+        }] : [];
       case "model.complete":
         return this.completeModel();
       case "tool.start":
