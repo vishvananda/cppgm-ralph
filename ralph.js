@@ -51,6 +51,7 @@ import {
   codexSessionTaskCompletion,
   requiresCodexGoalCompletion,
 } from "./codex-goal-completion.js";
+import { readResumableCodexGoal } from "./codex-goal-resume.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
 import { StrandsAgentEventConverter } from "./strands-agent-events.js";
@@ -1029,6 +1030,13 @@ async function main() {
           await sleepMs(limit.waitMs);
           await finishPersistedProviderLimitWait(pendingWait);
           activeThreadId = retryThreadId;
+          if (activeThreadId && requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
+            const resumed = await withCodexAppServer((client) =>
+              readResumableCodexGoal(client, activeThreadId));
+            if (resumed.reactivated) {
+              log(`Reactivated usage-limited Codex goal for thread ${activeThreadId}`);
+            }
+          }
           thread = null;
           backend = createAgentBackend(agentProfile.provider);
           thread = activeThreadId
@@ -3918,12 +3926,9 @@ async function prepareLoopGoalForTurn({
   if (preserveExistingGoal) {
     if (!threadId) throw new Error("Cannot preserve a Codex goal without its thread id");
     return withCodexAppServer(async (client) => {
-      const { goal } = await client.request("thread/goal/get", { threadId });
-      if (!goal || goal.threadId !== threadId) {
-        throw new Error(`Cannot preserve Codex goal for ${threadId}: missing or mismatched goal`);
-      }
-      if (!["active", "complete", "completed"].includes(goal.status)) {
-        throw new Error(`Cannot resume Codex goal for ${threadId}: goal is ${goal.status}`);
+      const { goal, reactivated } = await readResumableCodexGoal(client, threadId);
+      if (reactivated) {
+        log(`Reactivated usage-limited Codex goal for thread ${threadId}`);
       }
       log(`Preserving existing Codex loop goal: ${previewText(goal.objective)}`);
       return { threadId, goal, startedThread: false, preserved: true };

@@ -65,8 +65,9 @@ and resumes the same session and turn. The wait is excluded from run timing.
 Restarting Ralph while it is waiting automatically reuses that turn's checks
 and continues waiting. Use `--ignore-limit-wait` (or
 `RALPH_IGNORE_LIMIT_WAIT=1`) to clear the deadline and retry immediately after
-an early reset or account change. After an interrupted run without a persisted
-provider wait,
+an early reset or account change. For native Codex goals, this also reactivates
+the usage-limited goal while preserving its objective, budget and usage. After
+an interrupted run without a persisted provider wait,
 `node ralph.js --continue` resumes
 the most recent provider thread for the next turn only (subsequent turns
 follow `freshThreadPerTurn` again); for Claude, if that session's loop goal is
