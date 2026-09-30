@@ -5,6 +5,8 @@
   const ANTHROPIC_MODEL_PATTERN = /^(claude-|anthropic[/-])/i;
   const rates = Object.freeze({
     // Standard short-context API-equivalent estimate (USD per 1M tokens).
+    // gpt-6.1-sol rates supplied by the user (2026-09-29).
+    "gpt-6.1-sol": Object.freeze({ input: 2.00, cachedInput: 0.10, output: 10.00 }),
     // https://developers.openai.com/api/docs/pricing (2026-09-23)
     "gpt-6-astra": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
     "gpt-6-sol": Object.freeze({ input: 2.00, cachedInput: 0.20, output: 10.00 }),

@@ -1,5 +1,10 @@
 # V4 Strands run
 
+The installed working volume was archived and removed on 2026-09-29.
+Ralph history remains available. See the [V4.1 Sol 6.1 Strands setup](../v4sol61strands/README.md)
+for the archive location and replacement run. Restore the archived volume
+before restarting this run.
+
 This run compares the Strands harness with v4unreal on the same
 `gpt-6-luna` model at `max` reasoning effort. It begins at the same clean V4
 scaffold commit, `e50e87639`, before PA1 implementation. The checked-in

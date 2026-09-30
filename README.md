@@ -225,6 +225,9 @@ inception checks. The [V4 Strands scaffold](examples/v4strands/README.md) uses
 the same Luna/max Codex subscription model and V4 checks as v4unreal.
 The [V4 Luna scaffold](examples/v4luna/README.md) runs that model through the
 native Codex harness and its goal machinery, starting from the same V4 commit.
+The [V4.1 Sol 6.1 Strands scaffold](examples/v4sol61strands/README.md) uses
+`gpt-6.1-sol` at `high` reasoning effort with a dedicated 20 GiB write volume
+and the updated `cppgm-assignments` v4.1 base.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;
