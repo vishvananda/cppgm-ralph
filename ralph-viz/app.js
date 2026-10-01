@@ -263,6 +263,9 @@ function textValue(value) {
     if (isCodexCommandOutputChunk(value)) {
       return value.output;
     }
+    if (value.status === "fulfilled" && isCodexCommandOutputPayload(value.value)) {
+      return textValue(value.value);
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -350,7 +353,7 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputPayload(parsed)
     ? textValue(parsed)
     : value;
 }
@@ -387,6 +390,15 @@ function collectCodexCommandOutputChunks(value, chunks) {
       chunks.push(direct);
       return;
     }
+    // text() can serialize an array or a Promise.allSettled result wrapper.
+    // Decode only recognized command payloads, not arbitrary program JSON.
+    try {
+      const parsed = JSON.parse(stripCodexOutputTruncationNotice(value).trim());
+      if (isCodexCommandOutputPayload(parsed)) {
+        collectCodexCommandOutputChunks(parsed, chunks);
+        return;
+      }
+    } catch (_) {}
     const labeled = parseLabeledCodexCommandOutputChunks(value);
     if (labeled.length > 0) {
       chunks.push(...labeled);
@@ -408,6 +420,10 @@ function collectCodexCommandOutputChunks(value, chunks) {
   if (typeof value === "object") {
     if (isCodexCommandOutputChunk(value)) {
       chunks.push(value);
+      return;
+    }
+    if (value.status === "fulfilled" && isCodexCommandOutputPayload(value.value)) {
+      collectCodexCommandOutputChunks(value.value, chunks);
       return;
     }
     if (typeof value.text === "string") {
@@ -506,6 +522,14 @@ function isCodexCommandOutputChunk(value) {
         Object.prototype.hasOwnProperty.call(value, "exit_code") ||
         Object.prototype.hasOwnProperty.call(value, "original_token_count")),
   );
+}
+
+function isCodexCommandOutputPayload(value) {
+  if (isCodexCommandOutputChunk(value)) return true;
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every(isCodexCommandOutputPayload);
+  }
+  return value?.status === "fulfilled" && isCodexCommandOutputPayload(value.value);
 }
 
 function isStructuredTextPayload(value) {
@@ -646,6 +670,7 @@ function commandToolSource(item) {
 
 function isWriteStdinCommandItem(item) {
   return item?.type === "command_execution" &&
+    !/\btools\.exec_command\s*\(/.test(commandToolSource(item)) &&
     (/\btools\.write_stdin\s*\(/.test(commandToolSource(item)) ||
       /^write_stdin\b/.test(String(item?.command ?? "")));
 }

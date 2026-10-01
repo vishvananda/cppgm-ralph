@@ -16,6 +16,37 @@ function commandRecord(eventType, item, recordedAt) {
   };
 }
 
+test("session replay repairs a polluted batch command and keeps CLI pair ordering", () => {
+  const primary = [
+    commandRecord("item.started", {
+      id: "poll", type: "command_execution", command: "write_stdin unknown session",
+    }, "2026-10-01T18:39:02.900Z"),
+    commandRecord("item.completed", {
+      id: "poll", type: "command_execution", exit_code: 0,
+      command: "command 1: command 1: report\ncommand 2: write_stdin unknown session\ncommand 2: new task",
+      batch_commands: [
+        { command: "command 1: report\ncommand 2: write_stdin unknown session (continued session 10)", exit_code: 0 },
+        { command: "new task", session_id: 20 },
+      ],
+    }, "2026-10-01T18:39:03.000Z"),
+  ];
+  const corrected = commandRecord("item.completed", {
+    ...primary[1].event.item,
+    command: "command 1: build (continued session 10)\ncommand 2: new task",
+    batch_commands: [
+      { command: "build (continued session 10)", exit_code: 0 },
+      { command: "new task", session_id: 20 },
+    ],
+  }, "2026-10-01T18:39:02.800Z");
+  const merged = mergeEventStreams(primary, [corrected]);
+  assert.equal(sessionItemCardSuppressionKeys(primary).size, 0,
+    "an existing batch must not suppress replay that repairs its session mapping");
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].eventType, "item.started");
+  assert.equal(merged[1].recordedAt, primary[1].recordedAt);
+  assert.equal(merged[1].event.item.batch_commands[0].command, "build (continued session 10)");
+});
+
 test("session conversion upgrades raw code-mode command cards already in the run log", () => {
   const rawSource = "exec const rs = await Promise.all([tools.exec_command({cmd:\"one\"}), " +
     "tools.exec_command({cmd:\"two\"})]);";

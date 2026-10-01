@@ -56,9 +56,9 @@ const RUN_USAGE_CACHE_VERSION = 28;
 const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 18;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 19;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 18;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 19;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -4257,7 +4257,12 @@ export function mergeEventStreams(primary, secondary) {
     }
     const replacementIndex = findUpgradeableItemCardIndex(merged, event);
     if (replacementIndex >= 0) {
-      merged[replacementIndex] = event;
+      // CLI arrival timestamps can lag rollout timestamps. Preserve the
+      // existing ordering when only one half of a command pair is upgraded.
+      merged[replacementIndex] = {
+        ...event,
+        recordedAt: merged[replacementIndex].recordedAt ?? event.recordedAt,
+      };
       seen.add(eventKey(event));
       continue;
     }
@@ -4310,6 +4315,12 @@ function shouldPreferSessionItemCard(existing, candidate) {
   }
   const existingCommand = String(existingItem.command ?? "");
   const candidateCommand = String(candidateItem.command ?? "");
+  if (
+    hasUnresolvedCommandMapping(existingCommand) &&
+    !hasUnresolvedCommandMapping(candidateCommand)
+  ) {
+    return true;
+  }
   if (hasCommandBatchLabels(candidateCommand) && !hasCommandBatchLabels(existingCommand)) {
     return true;
   }
@@ -4446,6 +4457,7 @@ export function sessionItemCardSuppressionKeys(events) {
     if (
       item?.type === "command_execution" &&
       (isRawCodeModeCommand(item.command) ||
+        hasUnresolvedCommandMapping(item.command) ||
         hasNumberedCommandResults(item.aggregated_output) ||
         isUnresolvedAsyncCommandItem(item) ||
         needsCodeModeBatchUpgrade(item))
@@ -4467,6 +4479,11 @@ function needsCodeModeBatchUpgrade(item) {
   }
   const source = item?.raw?.input;
   return typeof source === "string" && extractToolCommandBatch(source, {}).length > 1;
+}
+
+function hasUnresolvedCommandMapping(command) {
+  const text = String(command ?? "");
+  return /write_stdin unknown session/.test(text) || /^command \d+: command \d+:/m.test(text);
 }
 
 function isRawCodeModeCommand(command) {
@@ -6329,7 +6346,7 @@ function convertCodexResponseItem(payload, context) {
           context.commandsBySessionId?.set(partSessionId, part.command);
         }
       }
-    } else if (sessionId && (parentCommand || call?.command)) {
+    } else if (sessionId && !(call?.batchCommands?.length > 1) && (parentCommand || call?.command)) {
       context.commandsBySessionId?.set(sessionId, parentCommand ?? call.command);
     }
     const sessionStoreKey = functionCallSessionStoreKey(call);
@@ -6528,14 +6545,12 @@ function extractToolWriteStdinArgs(input) {
 
 function extractToolWriteStdinArgEntries(input) {
   const text = String(input ?? "");
-  const mappedEntries = extractMappedToolWriteStdinArgEntries(text);
-  if (mappedEntries.length > 0) {
-    return mappedEntries;
-  }
-  const entries = [];
+  const entries = extractMappedToolWriteStdinArgEntries(text);
+  const repeatedCallIndices = new Set(entries.map((entry) => entry.callIndex));
   const regex = /\btools\.write_stdin\s*\(\s*(\{[\s\S]*?\})\s*\)/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
+    if (repeatedCallIndices.has(match.index)) continue;
     entries.push({
       index: match.index,
       args: {
@@ -6545,13 +6560,13 @@ function extractToolWriteStdinArgEntries(input) {
       },
     });
   }
-  return entries;
+  return entries.sort((left, right) => left.index - right.index);
 }
 
 function extractMappedToolWriteStdinArgEntries(input) {
   const text = String(input ?? "");
   const entries = [];
-  const addEntries = (initializer, parameterName, properties) => {
+  const addEntries = (initializer, parameterName, properties, callIndex) => {
     const escapedParameter = escapeRegExp(parameterName);
     const usesParameter = new RegExp(
       `(?:\\bsession_id\\b|["']session_id["'])\\s*:\\s*${escapedParameter}\\b`,
@@ -6563,9 +6578,12 @@ function extractMappedToolWriteStdinArgEntries(input) {
       return;
     }
     const chars = jsObjectPropertyValue(properties, "chars") ?? "";
-    for (const value of jsScalarArrayEntries(initializer.body, initializer.start)) {
+    const values = jsScalarArrayEntries(initializer.body, initializer.start);
+    for (const [index, value] of values.entries()) {
       entries.push({
-        index: value.index,
+        // Order repeated results at the call site, not at the array declaration.
+        index: callIndex + index / (values.length + 1),
+        callIndex,
         args: { session_id: value.value, session_store_key: null, chars },
       });
     }
@@ -6577,14 +6595,25 @@ function extractMappedToolWriteStdinArgEntries(input) {
     addEntries({
       body: match[1],
       start: match.index + match[0].indexOf("[") + 1,
-    }, match[2], match[3]);
+    }, match[2], match[3], text.indexOf("tools.write_stdin", match.index));
   }
 
   const namedRegex = /\b([A-Za-z_$][\w$]*)\.map\(\s*([A-Za-z_$][\w$]*)\s*=>\s*tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)\s*\)/g;
   while ((match = namedRegex.exec(text)) !== null) {
     const initializer = findJsArrayInitializer(text, match[1], match.index);
     if (initializer) {
-      addEntries(initializer, match[2], match[3]);
+      addEntries(initializer, match[2], match[3], text.indexOf("tools.write_stdin", match.index));
+    }
+  }
+  // Code mode also emits serial polls in for...of loops, often mixed with
+  // new exec_command calls. Expand each poll so result chunks stay aligned.
+  const loopRegex = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+(\[[^\[\]]*\]|[A-Za-z_$][\w$]*)\s*\)\s*(?:\{\s*)?(?:text\s*\(\s*)?await\s+tools\.write_stdin\s*\(\s*\{([\s\S]*?)\}\s*\)/g;
+  while ((match = loopRegex.exec(text)) !== null) {
+    const initializer = match[2].startsWith("[")
+      ? { body: match[2].slice(1, -1), start: match.index }
+      : findJsArrayInitializer(text, match[2], match.index);
+    if (initializer) {
+      addEntries(initializer, match[1], match[3], text.indexOf("tools.write_stdin", match.index));
     }
   }
   return entries.sort((left, right) => left.index - right.index);
@@ -6906,6 +6935,9 @@ function textValue(value) {
     if (isCodexCommandOutputChunk(value)) {
       return value.output;
     }
+    if (value.status === "fulfilled" && isCodexCommandOutputPayload(value.value)) {
+      return textValue(value.value);
+    }
     if (typeof value.text === "string") {
       return value.text;
     }
@@ -6998,7 +7030,7 @@ function structuredTextStringValue(value) {
   } catch (_) {
     return value;
   }
-  return isStructuredTextPayload(parsed) || isCodexCommandOutputChunk(parsed)
+  return isStructuredTextPayload(parsed) || isCodexCommandOutputPayload(parsed)
     ? textValue(parsed)
     : value;
 }
@@ -7035,6 +7067,15 @@ function collectCodexCommandOutputChunks(value, chunks) {
       chunks.push(direct);
       return;
     }
+    // text() can serialize an array or a Promise.allSettled result wrapper.
+    // Decode only recognized command payloads, not arbitrary program JSON.
+    try {
+      const parsed = JSON.parse(stripCodexOutputTruncationNotice(value).trim());
+      if (isCodexCommandOutputPayload(parsed)) {
+        collectCodexCommandOutputChunks(parsed, chunks);
+        return;
+      }
+    } catch (_) {}
     const labeled = parseLabeledCodexCommandOutputChunks(value);
     if (labeled.length > 0) {
       chunks.push(...labeled);
@@ -7056,6 +7097,10 @@ function collectCodexCommandOutputChunks(value, chunks) {
   if (typeof value === "object") {
     if (isCodexCommandOutputChunk(value)) {
       chunks.push(value);
+      return;
+    }
+    if (value.status === "fulfilled" && isCodexCommandOutputPayload(value.value)) {
+      collectCodexCommandOutputChunks(value.value, chunks);
       return;
     }
     if (typeof value.text === "string") {
@@ -7164,6 +7209,14 @@ function isCodexCommandOutputChunk(value) {
         Object.prototype.hasOwnProperty.call(value, "exit_code") ||
         Object.prototype.hasOwnProperty.call(value, "original_token_count")),
   );
+}
+
+function isCodexCommandOutputPayload(value) {
+  if (isCodexCommandOutputChunk(value)) return true;
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every(isCodexCommandOutputPayload);
+  }
+  return value?.status === "fulfilled" && isCodexCommandOutputPayload(value.value);
 }
 
 function isStructuredTextPayload(value) {

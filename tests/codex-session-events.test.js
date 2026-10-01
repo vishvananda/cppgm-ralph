@@ -44,6 +44,53 @@ function labeledJsonChunks(chunks, firstLabel = 0) {
     .join("\n");
 }
 
+for (const loop of [
+  'for (const id of [10, 20]) text(await tools.write_stdin({session_id:id, chars:""}));',
+  'const ids = [10, 20]; for (const id of ids) { text(await tools.write_stdin({session_id:id, chars:""})); }',
+  'const ids = [10, 20]; await Promise.all(ids.map(id => tools.write_stdin({session_id:id, chars:""})));',
+]) {
+  test(`preserves session completions in a mixed command/poll batch: ${loop}`, () => {
+    const converter = new CodexSessionConverter();
+    toolCall(converter, "start", `
+text(await tools.exec_command({cmd:"build"}));
+text(await tools.exec_command({cmd:"audit"}));
+`);
+    toolOutput(converter, "start", [
+      { type: "input_text", text: JSON.stringify({ output: "", session_id: 10 }) },
+      { type: "input_text", text: JSON.stringify({ output: "", session_id: 20 }) },
+    ]);
+
+    // The literal poll must remain in the batch alongside repeated polls.
+    const start = toolCall(converter, "poll", `
+text(await tools.exec_command({cmd:"read report"}));
+${loop}
+text(await tools.write_stdin({session_id:30, chars:""}));
+`);
+    assert.equal(start.item.command,
+      "command 1: read report\n" +
+      "command 2: build (continued session 10)\n" +
+      "command 3: audit (continued session 20)\n" +
+      "command 4: write_stdin session 30");
+    const completed = toolOutput(converter, "poll", [
+      { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+      ...[
+        { output: "report", exit_code: 0 },
+        { output: "built", exit_code: 0 },
+        { output: "audit failed", exit_code: 2 },
+        { output: "still running", session_id: 30 },
+      ].map(chunk => ({ type: "input_text", text: JSON.stringify(chunk) })),
+    ]).item;
+    assert.deepEqual(completed.batch_commands.map(part => [part.command, part.exit_code, part.session_id]), [
+      ["read report", 0, null],
+      ["build (continued session 10)", 0, null],
+      ["audit (continued session 20)", 2, null],
+      ["write_stdin session 30", null, 30],
+    ]);
+    assert.equal(converter.commandsBySessionId.get("30"), "write_stdin session 30");
+    assert.equal(converter.commandsBySessionId.get("10"), "build");
+  });
+}
+
 test("reconstitutes labeled Promise.all transport objects and async command chains", () => {
   const converter = new CodexSessionConverter();
   const start = toolCall(converter, "start", `
