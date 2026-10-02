@@ -5088,6 +5088,12 @@ function anchorTestStatusTotals(status, anchors) {
     return status;
   }
   const stages = Array.isArray(status.stages) ? status.stages : [];
+  // Counted single-stage reports already describe the complete run. A larger
+  // historical hint must not turn 213/219 into 213-419/425.
+  if (status.reportSummaryHasCounts === true && stages.length === 1 &&
+      finitePositiveNumber(status.testsTotal) && stages[0].total === status.testsTotal) {
+    return status;
+  }
   let changed = false;
   const anchoredStages = stages.map((stage) => {
     const anchor = anchors.get(stage?.name);
@@ -5169,6 +5175,8 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
   if (!summary) {
     return null;
   }
+  const allTestsPassed = summary.allTestsPassed ||
+    (item.exit_code === 0 && summary.hasCounts && summary.testsPassed === summary.testsTotal);
 
   const stageNames = stageSections.map(stage => stage.name);
   const firstFailureLine = findFirstFailureLine(output) ?? null;
@@ -5185,7 +5193,7 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
     const failed = failureLines.length;
     return {
       name: stage.name,
-      status: summary.allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown",
+      status: allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown",
       passed: 0,
       total: 0,
       failed,
@@ -5194,13 +5202,23 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
       targets: [],
     };
   });
+  if (stages.length === 1 && summary.hasCounts) {
+    Object.assign(stages[0], {
+      status: allTestsPassed ? "pass" : "fail",
+      passed: summary.testsPassed,
+      passedUpperBound: summary.testsPassed,
+      total: summary.testsTotal,
+      failed: Math.max(0, summary.testsTotal - summary.testsPassed),
+      unknown: 0,
+    });
+  }
   const timeoutFailures = stages.reduce((sum, stage) => sum + (stage.timeouts ?? 0), 0);
   const timeoutExpectationFailures = stages.reduce(
     (sum, stage) => sum + (stage.timeoutExpectations ?? 0),
     0,
   );
   const stagesPassed = stages.filter(stage => stage.status === "pass").length;
-  const passingThrough = canInferPassingThrough && summary.allTestsPassed
+  const passingThrough = canInferPassingThrough && allTestsPassed
     ? stageNames.at(-1) ?? null
     : canInferPassingThrough && failingIndex > 0
       ? stageNames[failingIndex - 1]
@@ -5210,9 +5228,11 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
     recordedAt: record.recordedAt,
     command,
     exitCode: item.exit_code ?? null,
-    allTestsPassed: summary.allTestsPassed,
+    allTestsPassed,
     testsPassed: summary.testsPassed,
     testsTotal: summary.testsTotal,
+    hasReportSummary: true,
+    reportSummaryHasCounts: summary.hasCounts,
     stageCount,
     stagesPassed,
     failingStage,
@@ -5306,6 +5326,7 @@ function parseTestReportSummaries(output) {
       allTestsPassed: true,
       testsPassed: testsPassed ?? testsTotal ?? 0,
       testsTotal: testsTotal ?? testsPassed ?? 0,
+      hasCounts: testsPassed != null && testsTotal != null,
     });
   }
 
@@ -5316,6 +5337,7 @@ function parseTestReportSummaries(output) {
       allTestsPassed: false,
       testsPassed: Number.parseInt(summary[1] ?? summary[3], 10),
       testsTotal: Number.parseInt(summary[2] ?? summary[4], 10),
+      hasCounts: true,
     });
   }
   return summaries;
@@ -6062,7 +6084,7 @@ function inferSelectedReportSummaryProgress(output, commandInfo, tracker, exitCo
       return null;
     }
     const anchoredTotal = commandInfo.hasSubset ? 0 : tracker.stageTotals.get(stages[0]) ?? 0;
-    const total = Math.max(summary.testsTotal, anchoredTotal);
+    const total = summary.hasCounts ? summary.testsTotal : anchoredTotal;
     return {
       stage: stages[0],
       passed: Math.min(summary.testsPassed, total),
