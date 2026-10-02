@@ -3331,7 +3331,7 @@ function sameTokenUsage(left, right) {
   );
 }
 
-async function augmentLatestTestStatusFromLog(events, filePath) {
+export async function augmentLatestTestStatusFromLog(events, filePath) {
   const statusRecord = [...events]
     .reverse()
     .find((event) => event.eventType === "ralph.test-status" && event.event?.testStatus);
@@ -3351,17 +3351,38 @@ async function augmentLatestTestStatusFromLog(events, filePath) {
     throw error;
   }
 
-  const derived = deriveTestStatusFromReportOutput(output, statusRecord.event.testStatus);
+  const original = statusRecord.event.testStatus;
+  const derived = deriveTestStatusFromReportOutput(output, original);
   if (!derived) {
     return;
   }
   statusRecord.event.testStatus = {
-    ...statusRecord.event.testStatus,
+    ...original,
     ...derived,
   };
+  // The turn-start baseline and required-status event can reference the same
+  // check. Keep those copies consistent when correcting historical count hints.
+  if (original.recordedAt) {
+    for (const record of events) {
+      const holders = [
+        record.event,
+        record.event?.phaseStatus,
+        ...(record.event?.phaseStatus?.checks ?? []),
+      ];
+      for (const holder of holders) {
+        const status = holder?.testStatus;
+        if (status?.recordedAt === original.recordedAt &&
+            status.command === original.command &&
+            status.targetStage === original.targetStage &&
+            status.targetSubset === original.targetSubset) {
+          holder.testStatus = { ...status, ...derived };
+        }
+      }
+    }
+  }
 }
 
-function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
+export function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
   const summary = parseTestReportSummary(output);
   if (!summary) {
     return null;
@@ -3404,21 +3425,35 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
       : null;
   const stages = stageSections.map((stage, index) => {
     const failureLines = extractStageFailureLines(stage.body);
-    const failed = failureLines.length;
+    let failed = failureLines.length;
     const existingStage = existingStages.get(stage.name);
     const existingTotal = finitePositiveNumber(existingStage?.total);
-    const status = allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown";
-    const total = existingTotal ?? 0;
-    const passed = inferDerivedStagePassed({
+    let status = allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown";
+    let total = existingTotal ?? 0;
+    let passed = inferDerivedStagePassed({
       status,
-      failed,
       total,
       existingPassed: existingStage?.passed,
     });
+    let passedUpperBound = status === "pass" ? passed : Math.max(
+      passed,
+      Math.min(total, existingStage?.passedUpperBound ?? Math.max(0, total - failed)),
+    );
+    // A single-stage aggregate is an exact result for that stage. Historical
+    // totals and diagnostic-line counts cannot override an explicit 0/219.
+    if (stageSections.length === 1 && summary.hasCounts) {
+      total = summary.testsTotal;
+      passed = summary.testsPassed;
+      passedUpperBound = passed;
+      failed = Math.max(0, total - passed);
+      status = allTestsPassed ? "pass" : "fail";
+    }
     return {
       name: stage.name,
       status,
       passed,
+      passedUpperBound,
+      unknown: Math.max(0, passedUpperBound - passed),
       total,
       failed,
       timeouts: failureLines.filter((line) => classifyFailureLine(line) === "timeout").length,
@@ -3432,14 +3467,23 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
   const timeoutExpectationFailures = stages.length
     ? stages.reduce((sum, stage) => sum + (stage.timeoutExpectations ?? 0), 0)
     : (existingStatus.timeoutExpectationFailures ?? 0);
+  const testsPassedUpperBound = summary.hasCounts ? summary.testsPassed : Math.max(
+    summary.testsPassed,
+    stages.reduce((sum, stage) => sum + stage.passedUpperBound, 0),
+  );
 
   return {
     allTestsPassed,
     testsPassed: summary.testsPassed,
+    testsPassedUpperBound,
+    testsUnknown: Math.max(0, testsPassedUpperBound - summary.testsPassed),
     testsTotal: summary.testsTotal,
+    hasReportSummary: true,
+    reportSummaryHasCounts: summary.hasCounts,
     stageCount: stageNames.length || existingStatus.stageCount || 0,
     stagesPassed,
-    failingStage: allTestsPassed ? null : failingStage,
+    failingStage: allTestsPassed ? null :
+      failingStage ?? stages.find((stage) => stage.status === "fail")?.name ?? null,
     passingThrough,
     firstFailureLine: firstFailureLine ?? existingStatus.firstFailureLine ?? null,
     firstFailureKind: classifyFailureLine(firstFailureLine ?? existingStatus.firstFailureLine),
@@ -3449,15 +3493,12 @@ function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
   };
 }
 
-function inferDerivedStagePassed({ status, failed, total, existingPassed }) {
+function inferDerivedStagePassed({ status, total, existingPassed }) {
   if (!Number.isFinite(total) || total <= 0) {
     return Number.isFinite(existingPassed) ? Math.max(0, existingPassed) : 0;
   }
   if (status === "pass") {
     return total;
-  }
-  if (failed > 0) {
-    return Math.max(0, Math.min(total, total - failed));
   }
   if (Number.isFinite(existingPassed)) {
     return Math.max(0, Math.min(total, existingPassed));
@@ -4104,6 +4145,7 @@ function parseTestReportSummary(output) {
       allTestsPassed: true,
       testsPassed: testsPassed ?? testsTotal ?? 0,
       testsTotal: testsTotal ?? testsPassed ?? 0,
+      hasCounts: testsPassed != null && testsTotal != null,
     };
   }
 
@@ -4116,6 +4158,7 @@ function parseTestReportSummary(output) {
     allTestsPassed: false,
     testsPassed: Number.parseInt(summary[1], 10),
     testsTotal: Number.parseInt(summary[2], 10),
+    hasCounts: true,
   };
 }
 

@@ -7,11 +7,12 @@ const app = readFileSync(new URL("../ralph-viz/app.js", import.meta.url), "utf8"
 const run = { id: "v4codex-gpt-6-astra-xhigh/run" };
 const oldStart = "2026-09-07T18:45:00.000Z";
 const newStart = "2026-09-09T12:12:00.907Z";
+const storageKey = JSON.parse(app.match(/^const PROGRESS_BEST_STORAGE_KEY = (.+);$/m)[1]);
 
 function browserFixture(storage = new Map()) {
   const browser = vm.createContext({
     state: { progressBestCache: new Map() },
-    PROGRESS_BEST_STORAGE_KEY: "ralphProgressBest:v2",
+    PROGRESS_BEST_STORAGE_KEY: storageKey,
     PROGRESS_BEST_CACHE_LIMIT: 600,
     cleanText: (value) => String(value ?? "").trim(),
     window: { localStorage: {
@@ -71,13 +72,22 @@ test("reload retains the best result from the same turn despite a later regressi
 });
 
 test("legacy browser cache entries without a turn identity are not reused", () => {
-  const storage = new Map([["ralphProgressBest:v2", JSON.stringify({
+  const storage = new Map([[storageKey, JSON.stringify({
     version: 1,
     entries: [[`${run.id}\0${19}\0pa10\0${121}`, {
       passed: 121, total: 121, recordedAt: oldStart,
     }]],
   })]]);
   assert.equal(apply(browserFixture(storage), progress(newStart, 0)).latest.best.passed, 0);
+});
+
+test("cached scores from the failure-line subtraction bug are discarded", () => {
+  const storage = new Map();
+  const oldBrowser = browserFixture(storage);
+  oldBrowser.PROGRESS_BEST_STORAGE_KEY = "ralphProgressBest:v2";
+  apply(oldBrowser, progress(newStart, 206, 425));
+  const corrected = apply(browserFixture(storage), progress(newStart, 0, 425));
+  assert.equal(corrected.latest.best.passed, 0);
 });
 
 test("unidentified turn baselines are not persisted, and changed totals remain separate", () => {
