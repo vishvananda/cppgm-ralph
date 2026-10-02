@@ -3341,6 +3341,56 @@ export async function augmentLatestTestStatusFromLog(events, filePath) {
   }
 
   const stateDir = path.dirname(path.dirname(filePath));
+  const holders = events.flatMap((record) => [
+    record.event,
+    record.event?.phaseStatus,
+    ...(record.event?.phaseStatus?.checks ?? []),
+  ]).filter(Boolean);
+  const replaceCopies = (original, derived) => {
+    if (!original.recordedAt) return;
+    for (const holder of holders) {
+      const status = holder.testStatus;
+      if (status?.recordedAt === original.recordedAt &&
+          status.command === original.command &&
+          status.targetStage === original.targetStage &&
+          status.targetSubset === original.targetSubset) {
+        holder.testStatus = { ...status, ...derived };
+      }
+    }
+  };
+  const stageReportTotals = new Map();
+  let priorReport = null;
+  // Dedicated check logs retain the stage count even when an audit's latest
+  // report covers every PA. Repair only the matching most recent check copies.
+  for (const name of ["stageTests", "priorThroughTests"]) {
+    let checkOutput;
+    let logMtimeMs;
+    try {
+      const checkPath = path.join(stateDir, "checks", `last-${name}.log`);
+      checkOutput = await fs.readFile(checkPath, "utf8");
+      logMtimeMs = (await fs.stat(checkPath)).mtimeMs;
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const sections = parseStageSections(checkOutput);
+    const summary = parseTestReportSummary(checkOutput);
+    if (!summary?.hasCounts) continue;
+    if (name === "stageTests" && sections.length === 1) {
+      stageReportTotals.set(sections[0].name, summary.testsTotal);
+    } else if (name === "priorThroughTests" && summary.allTestsPassed &&
+        isContiguousStagePrefix(sections.map((section) => section.name))) {
+      priorReport = { stage: sections.at(-1)?.name, total: summary.testsTotal };
+    }
+    const check = [...holders].reverse().find((holder) => holder.name === name && holder.testStatus);
+    const original = check?.testStatus;
+    if (!original || sections.length !== original.stages?.length ||
+        sections.some((section, index) => section.name !== original.stages[index].name)) continue;
+    const recordedMs = Date.parse(original.recordedAt ?? "");
+    if (!Number.isFinite(recordedMs) || Math.abs(logMtimeMs - recordedMs) > 5000) continue;
+    const derived = deriveTestStatusFromReportOutput(checkOutput, { ...original, targetStage: null });
+    if (derived) replaceCopies(original, derived);
+  }
   const logPath = path.join(stateDir, "last-test.log");
   let output;
   try {
@@ -3353,37 +3403,38 @@ export async function augmentLatestTestStatusFromLog(events, filePath) {
   }
 
   const original = statusRecord.event.testStatus;
-  const derived = deriveTestStatusFromReportOutput(output, original);
+  const sections = parseStageSections(output);
+  const summary = parseTestReportSummary(output);
+  const finalStage = sections.at(-1)?.name;
+  const stageTotal = stageReportTotals.get(finalStage);
+  const matchingThroughCount = summary?.hasCounts && priorReport &&
+    sections.length > 1 && isContiguousStagePrefix(sections.map((section) => section.name)) &&
+    priorReport.stage === sections.at(-2)?.name &&
+    priorReport.total + stageTotal === summary.testsTotal;
+  const derived = deriveTestStatusFromReportOutput(output, original,
+    matchingThroughCount ? stageReportTotals : new Map());
   if (!derived) {
     return;
+  }
+  if (matchingThroughCount && derived.stages.slice(0, -1).every((stage) => stage.status === "pass")) {
+    const passed = summary.testsPassed - priorReport.total;
+    if (passed >= 0 && passed <= stageTotal) {
+      Object.assign(derived.stages.at(-1), {
+        passed,
+        passedUpperBound: passed,
+        unknown: 0,
+        failed: stageTotal - passed,
+      });
+    }
   }
   statusRecord.event.testStatus = {
     ...original,
     ...derived,
   };
-  // The turn-start baseline and required-status event can reference the same
-  // check. Keep those copies consistent when correcting historical count hints.
-  if (original.recordedAt) {
-    for (const record of events) {
-      const holders = [
-        record.event,
-        record.event?.phaseStatus,
-        ...(record.event?.phaseStatus?.checks ?? []),
-      ];
-      for (const holder of holders) {
-        const status = holder?.testStatus;
-        if (status?.recordedAt === original.recordedAt &&
-            status.command === original.command &&
-            status.targetStage === original.targetStage &&
-            status.targetSubset === original.targetSubset) {
-          holder.testStatus = { ...status, ...derived };
-        }
-      }
-    }
-  }
+  replaceCopies(original, derived);
 }
 
-export function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
+export function deriveTestStatusFromReportOutput(output, existingStatus = {}, stageReportTotals = new Map()) {
   const summary = parseTestReportSummary(output);
   if (!summary) {
     return null;
@@ -3428,7 +3479,8 @@ export function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
     const failureLines = extractStageFailureLines(stage.body);
     let failed = failureLines.length;
     const existingStage = existingStages.get(stage.name);
-    const existingTotal = finitePositiveNumber(existingStage?.total);
+    const reportedTotal = finitePositiveNumber(stageReportTotals.get(stage.name));
+    const existingTotal = reportedTotal ?? finitePositiveNumber(existingStage?.total);
     let status = allTestsPassed ? "pass" : failed > 0 ? "fail" : index < failingIndex ? "pass" : "unknown";
     let total = existingTotal ?? 0;
     let passed = inferDerivedStagePassed({
@@ -3455,6 +3507,7 @@ export function deriveTestStatusFromReportOutput(output, existingStatus = {}) {
       passed,
       passedUpperBound,
       unknown: Math.max(0, passedUpperBound - passed),
+      totalFromReport: Boolean(reportedTotal) || (stageSections.length === 1 && summary.hasCounts),
       total,
       failed,
       timeouts: failureLines.filter((line) => classifyFailureLine(line) === "timeout").length,

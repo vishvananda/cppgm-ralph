@@ -5096,6 +5096,7 @@ function anchorTestStatusTotals(status, anchors) {
   }
   let changed = false;
   const anchoredStages = stages.map((stage) => {
+    if (stage?.totalFromReport === true) return stage;
     const anchor = anchors.get(stage?.name);
     if (!anchor || anchor <= (stage?.total ?? 0)) {
       return stage;
@@ -5208,6 +5209,7 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
       passed: summary.testsPassed,
       passedUpperBound: summary.testsPassed,
       total: summary.testsTotal,
+      totalFromReport: true,
       failed: Math.max(0, summary.testsTotal - summary.testsPassed),
       unknown: 0,
     });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, utimes } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
@@ -204,4 +204,111 @@ test("partial stage evidence still uses a full-stage total when no counted repor
   assert.equal(anchored.testsPassed, 3);
   assert.equal(anchored.testsTotal, 219);
   assert.equal(anchored.stages[0].passedUpperBound, 197);
+});
+
+async function auditFixture(passed = 219, stageReportTotal = 219) {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "ralph-audit-total-"));
+  await mkdir(path.join(temp, "events"));
+  await mkdir(path.join(temp, "checks"));
+  const headers = "===== pa1 =====\n===== pa2 =====\n";
+  const output = passed === 219
+    ? headers + "===== ALL TESTS PASSED SUCCESSFULLY! (319 / 319) =====\n"
+    : headers + "pa2/tests/case.t: ERROR: output does not match\n" +
+      `===== TEST SUMMARY: ${100 + passed} / 319 TESTS PASSED =====\n`;
+  await writeFile(path.join(temp, "last-test.log"), output);
+  await writeFile(path.join(temp, "checks", "last-stageTests.log"),
+    `===== pa2 =====\n===== ALL TESTS PASSED SUCCESSFULLY! (${stageReportTotal} / ${stageReportTotal}) =====\n`);
+  await writeFile(path.join(temp, "checks", "last-priorThroughTests.log"),
+    "===== pa1 =====\n===== ALL TESTS PASSED SUCCESSFULLY! (100 / 100) =====\n");
+  for (const [name, time] of [
+    ["stageTests", "2026-10-02T13:47:28.837Z"],
+    ["priorThroughTests", "2026-10-02T13:47:16.348Z"],
+  ]) {
+    await utimes(path.join(temp, "checks", `last-${name}.log`), new Date(time), new Date(time));
+  }
+  const stage = { name: "pa2", status: "pass", passed: 425, passedUpperBound: 425,
+    total: 425, failed: 0 };
+  const stageStatus = { command: "make test-pa2", targetStage: "pa2", targetSubset: null,
+    recordedAt: "2026-10-02T13:47:28.837Z", exitCode: 0, allTestsPassed: true,
+    stageCount: 1, testsPassed: 425, testsTotal: 425, reportSummaryHasCounts: true,
+    stages: [stage] };
+  const priorStatus = { command: "make test-report-through-pa1", targetStage: "pa2",
+    targetSubset: null, recordedAt: "2026-10-02T13:47:16.348Z", exitCode: 0,
+    allTestsPassed: true, testsPassed: 150, testsTotal: 150, stageCount: 1,
+    stages: [{ name: "pa1", status: "pass", passed: 150, total: 150 }] };
+  const throughStatus = { command: "make test-report-through-pa2", targetStage: "pa2",
+    targetSubset: null, recordedAt: "2026-10-02T13:48:05.714Z", exitCode: passed === 219 ? 0 : 2,
+    allTestsPassed: passed === 219, reportSummaryHasCounts: true,
+    testsPassed: 100 + passed, testsTotal: 319, stageCount: 2,
+    stages: [{ name: "pa1", status: "pass", passed: 100, total: 100 }, stage] };
+  const records = [
+    { eventType: "ralph.phase-status", turnNumber: 217,
+      recordedAt: "2026-10-02T13:47:28.837Z", event: { action: "checked", phaseStatus: {
+        stage: "pa2", testStatus: structuredClone(stageStatus), checks: [
+          { name: "stageTests", testStatus: structuredClone(stageStatus) },
+          { name: "priorThroughTests", testStatus: structuredClone(priorStatus) },
+        ],
+      } } },
+    { eventType: "ralph.test-status", turnNumber: 217,
+      recordedAt: "2026-10-02T13:47:28.837Z", event: { testStatus: structuredClone(stageStatus) } },
+    { eventType: "ralph.phase-status", turnNumber: 218,
+      recordedAt: "2026-10-02T13:48:06.959Z", event: { action: "turn-start", phaseStatus: {
+        stage: "pa2", testStatus: structuredClone(throughStatus),
+        checks: [{ name: "tests", testStatus: structuredClone(throughStatus) }],
+      } } },
+    { eventType: "ralph.test-status", turnNumber: 218,
+      recordedAt: "2026-10-02T13:48:06.959Z", event: { testStatus: structuredClone(throughStatus) } },
+  ];
+  return { temp, records };
+}
+
+for (const passed of [219, 213]) {
+  test(`audit progress uses ${passed}/219 from consistent stage and through-report counts`, async () => {
+    const { temp, records } = await auditFixture(passed);
+    try {
+      await augmentLatestTestStatusFromLog(records, path.join(temp, "events", "run.jsonl"));
+      const latest = records.at(-1).event.testStatus;
+      assert.equal(latest.testsTotal, 319);
+      assert.equal(latest.stages.at(-1).total, 219);
+      assert.equal(latest.stages.at(-1).passed, passed);
+      assert.equal(latest.stages.at(-1).totalFromReport, true);
+      assert.equal(records[0].event.phaseStatus.testStatus.testsTotal, 219);
+      assert.equal(records[0].event.phaseStatus.checks[1].testStatus.testsTotal, 100);
+      const browser = await browserHelpers();
+      const progress = browser.buildAgentTestProgressState(records).latest;
+      assert.equal(progress.turn, 218);
+      assert.equal(progress.current.total, 219);
+      assert.equal(progress.current.passed, passed);
+      assert.equal(progress.start.total, 219);
+      assert.equal(progress.best.total, 219);
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  });
+}
+
+test("an inconsistent older stage report cannot override an audit's stage total", async () => {
+  const { temp, records } = await auditFixture(219, 220);
+  try {
+    await augmentLatestTestStatusFromLog(records, path.join(temp, "events", "run.jsonl"));
+    const latest = records.at(-1).event.testStatus;
+    assert.equal(latest.testsTotal, 319);
+    assert.equal(latest.stages.at(-1).total, 425);
+    assert.equal(latest.stages.at(-1).totalFromReport, false);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("a dedicated check log cannot replace a historical check from another time", async () => {
+  const { temp, records } = await auditFixture();
+  try {
+    const newer = new Date("2026-10-02T14:00:00.000Z");
+    await utimes(path.join(temp, "checks", "last-stageTests.log"), newer, newer);
+    await augmentLatestTestStatusFromLog(records, path.join(temp, "events", "run.jsonl"));
+    assert.equal(records[0].event.phaseStatus.testStatus.testsTotal, 425);
+    assert.equal(records[0].event.phaseStatus.checks[0].testStatus.testsTotal, 425);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 });
