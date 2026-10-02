@@ -24,6 +24,7 @@ import {
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../subagent-events.js";
 import { addUnrealSessionDisplayEvents } from "../unreal-session-events.js";
+import { codexCommandCompletionEvent } from "../codex-session-events.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -56,7 +57,7 @@ const RUN_USAGE_CACHE_VERSION = 28;
 const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 1;
-const CODEX_SESSION_WINDOW_CACHE_VERSION = 19;
+const CODEX_SESSION_WINDOW_CACHE_VERSION = 20;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 19;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
@@ -6145,6 +6146,7 @@ function keepSessionBoundaryEvents(group, keep) {
 
 function isAlwaysKeptSessionEvent(event) {
   return [
+    "codex.command.completed",
     "codex.task_complete",
     "ralph.agent-progress",
     "ralph.goal",
@@ -6300,6 +6302,10 @@ function convertCodexSessionRecord(record, context) {
 function convertCodexEventMessage(payload, context) {
   if (!payload || typeof payload !== "object") {
     return null;
+  }
+  const commandCompletion = codexCommandCompletionEvent(payload);
+  if (commandCompletion) {
+    return buildVizRecord(context, commandCompletion.type, commandCompletion);
   }
   // The same assistant text is also present as a response_item message, which
   // carries the shape the viewer already understands.

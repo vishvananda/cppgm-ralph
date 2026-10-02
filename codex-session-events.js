@@ -1,6 +1,29 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// Unified exec records process completion independently of write_stdin polls.
+// Keep this as status evidence, so it updates the original card without adding
+// a second command card for the same process.
+export function codexCommandCompletionEvent(payload) {
+  const item = payload?.item;
+  if (payload?.type !== "item_completed" || item?.type !== "CommandExecution" ||
+      item.process_id == null || item.process_id === "" || !Number.isFinite(item.exit_code)) {
+    return null;
+  }
+  return {
+    type: "codex.command.completed",
+    item: {
+      id: item.id,
+      type: "command_execution",
+      status: item.exit_code === 0 ? "completed" : "failed",
+      session_id: String(item.process_id),
+      exit_code: item.exit_code,
+      async_completed: true,
+      aggregated_output: item.aggregated_output ?? [item.stdout, item.stderr].filter(Boolean).join("\n"),
+    },
+  };
+}
+
 export function createCodexSessionTailer({
   codexDir,
   threadId,
@@ -238,6 +261,10 @@ export class CodexSessionConverter {
   convertEventMessage(payload) {
     if (!payload || typeof payload !== "object") {
       return null;
+    }
+    const commandCompletion = codexCommandCompletionEvent(payload);
+    if (commandCompletion) {
+      return commandCompletion;
     }
     if (payload.type === "token_count" && payload.info?.total_token_usage) {
       return {

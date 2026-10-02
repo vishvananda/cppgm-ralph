@@ -1691,6 +1691,9 @@ function buildDisplayEntries(records, options = {}) {
   const subagentEntries = new Map();
   const asyncEntriesByCell = new Map();
   const asyncEntriesByStoreKey = new Map();
+  const completedEntriesByCell = new Map();
+  const completedEntriesByStoreKey = new Map();
+  const pendingCommandCompletions = new Map();
   const todoEntries = new Map();
   // Gemini: accumulate content chunks by traceId into messages
   const contentByTrace = new Map();
@@ -1700,7 +1703,8 @@ function buildDisplayEntries(records, options = {}) {
     const item = entry.endRecord?.event?.item ?? {};
     const output = item.aggregated_output;
     const outputIds = asyncItemIds(item);
-    if (outputIds.length === 0 || isWaitCommandItem(entry.endRecord?.event?.item)) {
+    if (outputIds.length === 0 || Number.isFinite(item.exit_code) || item.async_completed === true ||
+        isWaitCommandItem(entry.endRecord?.event?.item)) {
       return;
     }
     entry.asyncCellId = outputIds.at(-1);
@@ -1713,16 +1717,29 @@ function buildDisplayEntries(records, options = {}) {
       entry.asyncStoreKey = storeKey;
       asyncEntriesByStoreKey.set(asyncRecordMapKey(entry.endRecord, storeKey), entry);
     }
+    for (const outputId of outputIds) {
+      const key = asyncRecordMapKey(entry.endRecord, outputId);
+      const completion = pendingCommandCompletions.get(key);
+      if (!completion) continue;
+      pendingCommandCompletions.delete(key);
+      const startedAt = entry.startRecord?.recordedAt ?? entry.endRecord?.recordedAt;
+      if (String(completion.recordedAt) >= String(startedAt)) {
+        continueAsyncEntry(entry, completion);
+        break;
+      }
+    }
   };
 
   const unregisterAsyncEntry = (entry) => {
     for (const [cellId, candidate] of asyncEntriesByCell.entries()) {
       if (candidate === entry) {
+        completedEntriesByCell.set(cellId, entry);
         asyncEntriesByCell.delete(cellId);
       }
     }
     for (const [storeKey, candidate] of asyncEntriesByStoreKey.entries()) {
       if (candidate === entry) {
+        completedEntriesByStoreKey.set(storeKey, entry);
         asyncEntriesByStoreKey.delete(storeKey);
       }
     }
@@ -1742,9 +1759,12 @@ function buildDisplayEntries(records, options = {}) {
       Number.isFinite(inferCommandOutputExitCode(parentCommand, output));
     const completed = hasExitCode || item.async_completed === true || asyncOutputCompleted(output);
     if (completed) {
-      parent.asyncCompletedRecord = record;
+      if (!parent.asyncCompletedRecord || record.eventType === "codex.command.completed") {
+        parent.asyncCompletedRecord = record;
+      }
       unregisterAsyncEntry(parent);
-    } else if (nextIds.length > 0 && (item.session_id != null || asyncOutputStillRunning(output))) {
+    } else if (!parent.asyncCompletedRecord && nextIds.length > 0 &&
+        (item.session_id != null || asyncOutputStillRunning(output))) {
       parent.asyncCellId = nextIds.at(-1);
       for (const nextId of nextIds) {
         asyncEntriesByCell.set(asyncRecordMapKey(record, nextId), parent);
@@ -1759,7 +1779,11 @@ function buildDisplayEntries(records, options = {}) {
       const candidateIds = [waitCommandCellId(item.command), ...asyncItemIds(item)]
         .filter((value, index, values) => value != null && values.indexOf(value) === index);
       const parent = candidateIds
-        .map((cellId) => asyncEntriesByCell.get(asyncRecordMapKey(batchEntry.endRecord, cellId)))
+        .map((cellId) => {
+          const key = asyncRecordMapKey(batchEntry.endRecord, cellId);
+          return asyncEntriesByCell.get(key) ??
+            (isWaitCommandItem(item) ? completedEntriesByCell.get(key) : null);
+        })
         .find(Boolean) ?? null;
       if (parent) {
         continueAsyncEntry(parent, batchEntry.endRecord);
@@ -1786,6 +1810,18 @@ function buildDisplayEntries(records, options = {}) {
 
   for (const record of records) {
     const item = record.event?.item;
+    if (record.eventType === "codex.command.completed") {
+      const key = asyncRecordMapKey(record, item?.session_id);
+      const parent = asyncEntriesByCell.get(key) ?? completedEntriesByCell.get(key);
+      if (parent) {
+        continueAsyncEntry(parent, record);
+      } else {
+        // Completion can be recorded before the tool result containing the
+        // session ID is delivered. Match it once that result arrives.
+        pendingCommandCompletions.set(key, record);
+      }
+      continue;
+    }
     if (
       item?.type === "subagent" &&
       (record.eventType === "item.started" ||
@@ -1831,10 +1867,12 @@ function buildDisplayEntries(records, options = {}) {
         entry.asyncWaitCellId = waitCellId;
       }
       entry.asyncParent = (waitCellId
-        ? asyncEntriesByCell.get(asyncRecordMapKey(record, waitCellId))
+        ? asyncEntriesByCell.get(asyncRecordMapKey(record, waitCellId)) ??
+          completedEntriesByCell.get(asyncRecordMapKey(record, waitCellId))
         : null) ??
         (sessionLoadKey
-          ? asyncEntriesByStoreKey.get(asyncRecordMapKey(record, sessionLoadKey))
+          ? asyncEntriesByStoreKey.get(asyncRecordMapKey(record, sessionLoadKey)) ??
+            completedEntriesByStoreKey.get(asyncRecordMapKey(record, sessionLoadKey))
           : null) ??
         null;
       if (!commandNoise || !hideNoise) {
@@ -1851,7 +1889,8 @@ function buildDisplayEntries(records, options = {}) {
         continue;
       }
       if (waitCellId) {
-        const parent = asyncEntriesByCell.get(asyncRecordMapKey(record, waitCellId)) ?? null;
+        const key = asyncRecordMapKey(record, waitCellId);
+        const parent = asyncEntriesByCell.get(key) ?? completedEntriesByCell.get(key) ?? null;
         if (parent) {
           continueAsyncEntry(parent, record);
           if (item.id) {
@@ -3843,7 +3882,8 @@ function filterRecords(records) {
   const search = eventFilter.value.trim().toLowerCase();
   let filtered = records;
   if (search) {
-    filtered = filtered.filter(r => (r.eventType ?? "").toLowerCase().includes(search));
+    filtered = filtered.filter(r => r.eventType === "codex.command.completed" ||
+      (r.eventType ?? "").toLowerCase().includes(search));
   }
   return filtered.filter(shouldShow);
 }
