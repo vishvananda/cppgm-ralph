@@ -10,16 +10,19 @@ const app = readFileSync(new URL("../ralph-viz/app.js", import.meta.url), "utf8"
 const names = ["comparisonCellHtml", "comparisonTotalForRows", "comparisonSummaryStarted",
   "comparisonChartTooltipHtml", "comparisonThroughOptions", "comparisonLayoutOptions",
   "defaultRunComparisonThrough", "highlightedComparisonRunIndex", "comparisonCumulativeSeries",
-  "comparisonAxisLabel", "comparisonEChartResponsiveLayout"];
+  "comparisonAxisLabel", "comparisonEChartResponsiveLayout", "comparisonRunOrder",
+  "comparisonRunColor", "comparisonRunKey", "comparisonRunVisible", "comparisonRunDefaultVisible"];
 const context = vm.createContext({
   ASSIGNMENT_LAYOUT: layout,
-  state: { comparisonLayout: "capabilities" },
+  state: { comparisonLayout: "capabilities", comparisonRunVisibility: new Map() },
+  cleanText: (value) => String(value ?? "").trim(),
   escapeHtml: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
   fmtInt: String,
   formatHhhMmSs: (value) => `${value}ms`,
   formatUsd: (value) => `$${value}`,
 });
+vm.runInContext(app.match(/const COMPARISON_CHART_PALETTE = \[[\s\S]*?\];/)[0], context);
 for (const name of names) {
   const start = app.indexOf(`function ${name}(`);
   assert.ok(start >= 0, name);
@@ -40,6 +43,29 @@ function fixture() {
     })),
   };
 }
+
+test("visible runs get colors first and reordered series retain the correct source values", () => {
+  const runs = Array.from({ length: 14 }, (_, index) => ({
+    label: `run ${index}`, comparisonComplete: index % 2 === 1,
+  }));
+  runs[10].highlighted = true;
+  context.state.comparisonRunVisibility.set(context.comparisonRunKey(runs[0], 0), true);
+  context.state.comparisonRunVisibility.set(context.comparisonRunKey(runs[1], 1), false);
+  try {
+    const order = Array.from(context.comparisonRunOrder(runs));
+    assert.deepEqual(order, [10, 0, 3, 5, 7, 9, 11, 13, 1, 2, 4, 6, 8, 12]);
+    const orderedRuns = order.map((index) => runs[index]);
+    const colors = orderedRuns.map((run, index) => context.comparisonRunColor(run, index));
+    assert.equal(new Set(colors).size, 14);
+    assert.equal(colors[0], "#ff9e64");
+    const rows = [{ runs: runs.map((_, index) => ({ cost: index + 1, status: "complete" })) }];
+    const series = context.comparisonCumulativeSeries(rows, order, orderedRuns, "cost");
+    assert.deepEqual(Array.from(series, (run) => run.points[0].value), order.map((index) => index + 1));
+    assert.equal(context.comparisonRunColor(runs[0], 20).startsWith("hsl("), true);
+  } finally {
+    context.state.comparisonRunVisibility.clear();
+  }
+});
 
 test("local through selector follows displayed milestones, not the original PA row index", () => {
   const comparison = fixture();

@@ -7687,7 +7687,11 @@ async function loadStaticComparison() {
 }
 
 function comparisonRunOrder(runs) {
-  return runs.map((_, index) => index);
+  // Give shown runs the most distinct colors before allocating any to hidden runs.
+  return runs.map((_, index) => index).sort((a, b) =>
+    Number(comparisonRunVisible(runs[b], b)) - Number(comparisonRunVisible(runs[a], a))
+    || Number(runs[b]?.highlighted === true) - Number(runs[a]?.highlighted === true)
+    || a - b);
 }
 
 function comparisonLayoutOptions(selected) {
@@ -7750,14 +7754,26 @@ function renderComparisonCharts(rows, runOrder, orderedRuns) {
 }
 
 const COMPARISON_CHART_PALETTE = [
+  "#ff9e64",
   "#7aa2f7",
   "#9ece6a",
   "#f7768e",
-  "#e0af68",
   "#bb9af7",
   "#73daca",
-  "#e5c07b",
+  "#f5df66",
   "#ff79c6",
+  "#4db6ac",
+  "#b8c7e0",
+  "#c5a16c",
+  "#c77dff",
+  "#54c3f1",
+  "#d5ed9a",
+  "#d47676",
+  "#a0a0ff",
+  "#f6bfce",
+  "#39e0b6",
+  "#e3b949",
+  "#8fae7a",
 ];
 
 function comparisonRunKey(run, index) {
@@ -7786,9 +7802,8 @@ function comparisonRunVisible(run, index) {
 }
 
 function comparisonRunColor(run, index) {
-  return run?.highlighted === true
-    ? "#ff9e64"
-    : COMPARISON_CHART_PALETTE[index % COMPARISON_CHART_PALETTE.length];
+  return COMPARISON_CHART_PALETTE[index]
+    ?? `hsl(${Math.round((index * 137.508) % 360)} 65% 68%)`;
 }
 
 function comparisonRunLegendHtml(orderedRuns) {
@@ -8516,10 +8531,11 @@ async function renderRunComparisonPanel(run, comparison, loadedAt) {
   }
   const rows = allRows.slice(0, through);
   const runOrder = comparisonRunOrder(runs);
-  const charts = renderComparisonCharts(rows, runOrder, runs);
+  const orderedRuns = runOrder.map((index) => runs[index]);
+  const charts = renderComparisonCharts(rows, runOrder, orderedRuns);
   disposeComparisonCharts(runComparisonEl);
   runComparisonEl.replaceChildren(charts);
-  hydrateComparisonCharts(charts, rows, runOrder, runs);
+  hydrateComparisonCharts(charts, rows, runOrder, orderedRuns);
   const publishedAt = comparison.publishedGeneratedAt ?? comparison.generatedAt;
   const localName = runs.find((candidate) => candidate.highlighted)?.label ?? run.label ?? run.id;
   runComparisonMeta.textContent = [
