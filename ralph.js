@@ -1895,6 +1895,7 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     index: match.index ?? 0,
   }));
   const firstFailureLine = findFirstFailureLine(normalizedOutput);
+  const reportSummary = parseReportSummary(normalizedOutput);
 
   let stages = stageHeaders.map((stage, index) => {
     const start = stage.index;
@@ -1903,11 +1904,27 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   });
   if (stages.length === 0 && options.targetStage) {
     const syntheticStage = parseStageStatus(options.targetStage, normalizedOutput, options);
+    const directStageCommand = TEST_PROGRESS_EVIDENCE.directStageTestCommand(options.command);
+    if (
+      syntheticStage.status === "unknown" &&
+      directStageCommand?.stage === options.targetStage &&
+      !directStageCommand.hasSubset &&
+      !normalizeTestSubset(options.targetSubset) &&
+      !/\b(?:GLOB|TEST)\s*=/.test(options.command ?? "") &&
+      options.exitCode === 0 &&
+      reportSummary?.allPassed &&
+      reportSummary.hasCounts &&
+      reportSummary.total > 0 &&
+      reportSummary.passed === reportSummary.total
+    ) {
+      // Quiet direct-stage checks may print only their counted success summary.
+      // Its command supplies the stage identity; cumulative reports do not.
+      setStageStatus(syntheticStage, "pass", reportSummary.passed, reportSummary.total);
+    }
     if (syntheticStage.status !== "unknown" || syntheticStage.targets.length > 0) {
       stages = [syntheticStage];
     }
   }
-  const reportSummary = parseReportSummary(normalizedOutput);
   applyReportSummaryToStages(stages, previousStatus, reportSummary, options);
   applyStageCountHintFloors(stages, options);
 
