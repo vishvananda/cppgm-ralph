@@ -18,8 +18,14 @@ export function describeStreamError(error) {
   }).join("; caused by ");
 }
 
-export function isTransientStreamError(error) {
+function isTransientServerError(error) {
   return errorChain(error).some((part) =>
+    part?.code === "server_error" ||
+    (Number.isInteger(part?.status) && part.status >= 500 && part.status < 600));
+}
+
+export function isTransientStreamError(error) {
+  return isTransientServerError(error) || errorChain(error).some((part) =>
     NETWORK_CODES.has(part?.code) ||
     /^terminated$/i.test(part?.message ?? "") ||
     (part?.name === "TypeError" && /^fetch failed$/i.test(part?.message ?? "")));
@@ -36,7 +42,7 @@ export async function* streamWithReconnect(agent, prompt, {
   pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   let nextPrompt = prompt;
-  let networkRetries = 0;
+  let transientRetries = 0;
   let tokenRetries = 0;
   while (true) {
     try {
@@ -55,14 +61,15 @@ export async function* streamWithReconnect(agent, prompt, {
           "Do not repeat completed tool actions unless validation requires it.";
         continue;
       }
-      if (!isTransientStreamError(error) || networkRetries >= maxRetries) throw error;
-      networkRetries += 1;
-      onRetry({ reason: "network", retry: networkRetries, maxRetries,
+      if (!isTransientStreamError(error) || transientRetries >= maxRetries) throw error;
+      transientRetries += 1;
+      onRetry({ reason: isTransientServerError(error) ? "server_error" : "network",
+        retry: transientRetries, maxRetries,
         error: describeStreamError(error) });
-      await pause(Math.min(1000 * 2 ** (networkRetries - 1), 5000));
+      await pause(Math.min(1000 * 2 ** (transientRetries - 1), 5000));
       // The same Agent keeps its completed tool calls and session history.
       // A fresh prompt starts only the model response lost with the stream.
-      nextPrompt = "The model stream disconnected during this Ralph turn. " +
+      nextPrompt = "The model request failed temporarily during this Ralph turn. " +
         "Continue the assigned work from the current repository and conversation state. " +
         "Do not repeat completed tool actions unless validation requires it.";
     }

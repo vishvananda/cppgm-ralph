@@ -26,6 +26,9 @@ export class StrandsAgentEventConverter {
           text: record.reason === "max_tokens"
             ? `Strands model response reached its output-token limit; ` +
               `continuing in the same session (${record.retry}/${record.maxRetries}).`
+            : record.reason === "server_error"
+            ? `Strands model service returned a temporary server error (${record.error}); ` +
+              `retrying in the same session (${record.retry}/${record.maxRetries}).`
             : `Strands model stream disconnected (${record.error}); ` +
               `retrying in the same session (${record.retry}/${record.maxRetries}).`,
           response_step: this.step,

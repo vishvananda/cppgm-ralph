@@ -91,3 +91,13 @@ test("Strands labels output-limit continuations without calling them disconnects
   assert.match(event.item.text, /output-token limit/);
   assert.doesNotMatch(event.item.text, /disconnected/);
 });
+
+test("Strands labels server-error retries with their cause and same-session continuation", () => {
+  const converter = new StrandsAgentEventConverter();
+  const [event] = converter.convert({ type: "driver.retry", reason: "server_error",
+    retry: 1, maxRetries: 2, error: "ModelError: request failed; caused by Error [server_error]" });
+  assert.match(event.item.text, /temporary server error/);
+  assert.match(event.item.text, /\[server_error\]/);
+  assert.match(event.item.text, /retrying in the same session \(1\/2\)/);
+  assert.doesNotMatch(event.item.text, /disconnected|output-token limit/);
+});
