@@ -1,0 +1,32 @@
+v4svelte scaffold validation — installed 2026-10-07
+
+Base: cppgm-assignments v4.4, 5a4e8c0e4103e9a629d42d0ed13226d056f4a4b9.
+Installed preparation commit: 642a35fd290480d8ee10237f9f9372f8d7036f82.
+Exactly one preparation commit on the assignment base; clean worktree.
+Compared with original preparation commit 433cb2cb, only spec.md differs.
+No inherited stage plans/audits or compiler implementation changes.
+
+Installed config is identical to the source except run identity/private paths.
+All ten installed templates match the scaffold, preserve template variables and
+native update_goal completion, and contain no prior-run failure details.
+Prompt/goal words: 3512 -> 3126 (-11.0%). Spec: 2834 -> 2869 (+1.2%).
+Shell/Node syntax and whitespace checks passed.
+Initial checkout file audit: pass for PA1, 16 files checked.
+
+Hardware counting and DWARF sampling verified in the installed Bubblewrap sandbox
+and 64 GiB/no-swap systemd scope: both simultaneous PMU events ran at 100%.
+3,182,976,653 instructions; 1,141,170,937 cycles; 44 profile samples.
+Artifacts: /home/vishvananda/work/private/v4svelte/artifacts/scaffold-verification.
+Harness checks: 27 passed, 0 failed, 0 skipped.
+Log: /tmp/v4svelte-harness-checks.log.
+
+Dedicated 100 GiB LVM/ext4 filesystem mounted under work/private/v4svelte;
+UUID 53c55404-ed6a-47d4-801b-c758fc8921f5 persisted in /etc/fstab.
+Private remote created and main pushed; local and remote commit hashes match.
+Remote: https://github.com/vishvananda/cppgm-run-v4svelte.
+Installed checkout: /home/vishvananda/work/v4svelte.
+Config/sidecars: /home/vishvananda/work/v4svelte.*.
+New run remains unstarted; no Ralph state exists.
+
+Stop-after-turn set for v4sol61. At final verification it was still executing
+checkpoint turn 41; the request will be consumed after handoff/checks.
