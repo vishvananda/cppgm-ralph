@@ -8,6 +8,10 @@ preparation commit: `642a35fd290480d8ee10237f9f9372f8d7036f82`; pushed to the
 private [cppgm-run-v4svelte](https://github.com/vishvananda/cppgm-run-v4svelte)
 repository. Sandbox counter/sampling verification passed at installation.
 
+The shared [supplemental backend controls](../backend-quality/README.md) include
+the PA33/PA34 instruction checker and all its fixtures for reference. They match
+the original native run's controls; the revised prompts/spec do not change them.
+
 The config uses native Codex `gpt-6.1-sol` at `high` reasoning effort, native
 phase goals, a fresh thread each turn, and the existing implementation/checkpoint/
 final-audit schedule. Checkpoints occur every third incomplete handoff. The PA34

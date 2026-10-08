@@ -233,6 +233,8 @@ The [V4.4 Sol 6.1 scaffold](examples/v4sol61/README.md) uses native Codex
 evidence. The [V4.4 Svelte scaffold](examples/v4svelte/README.md) uses the same
 setup with revised prompts for focused measurements and evidence reuse. Both
 include their prompt/goal templates and `spec.md`, with the same acceptance gates.
+Their shared [supplemental backend controls](examples/backend-quality/README.md)
+include the PA33/PA34 instruction gate, fixtures and qualification tools.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;

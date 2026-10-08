@@ -8,6 +8,10 @@ quality-control files. No compiler implementation
 or prior run state is carried over. These preparation files are committed so
 the new checkout starts clean.
 
+The shared [supplemental backend controls](../backend-quality/README.md) include
+the PA33/PA34 instruction checker and all its fixtures for reference. They are
+separate from the assignment's course tests.
+
 The checkout is [cppgm-run-v4sol61](https://github.com/vishvananda/cppgm-run-v4sol61),
 a private repository with `cppgm-assignments` retained as `upstream`.
 `/home/vishvananda/work/v4sol61` points to
