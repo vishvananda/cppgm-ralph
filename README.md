@@ -235,6 +235,9 @@ setup with revised prompts for focused measurements and evidence reuse. Both
 include their prompt/goal templates and `spec.md`, with the same acceptance gates.
 Their shared [supplemental backend controls](examples/backend-quality/README.md)
 include the PA33/PA34 instruction gate, fixtures and qualification tools.
+The [V5 Sol scaffold](examples/v5sol/README.md) uses the V5 assignments' own
+file audit and PA35 optimization gates, native goals, and scoped performance
+measurement with explicit evidence reuse.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;

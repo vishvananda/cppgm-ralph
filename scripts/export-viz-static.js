@@ -60,7 +60,7 @@ Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
   --run <spec>          Run to export; repeatable. Defaults to all published runs
   --runs <a,b,c>        Comma-separated run specs
-  --through <paN|N>     Last PA for comparison data (default: pa39)
+  --through <paN|N>     Last canonical PA for comparison data (default: pa39; pa40 includes V5 PA35)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
   --claude-dir <dir>    Claude projects dir (default: ~/.claude/projects)
@@ -698,7 +698,8 @@ function annotateComparison(comparison, runMetas) {
     run.label = `${run.ordinal}-${baseLabel}`;
   }
   comparison.assignmentLayouts = ASSIGNMENT_LAYOUT.layouts;
-  comparison.displayLayout = "v3";
+  comparison.displayLayout = comparison.runs.some((run) =>
+    ASSIGNMENT_LAYOUT.normalizeLayoutId(run.layout) === "v5") ? "v5" : "v3";
   const throughNumber = paNumber(comparison.through);
   const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(
     comparison,

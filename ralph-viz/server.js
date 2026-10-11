@@ -7686,7 +7686,7 @@ async function readRunComparison(rawId, runRef, force = false) {
   const read = (async () => {
     try {
       const published = await readPublishedComparison(force);
-      const through = published?.through ?? "pa39";
+      const through = published?.through ?? "pa40";
       const [local, stat, configured] = await Promise.all([
         buildLocalRunComparison(rawId, through),
         fs.stat(runRef.filePath),

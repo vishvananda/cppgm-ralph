@@ -4,6 +4,48 @@ import "../ralph-viz/assignment-layouts.js";
 
 const layout = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 
+test("V5 preserves the V4 sequence and gives optimization a distinct landmark", () => {
+  assert.equal(layout.inferLayoutId("v5sol-gpt-6.1-sol-high"), "v5");
+  assert.equal(layout.inferLayoutId("custom", "v5"), "v5");
+  assert.equal(layout.descriptor("v5").stageCount, 35);
+  for (let stage = 1; stage <= 34; stage += 1) {
+    assert.equal(layout.canonicalPaNumber("v5", stage), layout.canonicalPaNumber("v4", stage));
+  }
+  assert.equal(layout.canonicalPaNumber("v5", 35), 40);
+  assert.equal(layout.nativePaNumber("v5", 40), 35);
+  assert.equal(layout.canonicalPaNumber("v5", 36), null);
+  for (const older of ["v2", "v3", "v4"]) {
+    assert.equal(layout.nativePaNumber(older, 40), null);
+    assert.equal(layout.sourcePaForTarget(older, "v5", 35), null);
+  }
+});
+
+test("mixed V4/V5 views retain PA35 spending without assigning it to older runs", () => {
+  const comparison = {
+    runs: [{ layout: { id: "v4" } }, { layout: { id: "v5" } }],
+    through: "pa40",
+    rows: Array.from({ length: 35 }, (_, i) => ({
+      pa: `pa${i + 1}`,
+      runs: [i < 34 ? { cost: 1, durationMs: 10, status: "complete" } : null,
+        { cost: 2, durationMs: 20, status: "complete" }],
+    })),
+  };
+  const native = layout.remapComparisonRows(comparison, "v5");
+  assert.equal(native.length, 35);
+  assert.equal(native.at(-1).runs[0], null);
+  assert.equal(native.at(-1).runs[1].cost, 2);
+  for (const view of ["capabilities", "v2", "v3", "v4", "v5"]) {
+    const rows = layout.comparisonRows(comparison, view);
+    assert.equal(rows.reduce((sum, row) => sum + row.runs[0].cost, 0), 34);
+    assert.equal(rows.reduce((sum, row) => sum + row.runs[1].cost, 0), 70);
+    assert.equal(rows.at(-1).runs[0].status, "not required");
+    assert.equal(rows.at(-1).runs[1].sources[0].pa, "pa35");
+    assert.equal(rows.at(-1).runs[1].sources[0].title, "Compiler optimization");
+  }
+  assert.equal(layout.comparisonRows({ ...comparison, through: "pa39" }, "v5")
+    .some((row) => row.canonicalStages.includes(40)), false);
+});
+
 test("V2 and V3 assignment numbers map through the shared semantic order", () => {
   assert.equal(layout.sourcePaForTarget("v2", "v3", 14), 30);
   assert.equal(layout.sourcePaForTarget("v2", "v3", 15), 14);

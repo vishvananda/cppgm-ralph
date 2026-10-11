@@ -7696,7 +7696,7 @@ function comparisonRunOrder(runs) {
 
 function comparisonLayoutOptions(selected) {
   return [["capabilities", "Grouped capabilities"], ["v2", "V2 PA order"],
-    ["v3", "V3 PA order"], ["v4", "V4 PA order"]]
+    ["v3", "V3 PA order"], ["v4", "V4 PA order"], ["v5", "V5 PA order"]]
     .map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("");
 }
 

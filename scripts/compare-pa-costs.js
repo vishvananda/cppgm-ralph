@@ -1557,7 +1557,7 @@ function buildComparison(options, summaries) {
     })),
     rows,
     assignmentLayouts: ASSIGNMENT_LAYOUT.layouts,
-    displayLayout: "v3",
+    displayLayout: summaries.some((run) => run.layout === "v5") ? "v5" : "v3",
   };
   const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(
     comparison,

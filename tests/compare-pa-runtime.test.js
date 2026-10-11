@@ -9,6 +9,47 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const SCRIPT = path.resolve("scripts/compare-pa-costs.js");
 
+test("V5 comparison totals include PA35 in the default native display", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ralph-v5-comparison-"));
+  const workDir = path.join(directory, "work");
+  const ralphDir = path.join(workDir, ".ralph");
+  const codexDir = path.join(directory, "codex");
+  const claudeDir = path.join(directory, "claude");
+  const eventsDir = path.join(ralphDir, "v5sol-gpt-6.1-sol-high", "events");
+  for (const dir of [eventsDir, codexDir, claudeDir]) await mkdir(dir, { recursive: true });
+  const record = (recordedAt, eventType, event) => ({
+    recordedAt, threadId: "v5-thread", turnNumber: 1, eventType,
+    event: { type: eventType, ...event },
+  });
+  const events = [
+    record("2026-10-11T00:00:00Z", "ralph.phase-status", {
+      action: "turn-start", phaseStatus: { stage: "pa35", phase: "implement", allRequiredPassed: false },
+    }),
+    record("2026-10-11T00:00:00Z", "ralph.prompt", { prompt: "Implement pa35" }),
+    record("2026-10-11T00:10:00Z", "turn.completed", {
+      usage: { input_tokens: 1000, cached_input_tokens: 500, output_tokens: 100, total_tokens: 1100 },
+    }),
+  ];
+  try {
+    await writeFile(path.join(workDir, "v5sol.config.json"), JSON.stringify({ assignmentLayout: "v5" }));
+    await writeFile(path.join(eventsDir, "run.jsonl"), events.map(event => JSON.stringify(event)).join("\n") + "\n");
+    const { stdout } = await execFileAsync(process.execPath, [
+      SCRIPT, "--format", "json", "--through", "pa40", "--work-dir", workDir,
+      "--ralph-dir", ralphDir, "--codex-dir", codexDir, "--claude-dir", claudeDir, "v5sol-gpt-6.1-sol-high",
+    ]);
+    const comparison = JSON.parse(stdout);
+    const stage = comparison.rows.find(row => row.pa === "pa35").runs[0];
+    assert.equal(comparison.runs[0].layout.id, "v5");
+    assert.equal(comparison.displayLayout, "v5");
+    assert.equal(stage.durationMs, 600000);
+    assert(stage.cost > 0);
+    assert.equal(comparison.runs[0].total.cost, stage.cost);
+    assert.equal(comparison.runs[0].total.activeDurationMs, stage.activeDurationMs);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("PA comparison includes subagent time and mixed-model cost", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ralph-runtime-test-"));
   const codexDir = path.join(directory, "codex", "sessions");

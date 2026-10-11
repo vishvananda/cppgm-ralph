@@ -1,0 +1,40 @@
+v5sol scaffold validation — 2026-10-11 UTC
+
+Assignment base: tag v5, 4fc4f61d8897f09293a2ef9202fd49373c602a29.
+Preparation commit: 48297b3daafd026d6b79555c37863c61257d47d2; exactly one commit, adds only spec.md.
+No inherited compiler implementation, plans, audits or Ralph state.
+Architecture source: cppgm-extended/spec.md at 72181d97.
+Spec words: 4153.
+Existing ten template roles: 3126 -> 1751 words.
+All sixteen V5 prompt/goal sidecars, including six PA35 sidecars: 2879 words.
+
+Native Codex gpt-6.1-sol/high, fresh thread and phase goal enabled.
+Installed CLI: codex-cli 0.162.1; generated experimental protocol includes
+thread goal set/get/update notifications. No model turn launched.
+Installed config/spec and all 16 templates match the examples exactly.
+Ralph normalizers accept the config, phase/template maps and applicable check
+DAGs at PA1/PA33/PA34/PA35. All 35 stages discovered in the checkout;
+PA34/PA35 explicitly enabled. PA35 implementation/checkpoint use read-only
+progress rungs; full 17-gate test is required by final audit.
+Fresh PA35 rung reader: 0/1427, all unmeasured, as expected before implementation.
+Course file audit remains byte-identical to the V5 base:
+SHA256 74ddc8f54119630b499323fd62fcdada04d86befeaf4874f642e738409b6358b.
+Initial audit passed over dev: 19 files checked.
+
+Hardware grouping and DWARF sampling passed in Bubblewrap and a 64 GiB
+systemd scope with no swap. CPU 24: 899163640 instructions, 348808763 cycles,
+100% running for both events; profile has 13 samples. Debug-symbol network
+fetches disabled in the setup probe. Verification artifacts live under
+work/private/v5sol/artifacts/scaffold-verification.
+Dedicated 100 GiB LVM/ext4 volume mounted at work/private/v5sol and persisted
+by UUID in /etc/fstab; scratch/cache/artifacts share this bounded volume.
+
+55 targeted harness/reporting tests passed, zero failed/skipped. Includes
+V5/older layout mappings, PA35 cost preservation, archive export compatibility,
+stage summaries, checkpoint progress and sparse phase scheduling.
+Shell/Node syntax, whitespace, installed-content and clean-checkout checks pass.
+Logs: /tmp/v5sol-scaffold-20261011/.
+
+Private remote: https://github.com/vishvananda/cppgm-run-v5sol.
+main pushed; local and remote preparation hashes match.
+Run remains clean and unstarted. v5rust remains unscaffolded pending discussion.
