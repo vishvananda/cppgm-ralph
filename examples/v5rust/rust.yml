@@ -1,0 +1,27 @@
+name: Rust quality
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CLIPPY_CONF_DIR: ${{ github.workspace }}/dev
+      CARGO_BUILD_WARNINGS: deny
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - name: Format, Clippy, and tests
+        run: |
+          cargo fmt --manifest-path dev/Cargo.toml --all -- --check
+          cargo clippy --manifest-path dev/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --manifest-path dev/Cargo.toml --workspace --locked
+          cargo test --manifest-path dev/Cargo.toml --workspace --release --locked
+      - name: Rust file audit and harness unit tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          "$RUNNER_TEMP/audit/bin/python" scripts/clone/rust_audit.py --root .
+          "$RUNNER_TEMP/audit/bin/python" -m unittest discover -s scripts/clone -p 'test_*.py'

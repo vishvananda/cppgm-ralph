@@ -1,0 +1,200 @@
+{
+  "baseDir": "/home/vishvananda/work",
+  "workdir": "/home/vishvananda/work/v5rust",
+  "useExistingWorkdir": true,
+  "name": "v5rust",
+  "assignmentLayout": "v5",
+  "provider": "codex",
+  "testCommand": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage paX",
+  "checks": {
+    "preflight": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py preflight {{testStage}}",
+      "required": true
+    },
+    "priorThroughTests": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py prior {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "stageTests": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
+      "required": false,
+      "primary": true,
+      "kind": "test",
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "rustQuality": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_quality.py",
+      "required": true,
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "casePreservation": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py preserve {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ]
+    },
+    "stageProgress": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests",
+        "casePreservation",
+        "rustQuality"
+      ]
+    },
+    "stageProgressPreserved": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}} mode=preserve",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests",
+        "casePreservation",
+        "rustQuality"
+      ]
+    },
+    "stageComplete": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
+      "required": true,
+      "primary": true,
+      "kind": "test",
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "courseSuite": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py course {{testStage}}",
+      "required": true,
+      "excludeStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "stageComplete"
+      ]
+    },
+    "releaseChecks": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py release {{testStage}}",
+      "required": true,
+      "onlyStages": [
+        "pa33"
+      ],
+      "dependsOn": [
+        "stageComplete"
+      ]
+    },
+    "bootstrapProof": {
+      "command": "python3 /home/vishvananda/work/v5rust-control/clone_bootstrap.py --final",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "stageComplete"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "promptTemplates": {
+        "pa34": "pa34-implement"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-implement-goal"
+      },
+      "checkpointOnRequiredChecks": true,
+      "checkpointPhase": "checkpointAudit",
+      "checkpointPhaseEvery": 3,
+      "checks": [
+        "preflight",
+        "priorThroughTests",
+        "stageTests",
+        "rustQuality",
+        "casePreservation",
+        "stageProgress"
+      ]
+    },
+    {
+      "name": "checkpointAudit",
+      "promptTemplate": "checkpointAudit",
+      "goalTemplate": "checkpointAudit-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "preflight",
+        "priorThroughTests",
+        "stageTests",
+        "rustQuality",
+        "casePreservation",
+        "stageProgressPreserved"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "promptTemplates": {
+        "pa34": "pa34-audit"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-audit-goal"
+      },
+      "runWhenChecksPass": true,
+      "checks": [
+        "preflight",
+        "priorThroughTests",
+        "stageComplete",
+        "rustQuality",
+        "casePreservation",
+        "courseSuite",
+        "releaseChecks",
+        "bootstrapProof"
+      ]
+    }
+  ],
+  "extraStages": [
+    "pa34"
+  ],
+  "initialStage": "pa1",
+  "stopAfterStage": "pa34",
+  "maxTurns": 500,
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "high",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true,
+    "privateWriteDir": "/home/vishvananda/work/private/v5rust",
+    "privateWriteMaxBytes": 107374182400
+  },
+  "additionalDirectories": [],
+  "outputTailChars": 24000,
+  "codexPath": "/home/vishvananda/work/v5rust-control/codex-v5rust",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run",
+  "resourceLimits": {
+    "enabled": true,
+    "backend": "systemd-run",
+    "memoryMax": "64G",
+    "memorySwapMax": "0",
+    "oomGroup": false,
+    "cleanupTimeoutSec": 2
+  }
+}
