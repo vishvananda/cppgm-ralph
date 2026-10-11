@@ -45,6 +45,16 @@ batch transport and compare actual Rust invocations against the oracle, using
 identical input/output paths. They never supply oracle output to the candidate.
 Production `dev/` executables run only Rust.
 
+The 2026-10-11 harness correction recognizes standalone `preproc`, `lowir` and
+`abimangle` statistics and excludes numeric `arena_bytes`/`name_arena_bytes`
+from exact comparison, as required by the existing storage-measurement rule.
+PA4's audit exposed an allocator-only mismatch despite identical generated
+tokens and deterministic counters. Raw measurements remain in receipts;
+diagnostics, field names, work counters and output artifacts remain exact.
+For an existing run, install the corrected comparator, tests and contract in
+the protected control bundle and checkout, update only their protected hashes,
+and record the revision and revalidation evidence before restarting its audit.
+
 The private filesystem is mounted `nosuid,nodev`, owned by the runner with mode
 0700. Bubblewrap exposes the host read-only and binds only private run storage
 and provider state writable. The C++ reference, control bundle and Ralph state

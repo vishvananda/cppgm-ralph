@@ -55,7 +55,8 @@ def append_receipt(record):
 
 
 def is_stats_line(line):
-    return line.startswith((b"lowir2native_stats ", b"lowiropt_stats ")) or (
+    return line.startswith((b"lowir2native_stats ", b"lowiropt_stats ",
+                            b"preproc stats ", b"lowir stats: ", b"abimangle stats: ")) or (
         line.startswith(b"cppgm++ ") and (b" stats " in line or b" stats:" in line))
 
 
@@ -64,7 +65,7 @@ def comparable_stderr(data):
     rows = []
     for line in data.splitlines(keepends=True):
         if is_stats_line(line):
-            line = re.sub(rb"\b([a-z_]+_ms|peak_rss_kb|(?:syntax|semantic|pp|lowir)_arena_bytes|peak_run_bytes)=([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)(?=\s|$)",
+            line = re.sub(rb"\b([a-z_]+_ms|peak_rss_kb|(?:(?:syntax|semantic|pp|lowir|name)_)?arena_bytes|peak_run_bytes)=([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)(?=\s|$)",
                           rb"\1=<measurement>", line)
         rows.append(line)
     return b"".join(rows)

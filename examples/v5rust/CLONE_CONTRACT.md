@@ -59,6 +59,11 @@ recognized statistics lines are excluded from byte comparison. Field names,
 deterministic counters, normal diagnostics and all generated artifacts remain
 strict. Raw statistics remain in invocation evidence.
 
+Recognized formats include `preproc stats`, `lowir stats:`, `abimangle stats:`,
+`cppgm++` statistics, `lowiropt_stats` and `lowir2native_stats`. Arena storage
+includes bare `arena_bytes` and `name_arena_bytes` as well as the driver phase
+fields. This exception never applies to ordinary diagnostic lines.
+
 All course checks must exit successfully and report no failed comparison
 counts or `.test_failed` markers; there are no expected-failure exceptions.
 PA33's parameter-address control accepts both standalone loads

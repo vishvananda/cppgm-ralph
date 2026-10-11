@@ -76,6 +76,39 @@ class ComparisonTests(unittest.TestCase):
             self.assertFalse(result["match"])
             self.assertEqual(result["differences"], ["stderr"])
 
+    def test_standalone_stats_exclude_storage_but_preserve_work_and_names(self):
+        for prefix, storage in [(b"preproc stats primary.cpp: ", b"arena_bytes"),
+                                (b"lowir stats: ", b"name_arena_bytes"),
+                                (b"abimangle stats: ", b"arena_bytes")]:
+            with self.subTest(prefix=prefix):
+                left = prefix + b"source_bytes=223 " + storage + b"=16384 parse_ms=0.1 peak_rss_kb=100\n"
+                right = prefix + b"source_bytes=223 " + storage + b"=0 parse_ms=0.9 peak_rss_kb=200\n"
+                normalized = clone_adapter.comparable_stderr(left)
+                self.assertEqual(normalized, clone_adapter.comparable_stderr(right))
+                for before, after in [(b"source_bytes=223", b"source_bytes=224"),
+                                      (storage, b"other_storage"), (prefix, b"ERROR ")]:
+                    self.assertNotEqual(normalized, clone_adapter.comparable_stderr(right.replace(before, after)))
+
+    def test_storage_measurements_in_diagnostics_remain_exact(self):
+        for line in [b"ERROR arena_bytes=16384\n", b"preproc error: arena_bytes=16384\n",
+                     b"unknown stats: arena_bytes=16384\n"]:
+            self.assertEqual(clone_adapter.comparable_stderr(line), line)
+
+    def test_preproc_stats_receipt_retains_raw_storage_when_comparison_passes(self):
+        expected = b"preproc stats primary.cpp: source_tokens=24 arena_bytes=16384\n"
+        actual = b"preproc stats primary.cpp: source_tokens=24 arena_bytes=0\n"
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}):
+                with patch.object(clone_adapter, "run", side_effect=[(0, b"tokens", expected), (0, b"tokens", actual)]):
+                    result = clone_adapter.compare_invocation("preproc", [], b"", {})
+            receipt = json.loads(trace.read_text())
+            self.assertTrue(receipt["match"])
+            self.assertEqual(receipt["differences"], [])
+            self.assertEqual(receipt["statistics"], {
+                "oracle": [expected.decode().strip()], "candidate": [actual.decode().strip()]})
+            self.assertEqual(result[2], actual)
+
     def test_unimplemented_does_not_match_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
