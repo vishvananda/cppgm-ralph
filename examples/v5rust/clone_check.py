@@ -13,7 +13,7 @@ import sys
 import tomllib
 
 from clone_common import (ARTIFACTS, CONTROL, REFERENCE, ROOT, SETTINGS, TOOLS,
-                          candidate_path, clean_env, digest, file_digest, run, write_json)
+                          candidate_path, clean_env, digest, file_digest, run, run_course, write_json)
 
 ACTIVE_STAGE = 1
 
@@ -87,6 +87,9 @@ def execute_case(stage, case, self_check=False):
     shutil.rmtree(directory / "mismatches", ignore_errors=True)
     env = clean_env()
     env["V5RUST_TRACE"] = str(trace)
+    # Focused compare workers otherwise may print FAIL yet return zero when
+    # KEEP_GOING is explicitly set. Cases are already independent parallel jobs.
+    env["KEEP_GOING"] = "0"
     if self_check:
         env["V5RUST_ORACLE_SELF_CHECK"] = "1"
     extra = []
@@ -175,11 +178,10 @@ def course(stage, target="test"):
     shutil.rmtree(directory / "mismatches", ignore_errors=True)
     env = clean_env()
     env["V5RUST_TRACE"] = str(trace)
-    code, out, err = run(["make", "--no-print-directory", "-s", "-C", stage,
-                          target, *routes(stage)], env=env, timeout=3600)
-    (directory / "course.log").write_bytes(out + err)
+    course_passed = run_course(["make", "--no-print-directory", "-s", target, *routes(stage)],
+                               cwd=ROOT / stage, artifacts=directory, env=env)
     records = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-    passed = code == 0 and bool(records) and all(record["match"] for record in records)
+    passed = course_passed and bool(records) and all(record["match"] for record in records)
     print(f"{stage} {target}: {'PASS' if passed else 'FAIL'}; {directory}")
     return passed
 

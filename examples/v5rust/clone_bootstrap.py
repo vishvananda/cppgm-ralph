@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """PA34: replay the original Makefile at identical paths for every generation."""
-from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
 import sys
 
-from clone_common import ARTIFACTS, REFERENCE, ROOT, TOOLS, candidate_path, file_digest, run, write_json
+from clone_common import (ARTIFACTS, CONTROL, REFERENCE, ROOT, TOOLS, candidate_path,
+                          file_digest, run, run_course, write_json)
 
 BASE = ROOT / "obj/bootstrap"
 WORK = BASE / "work"
@@ -102,7 +102,42 @@ def progress():
     return complete
 
 
+def rebuilt_bindings(stage):
+    primary = {1: "pptoken", 2: "posttoken", 3: "ppexpr", 4: "preproc", 8: "lowir",
+               9: "abimangle", 24: "lowir2native", 32: "lowiropt", 33: "lowir2native"}.get(stage, "cppgm++")
+    binary = lambda tool: str(BINS / (tool + "-self"))
+    return ["CPPGM_SKIP_DEV_REBUILD=1", "TEST_DEPS=", "CPPGM_TEST_RUNNER=1",
+            "CXX=/usr/bin/g++", "CPPGM_HOST_CXX=/usr/bin/g++",
+            "CPPGM_TEST_APP=" + binary(primary), "CPPGM_DRIVER_APP=" + binary("cppgm++"),
+            "LOWIROPT_APP=" + binary("lowiropt"), "LOWIR2NATIVE_APP=" + binary("lowir2native"),
+            "NATIVE_REFERENCE_APP=" + binary("lowir2native"),
+            "CPPGM_LOWIR_BEHAVIOR_APP=" + binary("lowir2native"),
+            "CPPGM_CPPGM_APP=" + binary("cppgm++"),
+            "CPPGM_LOWIROPT_APP=" + binary("lowiropt"),
+            "CPPGM_LOWIR2NATIVE_APP=" + binary("lowir2native")]
+
+
+def rebuilt_suites():
+    # Run every course/debug lane with rebuilt helpers as well as its primary
+    # tool. Honor keep-going markers instead of trusting make's final status.
+    for stage, target in [(n, "test") for n in range(1, 34)] + [
+            (n, "test-debuginfo") for n in (8, 32, 33)]:
+        passed = run_course(["make", "--no-print-directory", "-s", target,
+                             *rebuilt_bindings(stage)], cwd=WORK / f"pa{stage}",
+                            artifacts=ARTIFACTS / "bootstrap-rebuilt" / f"pa{stage}" / target)
+        if not passed:
+            return False
+    return True
+
+
 def final():
+    # PA34 fixes can regress Rust debug behavior or the ownership census after
+    # PA33 was accepted. Re-run those release requirements on the final R.
+    code, out, err = run([sys.executable, str(CONTROL / "clone_check.py"), "release", "pa34"],
+                         timeout=14400)
+    (ARTIFACTS / "bootstrap-rust-release.log").write_bytes(out + err)
+    if code:
+        return False
     # A release proof rebuilds C1 too; cached objects cannot establish it.
     prepare()
     first = generation("C1", REFERENCE / "dev/cppgm++")
@@ -115,15 +150,9 @@ def final():
     third = generation("C3", SAVED / "CR/bin/cppgm++-self")
     if not compare(first, third):
         return False
-    # Exercise the actual rebuilt C++ tools using PA34's owning recipes. These
-    # targets do not rebuild; BINS currently contains the C3 generation.
-    for number in range(1, 34):
-        code, out, err = run(recipe(SAVED / "CR/bin/cppgm++-self",
-                                   f"test-pa{number}-nobuild"), timeout=3600)
-        (ARTIFACTS / f"bootstrap-rebuilt-pa{number}.log").write_bytes(out + err)
-        if code:
-            return False
-    print("C1 == C2 == CR == C3: all objects, all nine tools, rebuilt PA1-PA33")
+    if not rebuilt_suites():
+        return False
+    print("C1 == C2 == CR == C3: all objects, all nine tools, rebuilt PA1-PA33/debug")
     return True
 
 

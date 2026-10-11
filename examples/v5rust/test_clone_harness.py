@@ -10,6 +10,7 @@ from unittest.mock import patch
 import clone_adapter
 import clone_bootstrap
 import clone_check
+import clone_common
 import rust_audit
 
 
@@ -119,6 +120,7 @@ class ComparisonTests(unittest.TestCase):
     def test_matching_compiler_bytes_do_not_excuse_course_checker_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             def check_stub(*_args, **kwargs):
+                self.assertEqual(kwargs["env"]["KEEP_GOING"], "0")
                 trace = Path(kwargs["env"]["V5RUST_TRACE"])
                 trace.write_text((json.dumps({"match": True}) + "\n") * 4)
                 return 2, b"", b"native O2 lost a post-call direct field load\n"
@@ -128,6 +130,52 @@ class ComparisonTests(unittest.TestCase):
                         "pa33", "tests/regression/controls/459-parameter-address-folding.t")
             self.assertFalse(result["passed"])
             self.assertEqual(result["course_exit"], 2)
+
+    def test_course_honors_failure_markers_and_counts_even_with_exit_zero(self):
+        for code, marker, counts, expected in [
+            (0, False, "2 2\n3 3\n", True), (0, True, "2 2\n", False),
+            (0, False, "1 2\n", False), (0, False, "invalid\n", False),
+            (1, False, "2 2\n", False),
+        ]:
+            with self.subTest(code=code, marker=marker, counts=counts), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                # A stale failure must not poison a later successful run.
+                (root / ".test_failed").touch()
+                def course_stub(*_args, **kwargs):
+                    self.assertFalse((root / ".test_failed").exists())
+                    if marker:
+                        (root / ".test_failed").touch()
+                    Path(kwargs["env"]["CPPGM_TEST_COUNTS_FILE"]).write_text(counts)
+                    return code, b"course output\n", b""
+                with patch.object(clone_common, "run", side_effect=course_stub):
+                    self.assertEqual(clone_common.run_course(
+                        ["make", "test"], cwd=root, artifacts=root / "evidence"), expected)
+
+    def test_rebuilt_suites_include_debug_and_bind_all_helpers_to_rebuilt_tools(self):
+        with patch.object(clone_bootstrap, "run_course", return_value=True) as check:
+            self.assertTrue(clone_bootstrap.rebuilt_suites())
+        self.assertEqual(check.call_count, 36)
+        debug_stages = []
+        for call in check.call_args_list:
+            command = call.args[0]
+            if "test-debuginfo" in command:
+                debug_stages.append(call.kwargs["cwd"].name)
+            for variable, tool in [("CPPGM_CPPGM_APP", "cppgm++"),
+                                   ("CPPGM_LOWIROPT_APP", "lowiropt"),
+                                   ("CPPGM_LOWIR2NATIVE_APP", "lowir2native")]:
+                self.assertIn(variable + "=" + str(clone_bootstrap.BINS / (tool + "-self")), command)
+        self.assertEqual(debug_stages, ["pa8", "pa32", "pa33"])
+        with patch.object(clone_bootstrap, "run_course", side_effect=[True] * 33 + [False]):
+            self.assertFalse(clone_bootstrap.rebuilt_suites())
+
+    def test_final_bootstrap_requires_current_rust_release_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(clone_bootstrap, "ARTIFACTS", Path(directory)):
+                with patch.object(clone_bootstrap, "run", return_value=(1, b"", b"debug regression")) as check:
+                    with patch.object(clone_bootstrap, "generation") as generation:
+                        self.assertFalse(clone_bootstrap.final())
+                        generation.assert_not_called()
+            self.assertEqual(check.call_args.args[0][-2:], ["release", "pa34"])
 
 
 if __name__ == "__main__":

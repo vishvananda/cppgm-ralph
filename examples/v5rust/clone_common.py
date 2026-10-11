@@ -49,6 +49,26 @@ def run(command, *, cwd=ROOT, env=None, stdin=b"", timeout=120):
         return 124, out, err + b"\nclone harness: timeout\n"
 
 
+def run_course(command, *, cwd, artifacts, env=None):
+    """Honor the course's keep-going failure markers and per-lane counts."""
+    artifacts.mkdir(parents=True, exist_ok=True)
+    counts = artifacts / "counts.txt"
+    counts.unlink(missing_ok=True)
+    marker = cwd / ".test_failed"
+    marker.unlink(missing_ok=True)
+    environment = dict(clean_env() if env is None else env)
+    environment["CPPGM_TEST_COUNTS_FILE"] = str(counts)
+    code, out, err = run(command, cwd=cwd, env=environment, timeout=3600)
+    (artifacts / "course.log").write_bytes(out + err)
+    totals = [line.split() for line in counts.read_text().splitlines()] if counts.exists() else []
+    counts_passed = all(len(row) == 2 and all(value.isdecimal() for value in row)
+                        and int(row[0]) == int(row[1]) for row in totals)
+    passed = code == 0 and not marker.exists() and counts_passed
+    write_json(artifacts / "course-result.json", {
+        "exit": code, "failure_marker": marker.exists(), "counts": totals, "passed": passed})
+    return passed
+
+
 def candidate_path(tool):
     return ROOT / "obj/rust/release" / ("cppgm" if tool == "cppgm++" else tool)
 

@@ -59,8 +59,9 @@ recognized statistics lines are excluded from byte comparison. Field names,
 deterministic counters, normal diagnostics and all generated artifacts remain
 strict. Raw statistics remain in invocation evidence.
 
-All course checks must exit successfully; there are no expected-failure
-exceptions. PA33's parameter-address control accepts both standalone loads
+All course checks must exit successfully and report no failed comparison
+counts or `.test_failed` markers; there are no expected-failure exceptions.
+PA33's parameter-address control accepts both standalone loads
 and loads folded into add memory operands. Its O2/O3 and driver invocations
 must all match the oracle bytes. See `docs/port/baseline.md`.
 
@@ -125,6 +126,10 @@ compiler flavor, and use the same embedded `INCEPTION_OBJ_ROOT_BASE` while
 isolating stored generations. Do not substitute an oracle object after a
 candidate compilation fails. Do not strip metadata or change optimization
 policies to make equality easier. Preserve `-O3` and the original source list.
+
+The final gate repeats Rust debug suites and the ownership census, then runs
+PA1-PA33 and PA8/PA32/PA33 debug suites with the rebuilt C++ tools. Both primary
+tools and helper compiler/optimizer/backend invocations use that generation.
 
 PA35's GCC instruction budgets and seed/self optimization targets are outside
 this clone's objective. Reuse correctness workloads and record Rust throughput
