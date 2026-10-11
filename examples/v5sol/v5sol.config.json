@@ -150,8 +150,7 @@
       ],
       "dependsOn": [
         "pa35PriorThrough33",
-        "pa35Smoke",
-        "pa35Progress"
+        "pa35Smoke"
       ]
     },
     "pa35ProgressPreserved": {
@@ -162,8 +161,7 @@
       ],
       "dependsOn": [
         "pa35PriorThrough33",
-        "pa35Smoke",
-        "pa35Progress"
+        "pa35Smoke"
       ]
     },
     "pa35Inception": {

@@ -5381,6 +5381,8 @@ function buildAgentTestProgressState(records) {
   const commandStartsById = new Map();
 
   for (const record of records) {
+    // A stage whose primary check is not a built-in make target is tracked through it.
+    TEST_COMMAND_PROVENANCE.registerPhaseStatus(record);
     seedAgentTestProgressTracker(tracker, record);
     const seededObservation =
       deriveCachedAgentTestProgress(record) ??

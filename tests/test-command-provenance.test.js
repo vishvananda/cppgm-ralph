@@ -121,3 +121,65 @@ test("direct PA test summary is exact, while a selected check stays a subset", (
   assert.equal(subset.hasSubset, true);
   assert.equal(subset.total, 2);
 });
+
+const ladderOutput = (passed, total) =>
+  "make: Entering directory '/work/run/pa35'\nperl scripts/progress.pl\n===== pa35 =====\n" +
+  "workload-compiles: PASS (1/1)\n    value 1, limit == 1\n" +
+  `compile-O0-time: FAIL (${passed - 1}/${total - 1})\n    value 1.69, limit <= 0.80; next rung 1.6541\n\n` +
+  `===== TEST SUMMARY: ${passed} / ${total} TESTS PASSED =====\n` +
+  "make: *** [Makefile:32: test-progress] Error 1\nmake: Leaving directory '/work/run/pa35'\n";
+
+const phaseStatusRecord = (stage, checks, turnNumber = 3) => ({
+  recordedAt: "2026-10-10T08:06:15.000Z", threadId: "t", turnNumber, eventType: "ralph.phase-status",
+  event: { type: "ralph.phase-status", action: "turn-start", phaseStatus: { phase: "implement", stage, checks } },
+});
+
+test("a configured primary check that is not a built-in make target tracks its stage", () => {
+  assert.equal(directCommand("make -C pa36 test-progress"), null);
+  const { registerPhaseStatus } = globalThis.RALPH_TEST_COMMAND_PROVENANCE;
+  registerPhaseStatus(phaseStatusRecord("pa36", [
+    { name: "pa36Smoke", kind: "generic", required: true, command: "make -C pa36 test-smoke", targetStage: "pa36" },
+    { name: "pa36Progress", kind: "test", primary: true, command: "make -C pa36 test-progress", targetStage: "pa36" },
+  ]));
+  const info = directCommand("make -C pa36 test-progress");
+  assert.equal(info.stage, "pa36");
+  assert.equal(info.kind, "single");
+  assert.equal(info.hasSubset, false);
+  assert.equal(directCommand("cd /work/run && make -C /work/run/pa36/ test-progress").stage, "pa36");
+  assert.equal(directCommand("make --directory=pa36 test-progress").stage, "pa36");
+  assert.equal(directCommand("make -C pa36 test-smoke"), null);
+  assert.equal(directCommand("make -C pa36 test-progress SEEDS=5"), null);
+  // The stage's built-in suite reports another total (its gates, not their rungs) and stops counting.
+  assert.equal(directCommand("make -C pa36 test"), null);
+  assert.equal(directCommand("make -C pa14 test").stage, "pa14");
+  const tracker = createTracker();
+  tracker.sources("make -C pa36 test-progress > /tmp/progress.log 2>&1", "t3");
+  assert.equal(tracker.sources("tail -5 /tmp/progress.log", "t3")[0].info.stage, "pa36");
+  // A later phase whose primary is the built-in suite restores it.
+  registerPhaseStatus(phaseStatusRecord("pa36", [
+    { name: "pa36Final", kind: "test", primary: true, command: "make -C pa36 test", targetStage: "pa36" },
+  ]));
+  assert.equal(directCommand("make -C pa36 test").stage, "pa36");
+  assert.equal(directCommand("make -C pa36 test-progress"), null);
+});
+
+test("run events learn the primary check and record its ladder summary as stage progress", () => {
+  const command = (id, at, cmd, output) => ({
+    recordedAt: at, threadId: "t", turnNumber: 3, eventType: "item.completed",
+    event: { item: { id, type: "command_execution", command: cmd, aggregated_output: output } },
+  });
+  const progress = progressEventsFromRunEvents([
+    phaseStatusRecord("pa35", [
+      { name: "pa35Progress", kind: "test", primary: true, required: false, command: "make -C pa35 test-progress", targetStage: "pa35" },
+    ]),
+    command("c1", "2026-10-10T14:14:49.000Z", "perl pa35/scripts/speed.pl --rounds 1 && make -C pa35 test-progress",
+      "speed: O0 1.69\n" + ladderOutput(102, 1418)),
+    command("c2", "2026-10-10T14:19:00.000Z", "make -C pa35 test-speed", "===== TEST SUMMARY: 2 / 4 TESTS PASSED =====\n"),
+    command("c3", "2026-10-10T14:30:00.000Z", "make -C pa35 test",
+      "pa35 gates: FAIL (12/17)\n===== TEST SUMMARY: 12 / 17 TESTS PASSED =====\nmake: Leaving directory '/work/run/pa35'\n"),
+  ]);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].event.progress.stage, "pa35");
+  assert.equal(progress[0].event.progress.passed, 102);
+  assert.equal(progress[0].event.progress.total, 1418);
+});

@@ -792,6 +792,11 @@ export function progressEventsFromRunEvents(events) {
   const commandsBySessionStoreKey = new Map();
   const commandStartsById = new Map();
   for (const record of events) {
+    if (record?.eventType === "ralph.phase-status") {
+      // A stage whose primary check is not a built-in make target is tracked through it.
+      TEST_COMMAND_PROVENANCE.registerPhaseStatus(record);
+      continue;
+    }
     const item = record?.event?.item;
     if (item?.type !== "command_execution") {
       continue;

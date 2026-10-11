@@ -45,13 +45,80 @@
     return segments;
   }
 
-  function invocation(tokens) {
+  // A run may configure a stage's primary check as a make target the built-in forms below do not
+  // know: PA35's `make -C pa35 test-progress`, whose summary counts the rungs of its gate ladders.
+  // Ralph records each phase's checks in its phase-status events. registerPhaseStatus keeps each
+  // stage's latest primary test check that is not a built-in form, and an exact invocation of it
+  // counts as a run of that stage's suite. While a stage has such a primary, its built-in forms do
+  // not count: `make -C pa35 test` reports a different total (PA35's 17 gates), and two totals for
+  // one stage would mix scales. The key gives `-C` and `--directory=` only their last path
+  // component, so `-C pa35/` and an absolute path match.
+  const configuredPrimaries = new Map();
+
+  function makeWords(tokens) {
     const words = [];
     for (let i = 0; i < tokens.length; i++) {
       if (/^(?:[012]|&)?(?:>>|>|<)$/.test(tokens[i])) { i++; continue; }
       if (/^\d?>&[012-]$/.test(tokens[i])) continue;
       words.push(tokens[i]);
     }
+    return words;
+  }
+
+  function makeInvocationKey(words) {
+    const parts = [];
+    for (let i = 0; i < words.length; i++) {
+      if (words[i] === "-C" && i + 1 < words.length) {
+        parts.push("-C", words[++i].replace(/\/+$/, "").split("/").at(-1));
+      } else if (words[i].startsWith("--directory=")) {
+        parts.push("-C", words[i].slice(12).replace(/\/+$/, "").split("/").at(-1));
+      } else {
+        parts.push(words[i]);
+      }
+    }
+    return parts.join("\0");
+  }
+
+  function registerStageCommand(command, stage) {
+    if (!/^pa\d+$/.test(stage ?? "")) return false;
+    const segments = shellSegments(command);
+    if (segments.length !== 1) return false;
+    const words = makeWords(segments[0].tokens);
+    let at = 0;
+    while (/^[A-Za-z_]\w*=/.test(words[at] ?? "")) at++;
+    if (words[at]?.split("/").at(-1) !== "make") return false;
+    if (builtinInvocation(words, at)) {
+      configuredPrimaries.delete(stage);
+      return false;
+    }
+    configuredPrimaries.set(stage, makeInvocationKey(["make", ...words.slice(at + 1)]));
+    return true;
+  }
+
+  function registerPhaseStatus(record) {
+    const phaseStatus = record?.eventType === "ralph.phase-status"
+      ? record.event?.phaseStatus
+      : record?.phaseStatus ?? record;
+    for (const check of phaseStatus?.checks ?? []) {
+      if (check?.primary && check.kind === "test" && check.command) {
+        registerStageCommand(check.command, check.targetStage ?? phaseStatus.stage);
+      }
+    }
+  }
+
+  function configuredInvocation(words, at) {
+    const key = makeInvocationKey(["make", ...words.slice(at + 1)]);
+    for (const [stage, primary] of configuredPrimaries) {
+      if (primary !== key) continue;
+      const command = words.slice(at).join(" ");
+      return { kind: "single", stages: [stage], stage, stageNumber: Number(stage.slice(2)),
+        target: command.replace(/^make /, ""), command, hasSubset: false, failFast: false };
+    }
+    return null;
+  }
+
+  function invocation(tokens) {
+    const words = makeWords(tokens);
     let at = 0;
     while (/^[A-Za-z_]\w*=/.test(words[at] ?? "")) at++;
     if (words[at] === "env") {
@@ -67,6 +134,12 @@
       at++;
     }
     if (words[at]?.split("/").at(-1) !== "make") return null;
+    const builtin = builtinInvocation(words, at);
+    if (builtin) return configuredPrimaries.has(builtin.stage) ? null : builtin;
+    return configuredInvocation(words, at);
+  }
+
+  function builtinInvocation(words, at) {
     const args = words.slice(at + 1);
     const through = args.find(v => /^test-report-through-pa\d+$/.test(v));
     const singles = args.filter(v => /^test-(?:report-)?pa\d+$/.test(v));
@@ -179,5 +252,7 @@
     const sources = createTracker().sources(command);
     return sources.length === 1 ? sources[0].info : null;
   }
-  root.RALPH_TEST_COMMAND_PROVENANCE = { shellSegments, createTracker, outputEvidence, directCommand };
+  root.RALPH_TEST_COMMAND_PROVENANCE = {
+    shellSegments, createTracker, outputEvidence, directCommand, registerStageCommand, registerPhaseStatus,
+  };
 })(typeof globalThis !== "undefined" ? globalThis : window);
