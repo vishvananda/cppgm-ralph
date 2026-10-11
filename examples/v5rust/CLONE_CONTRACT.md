@@ -1,7 +1,7 @@
 # Exact clone contract
 
 Implement all nine C++ compiler tools in idiomatic safe Rust. The oracle is
-cppgm-extended commit `72181d97e2a8b90af16229a328fc8e72bfe71f4b`, available at
+cppgm-extended commit `905bd7e4412a2d77d88694fe6abc7f3e1c27bce1`, available at
 `/home/vishvananda/work/references/v5rust-cpp`. Read its implementation freely;
 translate its behavior, including ordering and diagnostic details. Preserve
 NOTICE and inherited attribution. The candidate is not a student exercise
@@ -59,13 +59,10 @@ recognized statistics lines are excluded from byte comparison. Field names,
 deterministic counters, normal diagnostics and all generated artifacts remain
 strict. Raw statistics remain in invocation evidence.
 
-One inherited focused structural assertion is already inconsistent with the
-pinned oracle: PA33 `459-parameter-address-folding.t` reports `native O2 lost
-a post-call direct field load`. Its frozen baseline records that exact course
-exit, message and four invocations. The Rust clone must reproduce all four
-invocations and their bytes. The fixture is retained; no code-generation
-change is demanded to satisfy this stale structural assertion. The ordinary
-full C++ strict report passes 6,634 tests. See `docs/port/baseline.md`.
+All course checks must exit successfully; there are no expected-failure
+exceptions. PA33's parameter-address control accepts both standalone loads
+and loads folded into add memory operands. Its O2/O3 and driver invocations
+must all match the oracle bytes. See `docs/port/baseline.md`.
 
 Earlier completed stages stay green. An implementation checkpoint must reduce
 failures in the fixed manifest and retain previously passing cases. Added

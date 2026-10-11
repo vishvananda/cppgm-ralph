@@ -116,6 +116,19 @@ class ComparisonTests(unittest.TestCase):
         self.assertFalse(clone_bootstrap.compare(original, {**original, "objects": {"a.o": "x", "extra.o": "z"}}))
         self.assertFalse(clone_bootstrap.compare(original, {**original, "binaries": {"cppgm++": "different"}}))
 
+    def test_matching_compiler_bytes_do_not_excuse_course_checker_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def check_stub(*_args, **kwargs):
+                trace = Path(kwargs["env"]["V5RUST_TRACE"])
+                trace.write_text((json.dumps({"match": True}) + "\n") * 4)
+                return 2, b"", b"native O2 lost a post-call direct field load\n"
+            with patch.object(clone_check, "ARTIFACTS", Path(directory)):
+                with patch.object(clone_check, "run", side_effect=check_stub):
+                    result = clone_check.execute_case(
+                        "pa33", "tests/regression/controls/459-parameter-address-folding.t")
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["course_exit"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

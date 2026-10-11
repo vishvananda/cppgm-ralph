@@ -13,7 +13,7 @@ PRIVATE = BASE / "private/v5rust"
 ROOT = PRIVATE / "checkout"
 REFERENCE = BASE / "references/v5rust-cpp"
 CONTROL = BASE / "v5rust-control"
-REVISION = "72181d97e2a8b90af16229a328fc8e72bfe71f4b"
+REVISION = "905bd7e4412a2d77d88694fe6abc7f3e1c27bce1"
 TOOLS = ("pptoken", "posttoken", "ppexpr", "preproc", "cppgm++", "abimangle", "lowir", "lowiropt", "lowir2native")
 MODULES = ("lex", "preprocess", "syntax", "sema", "types", "abi", "lower", "lowir", "opt", "native", "driver", "support")
 
@@ -133,7 +133,7 @@ return status 86 until implemented.
 
 Read [CLONE_CONTRACT.md](CLONE_CONTRACT.md), [AGENTS.md](AGENTS.md),
 [the conversion plan](docs/rust-clone-plan.md) and [ROADMAP.md](ROADMAP.md).
-The C++ oracle is pinned to commit 72181d97e2a8b90af16229a328fc8e72bfe71f4b.
+The C++ oracle is pinned to commit 905bd7e4412a2d77d88694fe6abc7f3e1c27bce1.
 The original handouts, tests, regressions, architecture specification and
 attribution are retained. See [NOTICE](NOTICE).
 
@@ -297,10 +297,6 @@ def freeze(tracked):
               "source_responsibilities": [name for name in tracked if name.startswith("dev/") and name.endswith((".cpp", ".h"))],
               "oracle_tools": {tool: sha(REFERENCE / "dev" / tool) for tool in TOOLS},
               "oracle_sources": {name: sha(REFERENCE / name) for name in tracked if name.startswith("dev/")}}
-    frozen["known_course_failures"] = {
-        "pa33/tests/regression/controls/459-parameter-address-folding.t": {
-            "exit": 2, "message": "native O2 lost a post-call direct field load", "invocations": 4,
-            "reason": "The unchanged pinned C++ compiler fails this focused structural assertion. Every invocation and emitted byte still must match the oracle; changing code generation is forbidden."}}
     json_file(CONTROL / "manifest.json", frozen)
     json_file(ROOT / "scripts/clone/manifest.json", frozen)
 

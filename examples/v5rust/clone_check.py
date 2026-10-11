@@ -108,13 +108,7 @@ def execute_case(stage, case, self_check=False):
     code, out, err = run(command, cwd=cwd, env=env, timeout=240)
     (directory / "course.log").write_bytes(out + err)
     records = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-    known_failure = manifest().get("known_course_failures", {}).get(stage + "/" + case)
-    course_passed = code == 0
-    if known_failure:
-        course_passed = (code == known_failure["exit"] and
-                         known_failure["message"].encode() in out + err and
-                         len(records) == known_failure["invocations"])
-    passed = course_passed and bool(records) and all(record["match"] for record in records)
+    passed = code == 0 and bool(records) and all(record["match"] for record in records)
     return {"case": case, "passed": passed, "course_exit": code,
             "invocations": len(records), "log": str(directory / "course.log"),
             "trace": str(trace)}
