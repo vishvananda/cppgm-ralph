@@ -1,0 +1,5 @@
+#!/bin/sh
+export CARGO_HOME='/home/vishvananda/work/private/v5scratch/cache/cargo'
+export CARGO_TARGET_DIR='/home/vishvananda/work/private/v5scratch/checkout/obj/rust'
+export CLIPPY_CONF_DIR='/home/vishvananda/work/private/v5scratch/checkout/dev'
+exec node /home/vishvananda/.local/lib/node_modules/@openai/codex/bin/codex.js "$@"

@@ -1,0 +1,41 @@
+Scaffold validation: 2026-10-12 UTC on wnx0008099
+
+Assignment input: cppgm-assignments tag v5
+Peeled revision: 4fc4f61d8897f09293a2ef9202fd49373c602a29
+Student base was checked before adaptation. Published snapshot starts fresh
+history; local verified student-only Git metadata is retained in
+/home/vishvananda/work/private/v5scratch/artifacts/student-source.git.
+No prior compiler implementation, plans, audits or Ralph state inherited.
+
+Native Codex: 0.162.1, gpt-6.1-sol/high, native goals enabled.
+Experimental app-server JSON schema contains ThreadGoalSet definitions.
+Runner config/phase normalization accepts all three phases and six sidecars.
+Fresh threads; every-third partial checkpoint; stopAfterStage=pa33; no extras.
+
+Rust 1.98.0/edition 2024 workspace: nine release ELF tools built with Cargo.
+Rustfmt, strict Clippy, Cargo unit/doc test commands: PASS (empty scaffold).
+Rust source audit: 22 files, zero findings.
+Sandbox launcher regressions: 2 tests PASS.
+Course PA1 stage and through reports: 0/58, nonzero exits as expected.
+Original PA1-PA33 fixtures, scripts, references and comparison rules unchanged.
+C++ build plumbing replaced by Cargo; ordinary course workers, no clone adapter.
+Reference binary bundle downloaded and verified by the unchanged course script.
+
+Dedicated 100 GiB LV: vg0/cppgm_v5scratch; ext4 nosuid,nodev, mode 0700.
+Bubblewrap + systemd user scope: 64 GiB memory, no swap.
+Host home/mount trees hidden; only required toolchains, protected runtime,
+separate provider profile and current storage/state overlays restored.
+Reads of cppgm-extended, reference-source tree, other runs and their backing
+private volumes fail; runtime and copied authentication remain read-only in
+checks. Masked parent home is read-only; provider mounts stay writable during
+worker execution. Repository-local Git identity survives the restricted view.
+The direct Ralph quality command passes without ambient Cargo settings.
+Authentication values are never included in this artifact/repository.
+
+Grouped perf instructions:u/cycles:u: 100% event running.
+Probe: 899035496 instructions, 586515457 cycles.
+DWARF cycle sampling and offline perf report: PASS; DEBUGINFOD_URLS disabled.
+Full logs/schema/initial reports and hardware observations:
+/home/vishvananda/work/private/v5scratch/artifacts/scaffold-verification/
+
+No model turn or Ralph state was created. Run remains unstarted.

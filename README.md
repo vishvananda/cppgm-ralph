@@ -238,6 +238,9 @@ include the PA33/PA34 instruction gate, fixtures and qualification tools.
 The [V5 Sol scaffold](examples/v5sol/README.md) uses the V5 assignments' own
 file audit and PA35 optimization gates, native goals, and scoped performance
 measurement with explicit evidence reuse.
+The [V5 scratch Rust scaffold](examples/v5scratch/README.md) starts from student
+assignments with an empty safe Rust workspace, course reference binaries and
+student grading. It hides completed solution checkouts and stops after PA33.
 
 Scroll debug logging is off by default. Open the viewer with
 `?scrollDebug=1` to log scroll diagnostics to `.ralph/viz-scroll-debug.jsonl`;

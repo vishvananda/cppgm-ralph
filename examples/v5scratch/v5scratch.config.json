@@ -1,0 +1,129 @@
+{
+  "baseDir": "/home/vishvananda/work",
+  "workdir": "/home/vishvananda/work/v5scratch",
+  "useExistingWorkdir": true,
+  "name": "v5scratch",
+  "assignmentLayout": "v5",
+  "provider": "codex",
+  "testCommand": "make test-report-through-paX",
+  "checks": {
+    "tests": {
+      "command": "make test-report-through-{{testStage}}",
+      "primary": true,
+      "required": true,
+      "kind": "test"
+    },
+    "priorThroughTests": {
+      "command": "n={{stageNumber}}; if [ \"$n\" -le 1 ]; then echo '===== ALL TESTS PASSED SUCCESSFULLY! (0/0) ====='; else make test-report-through-pa$((n - 1)); fi",
+      "required": true,
+      "kind": "test"
+    },
+    "stageTests": {
+      "command": "make test-{{testStage}}",
+      "primary": true,
+      "required": false,
+      "kind": "test"
+    },
+    "stageProgress": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ]
+    },
+    "stageProgressPreserved": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}} mode=preserve",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ]
+    },
+    "fileAudit": {
+      "command": "/home/vishvananda/work/v5scratch-control/venv/bin/python /home/vishvananda/work/v5scratch-control/rust_audit.py --root .",
+      "required": true
+    },
+    "rustQuality": {
+      "command": "python3 /home/vishvananda/work/v5scratch-control/student_quality.py",
+      "required": true
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "checkpointOnRequiredChecks": true,
+      "checkpointPhase": "checkpointAudit",
+      "checkpointPhaseEvery": 3,
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "rustQuality",
+        "stageProgress"
+      ]
+    },
+    {
+      "name": "checkpointAudit",
+      "promptTemplate": "checkpointAudit",
+      "goalTemplate": "checkpointAudit-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "rustQuality",
+        "stageProgressPreserved"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "runWhenChecksPass": true,
+      "checks": [
+        "fileAudit",
+        "rustQuality",
+        "tests"
+      ]
+    }
+  ],
+  "extraStages": [],
+  "maxTurns": 500,
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "high",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true,
+    "privateWriteDir": "/home/vishvananda/work/private/v5scratch",
+    "privateWriteMaxBytes": 107374182400,
+    "bwrapPath": "/home/vishvananda/work/v5scratch-control/sandbox.py"
+  },
+  "additionalDirectories": [],
+  "outputTailChars": 20000,
+  "codexPath": "/home/vishvananda/work/v5scratch-control/codex-v5scratch",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run",
+  "initialStage": "pa1",
+  "resourceLimits": {
+    "enabled": true,
+    "backend": "systemd-run",
+    "memoryMax": "64G",
+    "memorySwapMax": "0",
+    "oomGroup": false,
+    "cleanupTimeoutSec": 2
+  },
+  "stopAfterStage": "pa33",
+  "codexHome": "/home/vishvananda/work/v5scratch-provider"
+}
