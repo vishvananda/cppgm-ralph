@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import sys
 import uuid
 
@@ -71,6 +72,78 @@ def comparable_stderr(data):
     return b"".join(rows)
 
 
+def invocation_differences(expected, actual, expected_files, actual_files):
+    differences = []
+    for label, wanted, got in zip(("exit", "stdout", "stderr"), expected, actual):
+        if label == "stderr":
+            wanted, got = comparable_stderr(wanted), comparable_stderr(got)
+        if wanted != got:
+            differences.append(label)
+    for label, result in (("abnormal-or-incomplete", actual), ("oracle-infrastructure", expected)):
+        if result[0] < 0 or result[0] in (70, 86, 124, 125, 101):
+            differences.append(label)
+    differences.extend(name for name in expected_files if expected_files[name] != actual_files[name])
+    return differences
+
+
+def stack_exhausted(tool, result):
+    if tool != "cppgm++" or result[0] != 1 or result[1]:
+        return False
+    diagnostic = b"\n".join(line for line in result[2].splitlines() if not is_stats_line(line))
+    return re.fullmatch(rb"ERROR: [^\n]+:[0-9]+:[0-9]+: constructs nested too deeply", diagnostic) is not None
+
+
+def qualify_stack(tool, arguments, data, env, timeout, executable, initial, outputs, before, keep):
+    """Prove exact successful behavior, rather than normalize a guard failure."""
+    exhausted = [stack_exhausted(tool, result) for result in initial]
+    if not any(exhausted) or any(not guard and result[0] != 0 for guard, result in zip(exhausted, initial)):
+        return None
+    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    maximum = min(64 << 20, hard) if hard != resource.RLIM_INFINITY else 64 << 20
+    proof = {"passed": False, "initial_stack_bytes": soft, "attempts": []}
+    evidence = Path(os.environ["V5RUST_TRACE"]).parent / "stack-qualifications" / uuid.uuid4().hex
+    evidence.mkdir(parents=True)
+    proof["evidence"] = str(evidence)
+    for label, result in zip(("oracle", "candidate"), initial):
+        (evidence / (label + ".initial.stdout")).write_bytes(result[1])
+        (evidence / (label + ".initial.stderr")).write_bytes(result[2])
+    limit = max(16 << 20, soft * 2) if soft != resource.RLIM_INFINITY else maximum + 1
+    try:
+        while limit <= maximum:
+            results, files = [], []
+            attempt_dir = evidence / str(limit)
+            attempt_dir.mkdir()
+            for label, binary in (("oracle", REFERENCE / "dev" / tool), ("candidate", executable)):
+                restore(before)
+                result = run([str(binary), *arguments], cwd=Path.cwd(), env=env,
+                             stdin=data, timeout=timeout, stack_limit_bytes=limit)
+                contents = snapshot(outputs)
+                results.append(result)
+                files.append(contents)
+                (attempt_dir / (label + ".stdout")).write_bytes(result[1])
+                (attempt_dir / (label + ".stderr")).write_bytes(result[2])
+                for index, value in enumerate(contents.values()):
+                    if value is not None:
+                        (attempt_dir / f"output-{index}.{label}").write_bytes(value)
+            differences = invocation_differences(*results, *files)
+            proof["attempts"].append({"stack_bytes": limit, "exits": [r[0] for r in results],
+                                      "differences": differences, "output_order": list(files[0]),
+                                      "outputs": [{name: digest(value) if value is not None else None
+                                                   for name, value in contents.items()} for contents in files]})
+            if all(r[0] == 0 for r in results):
+                proof["passed"] = not differences
+                break
+            if not any(stack_exhausted(tool, r) for r in results) or any(
+                    r[0] != 0 and not stack_exhausted(tool, r) for r in results):
+                break
+            limit *= 2
+    finally:
+        # Course callers still receive the candidate's original result/files;
+        # qualification never substitutes oracle output or waives their checks.
+        restore(keep)
+    return proof
+
+
 def compare_invocation(tool, arguments, data, extra_env):
     env = dict(os.environ)
     env.update(extra_env)
@@ -88,19 +161,12 @@ def compare_invocation(tool, arguments, data, extra_env):
     actual = run([str(executable), *arguments], cwd=Path.cwd(), env=env,
                  stdin=data, timeout=timeout)
     actual_files = snapshot(outputs)
-    differences = []
-    for label, wanted, got in zip(("exit", "stdout", "stderr"), expected, actual):
-        if label == "stderr":
-            wanted, got = comparable_stderr(wanted), comparable_stderr(got)
-        if wanted != got:
-            differences.append(label)
-    if actual[0] < 0 or actual[0] in (70, 86, 124, 125, 101):
-        differences.append("abnormal-or-incomplete")
-    if expected[0] < 0 or expected[0] in (70, 86, 124, 125, 101):
-        differences.append("oracle-infrastructure")
-    for name in expected_files:
-        if expected_files[name] != actual_files[name]:
-            differences.append(name)
+    differences = invocation_differences(expected, actual, expected_files, actual_files)
+    initial_differences = list(differences)
+    qualification = qualify_stack(tool, arguments, data, env, timeout, executable,
+                                  (expected, actual), outputs, before, actual_files)
+    if qualification is not None:
+        differences = [] if qualification["passed"] else [*differences, "stack-qualification-failed"]
     record = {"tool": tool, "arguments": arguments, "candidate": str(executable),
               "exit": actual[0], "oracle_exit": expected[0],
               "match": not differences, "differences": differences,
@@ -112,6 +178,9 @@ def compare_invocation(tool, arguments, data, extra_env):
     record["statistics"] = {
         "oracle": [line.decode(errors="replace") for line in expected[2].splitlines() if is_stats_line(line)],
         "candidate": [line.decode(errors="replace") for line in actual[2].splitlines() if is_stats_line(line)]}
+    if qualification is not None:
+        record["initial_differences"] = initial_differences
+        record["stack_qualification"] = qualification
     if differences:
         record["expected_stderr"] = expected[2][-4000:].decode(errors="replace")
         record["actual_stderr"] = actual[2][-4000:].decode(errors="replace")

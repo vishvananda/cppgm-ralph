@@ -5,5 +5,6 @@ passing cases and earlier stages, and pass Rust quality/audit checks. Record
 findings and validation in the stage ledger, update the last-audited commit,
 commit and leave the checkout clean. The rest of this assignment may remain
 unfinished; this goal certifies only the reviewed partial checkpoint.
+Apply the contract's protected stack qualification to native resource limits.
 
 {{modelValidation}}

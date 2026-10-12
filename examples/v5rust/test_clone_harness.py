@@ -2,6 +2,8 @@
 import contextlib
 import io
 import json
+import resource
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -59,6 +61,120 @@ class RustAuditTests(unittest.TestCase):
 
 
 class ComparisonTests(unittest.TestCase):
+    def compare_stack(self, outcomes, arguments=(), runner=None):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}), \
+                    patch.object(clone_adapter.resource, "getrlimit", return_value=(8 << 20, resource.RLIM_INFINITY)), \
+                    patch.object(clone_adapter, "run", side_effect=runner or outcomes) as run:
+                result = clone_adapter.compare_invocation("cppgm++", list(arguments), b"input", {})
+            return result, json.loads(trace.read_text()), run.call_args_list
+
+    def test_stack_cutoff_difference_requires_successful_exact_retry(self):
+        left = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        right = (1, b"", b"ERROR: input.cpp:1:200: constructs nested too deeply\n")
+        result, receipt, calls = self.compare_stack([left, right, (0, b"tree", b""), (0, b"tree", b"")])
+        self.assertEqual(result, right)
+        self.assertTrue(receipt["match"])
+        self.assertEqual(receipt["initial_differences"], ["stderr"])
+        self.assertTrue(receipt["stack_qualification"]["passed"])
+        self.assertEqual([c.kwargs.get("stack_limit_bytes") for c in calls], [None, None, 16 << 20, 16 << 20])
+
+    def test_one_sided_guard_can_qualify_but_original_candidate_bytes_remain(self):
+        guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        success = (0, b"tree", b"")
+        for left, right in ((guard, success), (success, guard)):
+            with self.subTest(left=left):
+                result, receipt, _ = self.compare_stack([left, right, success, success])
+                self.assertTrue(receipt["match"])
+                self.assertEqual(result, right)
+
+    def test_normal_rejections_and_abnormal_exits_do_not_qualify(self):
+        guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        for result in [(1, b"", b"ERROR: input.cpp:1:100: syntax error\n"),
+                       (1, b"", b"ERROR: input.cpp:1:100: syntax error; constructs nested too deeply\n"),
+                       *[(code, b"", guard[2]) for code in (-6, 70, 86, 101, 124, 125)]]:
+            with self.subTest(result=result):
+                _, receipt, calls = self.compare_stack([guard, result])
+                self.assertFalse(receipt["match"])
+                self.assertNotIn("stack_qualification", receipt)
+                self.assertEqual(len(calls), 2)
+
+    def test_elevated_success_still_requires_stream_counter_and_artifact_equality(self):
+        guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        for actual in [(0, b"wrong", b""), (0, b"tree", b"wrong\n"),
+                       (0, b"tree", b"cppgm++ stats input.cpp: tokens=2\n"),
+                       (1, b"", b"syntax error\n"), (101, b"", b"panic\n"),
+                       (124, b"", b"timeout\n"), (-11, b"", b"signal\n")]:
+            with self.subTest(actual=actual):
+                _, receipt, calls = self.compare_stack([guard, guard, (0, b"tree", b""), actual])
+                self.assertFalse(receipt["match"])
+                self.assertIn("stack-qualification-failed", receipt["differences"])
+                self.assertEqual(len(calls), 4)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "tree.ast"
+            output.write_bytes(b"before")
+            values = [b"original-oracle", b"original-candidate", b"higher-oracle", b"higher-wrong"]
+            def run(*args, **kwargs):
+                self.assertEqual(output.read_bytes(), b"before")
+                output.write_bytes(values.pop(0))
+                return guard if len(values) >= 2 else (0, b"", b"")
+            _, receipt, _ = self.compare_stack([], ["-o", str(output)], runner=run)
+            self.assertFalse(receipt["match"])
+            self.assertEqual(output.read_bytes(), b"original-candidate")
+
+    def test_persistent_guard_is_bounded_and_fails_even_when_original_bytes_match(self):
+        guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        _, receipt, calls = self.compare_stack([guard] * 8)
+        self.assertFalse(receipt["match"])
+        self.assertEqual([c.kwargs["stack_limit_bytes"] for c in calls[2:]],
+                         [16 << 20, 16 << 20, 32 << 20, 32 << 20, 64 << 20, 64 << 20])
+
+    def test_qualified_artifacts_and_evidence_preserve_original_candidate_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "tree.ast"
+            trace = Path(directory) / "trace.jsonl"
+            output.write_bytes(b"before")
+            values = [b"guard-oracle", b"guard-candidate", b"same", b"same"]
+            guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+            def run(*args, **kwargs):
+                self.assertEqual(output.read_bytes(), b"before")
+                output.write_bytes(values.pop(0))
+                return guard if len(values) >= 2 else (0, b"", b"")
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}), \
+                    patch.object(clone_adapter.resource, "getrlimit", return_value=(8 << 20, resource.RLIM_INFINITY)), \
+                    patch.object(clone_adapter, "run", side_effect=run):
+                result = clone_adapter.compare_invocation("cppgm++", ["-o", str(output)], b"", {})
+            receipt = json.loads(trace.read_text())
+            self.assertTrue(receipt["match"])
+            self.assertEqual(result, guard)
+            self.assertEqual(output.read_bytes(), b"guard-candidate")
+            evidence = Path(receipt["stack_qualification"]["evidence"])
+            self.assertEqual((evidence / "candidate.initial.stderr").read_bytes(), guard[2])
+            self.assertEqual((evidence / str(16 << 20) / "output-0.candidate").read_bytes(), b"same")
+
+    def test_hard_stack_limit_prevents_unavailable_qualification(self):
+        guard = (1, b"", b"ERROR: input.cpp:1:100: constructs nested too deeply\n")
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}), \
+                    patch.object(clone_adapter.resource, "getrlimit", return_value=(8 << 20, 8 << 20)), \
+                    patch.object(clone_adapter, "run", side_effect=[guard, guard]) as run:
+                clone_adapter.compare_invocation("cppgm++", [], b"", {})
+            receipt = json.loads(trace.read_text())
+            self.assertFalse(receipt["match"])
+            self.assertEqual(receipt["stack_qualification"]["attempts"], [])
+            self.assertEqual(run.call_count, 2)
+
+    def test_child_stack_limit_does_not_change_parent_limit(self):
+        before = resource.getrlimit(resource.RLIMIT_STACK)
+        result = clone_common.run([sys.executable, "-c",
+                                  "import resource;print(resource.getrlimit(resource.RLIMIT_STACK)[0])"],
+                                 stack_limit_bytes=before[0])
+        self.assertEqual(result[0], 0)
+        self.assertEqual(int(result[1]), before[0])
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_STACK), before)
+
     def test_only_runtime_measurements_are_excluded_from_stats(self):
         left = b"lowir2native_stats code_bytes=19 select_ms=0.1 peak_rss_kb=100\n"
         right = b"lowir2native_stats code_bytes=19 select_ms=0.9 peak_rss_kb=200\n"

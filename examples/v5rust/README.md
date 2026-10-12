@@ -10,6 +10,15 @@ The run is prepared independently of other runs. It does not stop or alter them.
 See the installed checkout's `CLONE_CONTRACT.md` and `docs/rust-clone-plan.md`
 for the implementation and validation contracts.
 
+The comparator keeps ordinary results exact. Native stack-guard exhaustion
+uses a bounded larger-stack qualification that requires identical successful
+results and retains raw evidence; it never accepts a crash or a timeout.
+
+For an additional audit probe, set `V5RUST_TRACE` to a writable JSONL path and
+invoke `python3 scripts/clone/clone_adapter.py cppgm++ --emit-ast -o OUT INPUT`.
+Inspect the receipt's `match` and `stack_qualification`: the CLI keeps the
+original candidate exit/outputs, which may still report stack exhaustion.
+
 Paths on this machine:
 
 | Purpose | Location |

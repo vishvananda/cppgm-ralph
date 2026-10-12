@@ -11,6 +11,10 @@ diagnostics, order/tie-breaks and externally visible bytes. Do not certify a
 stage only because fixtures pass. Check that due compiler work runs in Rust;
 oracle tools may only perform the documented harness/evaluation roles.
 
+Apply CLONE_CONTRACT.md's protected stack qualification to resource-limited
+audit probes. Require exact successful larger-stack results; native exhaustion
+cutoffs and diagnostic positions are not defects to reproduce or calibrate.
+
 Review the architecture and Rust idioms: parse once, typed facts and IDs,
 bounded transactional parsing, explicit demand, complete cache keys, owned
 storage, per-function backend lifetimes and deliberate target arithmetic.

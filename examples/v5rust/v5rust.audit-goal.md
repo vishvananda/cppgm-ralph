@@ -6,5 +6,7 @@ idiomatic safe Rust, Clippy and file/architecture checks. At PA33 complete
 release/debug checks and the implementation ownership census. Record concrete
 evidence, commit and leave a clean checkout. Do not weaken the frozen oracle
 or gate and do not impose PA35 code-generation optimization targets.
+Apply the contract's protected stack qualification; do not require identical
+native exhaustion cutoffs or diagnostic positions.
 
 {{modelValidation}}

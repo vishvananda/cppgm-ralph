@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 
 CONTROL = Path(__file__).resolve().parent
 SETTINGS = json.loads((CONTROL / "settings.json").read_text()) if (CONTROL / "settings.json").exists() else {}
@@ -36,7 +37,15 @@ def clean_env():
     return env
 
 
-def run(command, *, cwd=ROOT, env=None, stdin=b"", timeout=120):
+def run(command, *, cwd=ROOT, env=None, stdin=b"", timeout=120, stack_limit_bytes=None):
+    if stack_limit_bytes is not None:
+        # Exec a small child wrapper instead of preexec_fn: the checker also
+        # starts subprocesses from threads. Preserve argv, cwd, env and stdin.
+        wrapper = ("import os,resource,sys; "
+                   "resource.setrlimit(resource.RLIMIT_STACK, "
+                   "(int(sys.argv[1]),resource.getrlimit(resource.RLIMIT_STACK)[1])); "
+                   "os.execvpe(sys.argv[2],sys.argv[2:],os.environ)")
+        command = [sys.executable, "-c", wrapper, str(stack_limit_bytes), *map(str, command)]
     process = subprocess.Popen(command, cwd=cwd, env=env or clean_env(),
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)

@@ -28,6 +28,8 @@ all earlier stages green, exact failure reduction in the fixed current-stage
 manifest and preservation of previously passing case identities. Missing
 implementation status 86 never matches a valid rejecting compiler. Follow
 the protected trace paths to inspect raw diagnostics, objects and outputs.
+Apply CLONE_CONTRACT.md's protected stack qualification to resource-limited
+probes; do not calibrate native exhaustion depths or diagnostic positions.
 
 Update docs/port/source-map.tsv and the stage ledger with C++/Rust owners,
 typed data flow, remaining groups, exact case IDs, commands and artifact

@@ -16,6 +16,8 @@ scans, duplicate parsers, unsafe paths, suppressed Clippy warnings, mechanical
 file splits and missing ownership invariants. Check exact numeric semantics,
 diagnostic bytes and emission order where touched. Production tool names stay
 compatible; Rust identifiers follow Rust naming conventions.
+Use CLONE_CONTRACT.md's protected stack qualification for resource-limited
+probes; native exhaustion cutoffs and diagnostic positions need not match.
 
 Fix findings in the completed groups, add required regressions in the owning
 lane and run meaningful validation. Preserve the entire accepted passing-case
