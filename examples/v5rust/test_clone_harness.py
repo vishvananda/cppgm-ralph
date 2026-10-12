@@ -168,9 +168,12 @@ class ComparisonTests(unittest.TestCase):
 
     def test_child_stack_limit_does_not_change_parent_limit(self):
         before = resource.getrlimit(resource.RLIMIT_STACK)
-        result = clone_common.run([sys.executable, "-c",
-                                  "import resource;print(resource.getrlimit(resource.RLIMIT_STACK)[0])"],
-                                 stack_limit_bytes=before[0])
+        # This is a subprocess unit test, independent of local run settings.
+        # In CI the configured checkout/reference paths need not exist.
+        with tempfile.TemporaryDirectory() as directory:
+            result = clone_common.run([sys.executable, "-c",
+                                      "import resource;print(resource.getrlimit(resource.RLIMIT_STACK)[0])"],
+                                     cwd=Path(directory), stack_limit_bytes=before[0])
         self.assertEqual(result[0], 0)
         self.assertEqual(int(result[1]), before[0])
         self.assertEqual(resource.getrlimit(resource.RLIMIT_STACK), before)
