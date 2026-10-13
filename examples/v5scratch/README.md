@@ -37,17 +37,16 @@ Paths:
 | Private filesystem | `/home/vishvananda/work/private/v5scratch` |
 | Config | `/home/vishvananda/work/v5scratch.config.json` |
 | Protected runtime/checks | `/home/vishvananda/work/v5scratch-control` |
-| Separate Codex profile | `/home/vishvananda/work/v5scratch-provider` |
+| Default Codex profile | `~/.codex` (or the ambient `CODEX_HOME`) |
 | Ralph state | `/home/vishvananda/work/.ralph/v5scratch-gpt-6.1-sol-high` |
 
-The Bubblewrap launcher hides host `/home`, `/mnt`, `/media` and `/root`, then
-restores only the Rust/Codex toolchains, protected runtime, this run's separate Codex
-profile and Ralph's private-storage/current-state overlays. Other runs and
-`cppgm-extended` source paths are unavailable. The 100 GiB filesystem remains
-`nosuid,nodev`; the memory scope is 64 GiB with no swap. Cargo caches, scratch,
-outputs and performance evidence stay in the private volume. Instructions also
-prohibit fetching completed compiler sources online. No prior Codex sessions
-or global user instructions are copied into the separate profile.
+The run uses Ralph's ordinary Bubblewrap storage setup and the default Codex
+profile, so a normal `codex login` updates its authentication. Host paths remain
+readable; writable checkout, Cargo caches, scratch, outputs and performance
+evidence stay in the private volume. The 100 GiB filesystem remains
+`nosuid,nodev`; the memory scope is 64 GiB with no swap. The student instructions
+retain their requirement to implement from handouts rather than completed
+compiler sources.
 
 Install once; this refuses existing run paths and never formats an existing LV:
 

@@ -14,6 +14,8 @@ assert(!fs.existsSync(path.join(stateDir, 'state.json')), 'Setup verification re
 assert.equal(config.stopAfterStage, 'pa33');
 assert.deepEqual(config.extraStages, []);
 assert(config.loopGoalsEnabled && config.freshThreadPerTurn);
+assert.equal(config.codexHome, undefined, 'Use the default Codex profile');
+assert.equal(config.sessionIsolation.bwrapPath, undefined, 'Use ordinary Ralph storage isolation');
 assert.equal(config.model, 'gpt-6.1-sol');
 assert.equal(config.reasoningEffort, 'high');
 const source = fs.readFileSync(new URL('../../ralph.js', import.meta.url), 'utf8');
@@ -53,9 +55,8 @@ export DEBUGINFOD_URLS=
 python3 - <<'PY'
 from pathlib import Path
 import errno
-for name in ['/home/vishvananda/cppgm-extended', '/home/vishvananda/work/references', '/home/vishvananda/work/v5rust', '/home/vishvananda/work/private/v5rust', '/home/vishvananda/work/v5sol', '/home/vishvananda/work/private/v5sol', '/home/vishvananda/cppgm-ralph', '/proc/self/root/home/vishvananda/cppgm-extended']:
-    assert not Path(name).exists(), 'Visible outside student source: '+name
-for name in ['${path.dirname(config.codexPath)}/rust_audit.py', '${config.codexHome}/auth.json']:
+assert Path('/home/vishvananda/cppgm-ralph').is_dir(), 'Host paths must remain readable'
+for name in ['${path.dirname(config.codexPath)}/rust_audit.py']:
     assert Path(name).is_file(), name
     try:
         with open(name,'ab'): pass
@@ -64,7 +65,7 @@ for name in ['${path.dirname(config.codexPath)}/rust_audit.py', '${config.codexH
     else:
         raise AssertionError('Expected protected runtime/profile: '+name)
 assert Path('${config.workdir}').resolve()==Path('${fs.realpathSync(config.workdir)}')
-print('Student source isolation and protected runtime: PASS')
+print('Ordinary storage isolation and protected runtime: PASS')
 PY
 make build
 make rust-quality
@@ -125,4 +126,4 @@ const tools = ['pptoken','posttoken','ppexpr','preproc','cppgm++','abimangle','l
 for (const tool of tools) {
   assert.equal(fs.readFileSync(path.join(config.workdir, 'dev', tool)).subarray(0,4).toString(), '\x7fELF', tool);
 }
-console.log(`Config, six templates, Rust quality, source isolation, PA1 routing, native goal schema and hardware counters verified: ${artifactDir}`);
+console.log(`Config, six templates, Rust quality, ordinary storage isolation, PA1 routing, native goal schema and hardware counters verified: ${artifactDir}`);

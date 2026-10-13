@@ -11,7 +11,6 @@ BASE = Path('/home/vishvananda/work')
 PRIVATE = BASE / 'private/v5scratch'
 ROOT = PRIVATE / 'checkout'
 CONTROL = BASE / 'v5scratch-control'
-PROVIDER = BASE / 'v5scratch-provider'
 REVISION = '4fc4f61d8897f09293a2ef9202fd49373c602a29'
 TOOLS = ('pptoken', 'posttoken', 'ppexpr', 'preproc', 'cppgm++', 'abimangle', 'lowir', 'lowiropt', 'lowir2native')
 MODULES = ('lex', 'preprocess', 'syntax', 'sema', 'types', 'abi', 'lower', 'lowir', 'opt', 'native', 'driver', 'support')
@@ -112,8 +111,8 @@ def main():
         raise SystemExit('Scaffold requires the pinned clean V5 student base')
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT).strip():
         raise SystemExit('Scaffold requires a clean checkout')
-    if (ROOT / 'dev/Cargo.toml').exists() or CONTROL.exists() or PROVIDER.exists():
-        raise SystemExit('Refusing to overwrite an existing scaffold/control/provider directory')
+    if (ROOT / 'dev/Cargo.toml').exists() or CONTROL.exists():
+        raise SystemExit('Refusing to overwrite an existing scaffold/control directory')
     # Preserve supplied vocabulary as student handout material, outside production.
     starter = ROOT / 'docs/cpp-starter'
     starter.mkdir(parents=True)
@@ -166,13 +165,9 @@ PA34/PA35 are deferred. See `AGENTS.md` and `RUST_STUDENT.md`.
 ''' + testing.read_text())
     (ROOT / '.gitignore').write_text((ROOT / '.gitignore').read_text() + '\n/target/\n/obj/\n**/__pycache__/\n')
     CONTROL.mkdir(mode=0o700)
-    for name in ['sandbox.py', 'codex-v5scratch', 'student_quality.py', 'rust_audit.py']:
+    for name in ['codex-v5scratch', 'student_quality.py', 'rust_audit.py']:
         shutil.copyfile(HERE / name, CONTROL / name)
         (CONTROL / name).chmod(0o755)
-    PROVIDER.mkdir(mode=0o700)
-    shutil.copyfile(Path.home() / '.codex/auth.json', PROVIDER / 'auth.json')
-    (PROVIDER / 'auth.json').chmod(0o600)
-    write(PROVIDER / 'config.toml', '[features]\ngoals = true\n')
     subprocess.run(['python3', '-m', 'venv', str(CONTROL / 'venv')], check=True)
     subprocess.run([str(CONTROL / 'venv/bin/pip'), 'install', 'tree-sitter==0.25.2', 'tree-sitter-rust==0.24.2'], check=True)
     for file in HERE.glob('v5scratch.*'):

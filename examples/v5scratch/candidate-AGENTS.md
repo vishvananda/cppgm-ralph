@@ -6,7 +6,7 @@ and `spec.md`. Handouts describe C++ starter files; implement those roles in
 Rust under `dev/src/`, with command-line entry points under `dev/bin/`.
 
 Use the handouts, checked fixtures, C++11 standard and supplied reference
-binaries. Do not read or copy completed compiler sources, other runs or solution
+binaries. Do not read or copy completed compiler sources or solution
 repositories, locally or online. Implement required compiler work yourself;
 reference tools perform only the grading/observation roles in the handouts.
 The normal production path never calls a reference or external implementation

@@ -1,4 +1,8 @@
-Scaffold validation: 2026-10-12 UTC on wnx0008099
+Original scaffold validation: 2026-10-12 UTC on wnx0008099
+The restricted-home/profile checks below describe the original setup; those
+extra restrictions were removed on 2026-10-13. Current configuration uses
+ordinary Ralph storage isolation and default Codex authentication. The updated
+README and setup verifier describe the current behavior.
 
 Assignment input: cppgm-assignments tag v5
 Peeled revision: 4fc4f61d8897f09293a2ef9202fd49373c602a29
@@ -38,4 +42,12 @@ DWARF cycle sampling and offline perf report: PASS; DEBUGINFOD_URLS disabled.
 Full logs/schema/initial reports and hardware observations:
 /home/vishvananda/work/private/v5scratch/artifacts/scaffold-verification/
 
-No model turn or Ralph state was created. Run remains unstarted.
+No model turn or Ralph state was created by the original scaffold validation.
+
+Setup correction verified: 2026-10-13 UTC on wnx0008099
+Removed the custom home-hiding launcher and independent Codex login cache.
+Default authentication and other run paths are visible under ordinary Ralph
+storage isolation; check runtime/profile mounts remain read-only and private
+storage remains writable. Old Codex sessions were archived without credentials.
+Session-isolation and systemd-scope regression suites: 11 tests PASS.
+Grouped hardware counters still run at 100% event running inside the sandbox.

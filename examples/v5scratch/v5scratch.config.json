@@ -105,8 +105,7 @@
     "readOnlyRoot": true,
     "privateTmp": true,
     "privateWriteDir": "/home/vishvananda/work/private/v5scratch",
-    "privateWriteMaxBytes": 107374182400,
-    "bwrapPath": "/home/vishvananda/work/v5scratch-control/sandbox.py"
+    "privateWriteMaxBytes": 107374182400
   },
   "additionalDirectories": [],
   "outputTailChars": 20000,
@@ -124,6 +123,5 @@
     "oomGroup": false,
     "cleanupTimeoutSec": 2
   },
-  "stopAfterStage": "pa33",
-  "codexHome": "/home/vishvananda/work/v5scratch-provider"
+  "stopAfterStage": "pa33"
 }

@@ -13,7 +13,7 @@ remote_name=vishvananda/cppgm-run-v5scratch
 for command_name in git gh node python3 cargo sudo findmnt mountpoint perf bwrap systemd-run; do
   command -v "$command_name" >/dev/null
 done
-for destination in "$work_base/v5scratch" "$config_path" "$checkout" "$state_dir" "$work_base/v5scratch-control" "$work_base/v5scratch-provider"; do
+for destination in "$work_base/v5scratch" "$config_path" "$checkout" "$state_dir" "$work_base/v5scratch-control"; do
   if [[ -e "$destination" || -L "$destination" ]]; then
     printf 'Refusing to overwrite existing run path: %s\n' "$destination" >&2
     exit 1
