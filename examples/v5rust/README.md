@@ -14,6 +14,13 @@ The comparator keeps ordinary results exact. Native stack-guard exhaustion
 uses a bounded larger-stack qualification that requires identical successful
 results and retains raw evidence; it never accepts a crash or a timeout.
 
+The current oracle pin is `883778fdfa45d523cf9e135d15169af976f451a8`, which fixes
+untyped overloaded-function operands during operator candidate collection.
+The live baseline adds its sixteen PA7 rejection regressions and two PA12
+target-directed enum/class operator regressions while retaining existing cases.
+PA7 has 214 frozen cases; PA12 has 318. Old C1/C2 artifacts are historical and
+must be rebuilt against the updated source before PA34 acceptance.
+
 For an additional audit probe, set `V5RUST_TRACE` to a writable JSONL path and
 invoke `python3 scripts/clone/clone_adapter.py cppgm++ --emit-ast -o OUT INPUT`.
 Inspect the receipt's `match` and `stack_qualification`: the CLI keeps the
