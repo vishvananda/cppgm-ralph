@@ -68,6 +68,9 @@ def comparable_stderr(data):
         if is_stats_line(line):
             line = re.sub(rb"\b([a-z_]+_ms|peak_rss_kb|(?:(?:syntax|semantic|pp|lowir|name)_)?arena_bytes|peak_run_bytes)=([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)(?=\s|$)",
                           rb"\1=<measurement>", line)
+            if line.startswith(b"abimangle stats: "):
+                line = re.sub(rb"\b(peak_graph_bytes)=([0-9]+)(?=\s|$)",
+                              rb"\1=<measurement>", line)
         rows.append(line)
     return b"".join(rows)
 

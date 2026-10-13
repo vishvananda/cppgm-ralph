@@ -67,6 +67,8 @@ from exact comparison, as required by the existing storage-measurement rule.
 PA4's audit exposed an allocator-only mismatch despite identical generated
 tokens and deterministic counters. Raw measurements remain in receipts;
 diagnostics, field names, work counters and output artifacts remain exact.
+The PA9 correction also excludes `abimangle`'s `peak_graph_bytes`, which
+counts reserved allocator storage; graph node counts remain exact.
 For an existing run, install the corrected comparator, tests and contract in
 the protected control bundle and checkout, update only their protected hashes,
 and record the revision and revalidation evidence before restarting its audit.

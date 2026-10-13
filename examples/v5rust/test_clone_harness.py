@@ -213,6 +213,33 @@ class ComparisonTests(unittest.TestCase):
                      b"unknown stats: arena_bytes=16384\n"]:
             self.assertEqual(clone_adapter.comparable_stderr(line), line)
 
+    def test_abi_graph_storage_is_measured_but_work_is_exact(self):
+        left = b"abimangle stats: peak_graph_nodes=4 peak_graph_bytes=20608 output_bytes=5\n"
+        right = left.replace(b"=20608", b"=248")
+        normalized = clone_adapter.comparable_stderr(left)
+        self.assertEqual(normalized, clone_adapter.comparable_stderr(right))
+        for before, after in [(b"nodes=4", b"nodes=5"), (b"output_bytes=5", b"output_bytes=6"),
+                              (b"peak_graph_bytes", b"other_graph_bytes"),
+                              (b"=248", b"=unknown"), (b"=248", b"=248oops")]:
+            self.assertNotEqual(normalized, clone_adapter.comparable_stderr(right.replace(before, after)))
+        for prefix in [b"ERROR ", b"unknown stats: ", b"lowir stats: "]:
+            line = prefix + b"peak_graph_bytes=20608\n"
+            self.assertEqual(clone_adapter.comparable_stderr(line), line)
+
+    def test_abi_stats_receipt_retains_raw_graph_storage(self):
+        expected = b"abimangle stats: peak_graph_nodes=4 peak_graph_bytes=20608\n"
+        actual = expected.replace(b"=20608", b"=248")
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}), \
+                    patch.object(clone_adapter, "run", side_effect=[(0, b"name", expected), (0, b"name", actual)]):
+                result = clone_adapter.compare_invocation("abimangle", ["--stats"], b"type int\n", {})
+            receipt = json.loads(trace.read_text())
+            self.assertTrue(receipt["match"])
+            self.assertEqual(receipt["statistics"], {
+                "oracle": [expected.decode().strip()], "candidate": [actual.decode().strip()]})
+            self.assertEqual(result[2], actual)
+
     def test_preproc_stats_receipt_retains_raw_storage_when_comparison_passes(self):
         expected = b"preproc stats primary.cpp: source_tokens=24 arena_bytes=16384\n"
         actual = b"preproc stats primary.cpp: source_tokens=24 arena_bytes=0\n"
