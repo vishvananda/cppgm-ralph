@@ -14,13 +14,18 @@ The comparator keeps ordinary results exact. Native stack-guard exhaustion
 uses a bounded larger-stack qualification that requires identical successful
 results and retains raw evidence; it never accepts a crash or a timeout.
 
-The current oracle pin is `ee3596b2df2dadf70d7d2028a6a32d18e1923761`, which also accepts
-the documented template arguments on dependent member facts. The live baseline
-adds its four PA9 regressions while retaining all earlier cases and the
-previous operator-resolution fixes. PA7 has 214 frozen cases, PA9 has 123,
-and PA12 has 318. Only the standalone `abimangle` binary changes in this refresh.
-Old C1/C2 artifacts are historical and must be rebuilt against the updated
-source before PA34 acceptance.
+The example oracle pin is `3438f5aea24d8fcc9a0113316f7e27c890cd5ac6` (v5.1),
+with matching assignment export `0bf28e39bca37f7e4173ae1e9ca557659ada7523`.
+It retains the earlier compiler fixes and adds corrected control placement,
+numbering and ordinary counted `control_t` `.t` inputs. The frozen manifest
+contains 7,090 case anchors: PA7 has 214, PA9 123, PA10 167, PA11 409 and PA12
+361. Compiler sources and all nine live oracle binaries are unchanged from
+ee3596b2; earlier receipts from before its compiler fixes remain historical.
+
+[Baseline updates](BASELINE_UPDATES.md) describes the owner procedure for an
+existing run, including both copies of clone settings and the protected manifest.
+The oracle revision is not a field in `v5rust.config.json`; its
+`assignmentLayout: "v5"` remains correct for v5.1.
 
 For an additional audit probe, set `V5RUST_TRACE` to a writable JSONL path and
 invoke `python3 scripts/clone/clone_adapter.py cppgm++ --emit-ast -o OUT INPUT`.

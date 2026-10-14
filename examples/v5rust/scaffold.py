@@ -13,7 +13,9 @@ PRIVATE = BASE / "private/v5rust"
 ROOT = PRIVATE / "checkout"
 REFERENCE = BASE / "references/v5rust-cpp"
 CONTROL = BASE / "v5rust-control"
-REVISION = "883778fdfa45d523cf9e135d15169af976f451a8"
+REVISION = "3438f5aea24d8fcc9a0113316f7e27c890cd5ac6"
+ASSIGNMENT_REVISION = "0bf28e39bca37f7e4173ae1e9ca557659ada7523"
+ASSIGNMENT_TAG = "v5.1"
 TOOLS = ("pptoken", "posttoken", "ppexpr", "preproc", "cppgm++", "abimangle", "lowir", "lowiropt", "lowir2native")
 MODULES = ("lex", "preprocess", "syntax", "sema", "types", "abi", "lower", "lowir", "opt", "native", "driver", "support")
 
@@ -125,7 +127,7 @@ def documentation(tracked):
     for source, destination in (("candidate-AGENTS.md", "AGENTS.md"), ("CLONE_CONTRACT.md", "CLONE_CONTRACT.md")):
         shutil.copyfile(HERE / source, ROOT / destination)
     shutil.copyfile("/home/vishvananda/cppgm-extended/docs/rust-clone-plan.md", ROOT / "docs/rust-clone-plan.md")
-    write(ROOT / "README.md", '''# cppgm-rust
+    write(ROOT / "README.md", f'''# cppgm-rust
 
 An exact, safe Rust port of the CPPGM C++ compiler implementation, driven by
 the v5rust assignment loop. This is the initial scaffold; the compiler tools
@@ -133,7 +135,7 @@ return status 86 until implemented.
 
 Read [CLONE_CONTRACT.md](CLONE_CONTRACT.md), [AGENTS.md](AGENTS.md),
 [the conversion plan](docs/rust-clone-plan.md) and [ROADMAP.md](ROADMAP.md).
-The C++ oracle is pinned to commit 905bd7e4412a2d77d88694fe6abc7f3e1c27bce1.
+The C++ oracle is pinned to commit {REVISION} ({ASSIGNMENT_TAG}).
 The original handouts, tests, regressions, architecture specification and
 attribution are retained. See [NOTICE](NOTICE).
 
@@ -169,6 +171,7 @@ PA35 is reference material, not an optimization objective for this port.
 def controls():
     settings = {"checkout": str(ROOT), "reference": str(REFERENCE),
                 "artifacts": str(PRIVATE / "artifacts/clone"), "revision": REVISION,
+                "assignment_revision": ASSIGNMENT_REVISION, "assignment_tag": ASSIGNMENT_TAG,
                 "state_dir": str(BASE / ".ralph/v5rust-gpt-6.1-sol-high")}
     (PRIVATE / "artifacts/clone").mkdir(parents=True, exist_ok=True)
     for directory in (CONTROL, ROOT / "scripts/clone"):
@@ -292,7 +295,8 @@ def freeze(tracked):
         stages[stage] = [name[len(stage) + 1:] for name in tracked if name.startswith(stage + "/tests/")
                          and name.endswith(".t")
                          and "/debuginfo/" not in name]
-    frozen = {"revision": REVISION, "protected": protected, "stages": stages,
+    frozen = {"revision": REVISION, "assignment_revision": ASSIGNMENT_REVISION,
+              "assignment_tag": ASSIGNMENT_TAG, "protected": protected, "stages": stages,
               "workspace_lints": tomllib.loads((ROOT / "dev/Cargo.toml").read_text())["workspace"]["lints"],
               "source_responsibilities": [name for name in tracked if name.startswith("dev/") and name.endswith((".cpp", ".h"))],
               "oracle_tools": {tool: sha(REFERENCE / "dev" / tool) for tool in TOOLS},
@@ -304,6 +308,9 @@ def freeze(tracked):
 def main():
     if ROOT.exists():
         raise SystemExit(f"Refusing to overwrite {ROOT}")
+    actual = subprocess.check_output(["git", "-C", str(REFERENCE), "rev-parse", "HEAD"]).decode().strip()
+    if actual != REVISION:
+        raise SystemExit(f"Reference checkout must be pinned to {REVISION}; found {actual}")
     ROOT.mkdir()
     tracked = subprocess.check_output(["git", "-C", str(REFERENCE), "ls-files", "-z"]).decode().split("\0")[:-1]
     for name in tracked:

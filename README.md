@@ -238,6 +238,9 @@ include the PA33/PA34 instruction gate, fixtures and qualification tools.
 The [V5 Sol scaffold](examples/v5sol/README.md) uses the V5 assignments' own
 file audit and PA35 optimization gates, native goals, and scoped performance
 measurement with explicit evidence reuse.
+The [V5 exact Rust port](examples/v5rust/README.md) uses a pinned C++ oracle
+and protected differential gates. Its [baseline update guide](examples/v5rust/BASELINE_UPDATES.md)
+covers synchronized oracle, fixture, manifest and clone configuration updates.
 The [V5 scratch Rust scaffold](examples/v5scratch/README.md) starts from student
 assignments with an empty safe Rust workspace, course reference binaries and
 student grading. It hides completed solution checkouts and stops after PA33.
