@@ -54,6 +54,12 @@ original host it is `~/work/references/v5rust-cpp`; the protected control bundle
 is `~/work/v5rust-control`. The candidate has committed copies under
 `scripts/clone/` for provenance.
 
+Fetch the release into the separate oracle repository and resolve its commit
+and tree before changing candidate files. Fetching in another checkout does
+not populate this repository's objects. Check out the new oracle revision and
+verify its tools/source hashes before importing the candidate's course inputs;
+an unavailable commit must fail before any partial input installation.
+
 Update these together while the worker is stopped:
 
 | Item | Required update |
