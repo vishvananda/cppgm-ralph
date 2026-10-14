@@ -171,12 +171,16 @@ def preserve(stage):
 
 
 def course(stage, target="test"):
+    jobs = SETTINGS.get("course_workers", 8)
+    if type(jobs) is not int or jobs < 1:
+        raise ValueError("course_workers must be a positive integer")
     directory = ARTIFACTS / "course" / stage / target
     directory.mkdir(parents=True, exist_ok=True)
     trace = directory / "trace.jsonl"
     trace.unlink(missing_ok=True)
     shutil.rmtree(directory / "mismatches", ignore_errors=True)
     env = clean_env()
+    env["CPPGM_TEST_JOBS"] = str(jobs)
     env["V5RUST_TRACE"] = str(trace)
     course_passed = run_course(["make", "--no-print-directory", "-s", target, *routes(stage)],
                                cwd=ROOT / stage, artifacts=directory, env=env)

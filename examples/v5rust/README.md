@@ -67,6 +67,16 @@ batch transport and compare actual Rust invocations against the oracle, using
 identical input/output paths. They never supply oracle output to the candidate.
 Production `dev/` executables run only Rust.
 
+Regular course suites use eight test workers by default, configured with
+`course_workers` in the protected clone settings (and their committed copy).
+Focused cases retain eight outer workers; each adapter still runs C++ and Rust
+in order on identical paths. The separate PA34 bootstrap transport is unchanged.
+On a fixed PA1–PA10 snapshot, raising course workers from one to eight reduced
+the complete prior gate from 227 seconds to 74 seconds. All 1,156 frozen cases
+and 2,046 full-course invocations passed with identical counts and output hashes.
+These are elapsed times on a shared host; artifacts for the original experiment
+are under `private/v5rust/artifacts/prior-parallel-benchmark/` on the setup host.
+
 The 2026-10-11 harness correction recognizes standalone `preproc`, `lowir` and
 `abimangle` statistics and excludes numeric `arena_bytes`/`name_arena_bytes`
 from exact comparison, as required by the existing storage-measurement rule.

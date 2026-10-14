@@ -172,6 +172,7 @@ def controls():
     settings = {"checkout": str(ROOT), "reference": str(REFERENCE),
                 "artifacts": str(PRIVATE / "artifacts/clone"), "revision": REVISION,
                 "assignment_revision": ASSIGNMENT_REVISION, "assignment_tag": ASSIGNMENT_TAG,
+                "course_workers": 8,
                 "state_dir": str(BASE / ".ralph/v5rust-gpt-6.1-sol-high")}
     (PRIVATE / "artifacts/clone").mkdir(parents=True, exist_ok=True)
     for directory in (CONTROL, ROOT / "scripts/clone"):

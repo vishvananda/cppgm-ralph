@@ -107,6 +107,13 @@ baseline update before restarting with refreshed checks and a fresh phase goal.
 contain the oracle SHA. Keep `assignmentLayout: "v5"` for the v5.1 release:
 that value selects the stage layout, not an assignment Git tag.
 
+`course_workers` in both clone settings copies controls regular course-suite
+parallelism and defaults to eight. It does not change focused-gate coverage,
+comparison policy or the separate bootstrap transport. An existing installation
+also needs the matching `clone_check.py` in both the control bundle and candidate,
+with its protected hash refreshed at a clean handoff. Record the validation and
+commit the synchronized update before restarting.
+
 Ralph reads `stopAfterStage` / `RALPH_STOP_AFTER_STAGE` at process startup.
 For an active run, request its ordinary `stop-after-turn`, let its checks and
 handoff finish, then restart with a temporary stage stop if needed. For the
