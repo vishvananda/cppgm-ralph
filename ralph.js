@@ -1928,6 +1928,17 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
   applyReportSummaryToStages(stages, previousStatus, reportSummary, options);
   applyStageCountHintFloors(stages, options);
 
+  // A successful counted lane cannot override a failing control/build lane.
+  if (options.exitCode != null && options.exitCode !== 0 &&
+      !stages.some(stage => stage.status === "fail")) {
+    const target = stages.find(stage => stage.name === options.targetStage) ??
+      (stages.length === 1 ? stages[0] : null);
+    if (target) {
+      target.status = "fail";
+      target.failed = Math.max(1, target.failed ?? 0);
+    }
+  }
+
   const failingIndex = stages.findIndex((stage) => stage.status === "fail");
   const failingStage = failingIndex >= 0 ? stages[failingIndex].name : null;
   const stageNames = stages.map((stage) => stage.name);
@@ -1982,11 +1993,12 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
     usesSubsetTemplate: Boolean(options.usesSubsetTemplate),
     exitCode: options.exitCode ?? null,
     allTestsPassed:
-      reportSummary?.allPassed ||
+      (options.exitCode == null || options.exitCode === 0) &&
+      (reportSummary?.allPassed ||
       (stages.length > 0 &&
         stagesPassed === stages.length &&
         stages.every((stage) => stage.status === "pass") &&
-        (options.exitCode ?? 1) === 0),
+        (options.exitCode ?? 1) === 0)),
     stageCount: stages.length,
     stagesPassed,
     testsPassed,
@@ -2443,7 +2455,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|:\s*FAIL:|(?:compile|compilation|build) failed|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {
@@ -4445,8 +4457,9 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
     mode,
   });
   const earlierStagesPass = testStatusStagesBeforeTargetPass(currentStatus, stage);
-  const stageComplete = currentStage?.status === "pass" &&
-    currentTotal != null &&
+  const stageComplete = sourceResult?.passed !== false &&
+    (currentStatus?.exitCode == null || currentStatus.exitCode === 0) &&
+    currentStage?.status === "pass" && currentTotal != null &&
     currentPassed >= currentTotal;
   const pendingProgress = evaluatePendingCheckpointProgress({
     pendingCheckpoint: checkState.pendingCheckpoint,
@@ -4494,6 +4507,11 @@ async function runCurrentStageProgressCheck(context, checkState = {}) {
   }
   if (!earlierStagesPass) {
     lines.push(`FAIL: a stage before ${stage} is not passing in the source test status.`);
+    return { exitCode: 1, output: lines.join("\n") };
+  }
+  if (currentTotal != null && currentPassed >= currentTotal &&
+      currentStatus.exitCode != null && currentStatus.exitCode !== 0) {
+    lines.push(`FAIL: counted tests pass, but source check exited ${currentStatus.exitCode}; resolve its uncounted failure.`);
     return { exitCode: 1, output: lines.join("\n") };
   }
   if (stageComplete && (!baselineStage || progress.passed)) {

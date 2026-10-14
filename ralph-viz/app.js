@@ -5210,7 +5210,7 @@ function deriveTestStatusFromCommand(record, commandOverride = null, commandInfo
       passedUpperBound: summary.testsPassed,
       total: summary.testsTotal,
       totalFromReport: true,
-      failed: Math.max(0, summary.testsTotal - summary.testsPassed),
+      failed: Math.max(stages[0].failed ?? 0, summary.testsTotal - summary.testsPassed),
       unknown: 0,
     });
   }
@@ -5271,7 +5271,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|:\s*FAIL:|(?:compile|compilation|build) failed|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {

@@ -27,7 +27,8 @@ function stageSnapshot(testStatus, stage) {
     unknown: passedUpperBound - passed,
     knownFailed: total - passedUpperBound,
     exact: passedUpperBound === passed,
-    complete: entry.status === "pass" && passed >= total,
+    complete: entry.status === "pass" && passed >= total &&
+      (testStatus.exitCode == null || testStatus.exitCode === 0),
   };
 }
 
@@ -45,6 +46,10 @@ export function evaluateStageProgress({
   }
   if (current.total < baseline.total) {
     return { passed: false, reason: "coverage-reduced", baseline, current };
+  }
+  if (currentTestStatus.exitCode != null && currentTestStatus.exitCode !== 0 &&
+      current.passed === current.total) {
+    return { passed: false, reason: "uncounted-failure", baseline, current };
   }
   if (current.complete) {
     return { passed: true, reason: "complete", baseline, current };

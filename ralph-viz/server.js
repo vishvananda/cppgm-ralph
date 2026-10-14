@@ -3503,7 +3503,7 @@ export function deriveTestStatusFromReportOutput(output, existingStatus = {}, st
       total = summary.testsTotal;
       passed = summary.testsPassed;
       passedUpperBound = passed;
-      failed = Math.max(0, total - passed);
+      failed = Math.max(failed, total - passed);
       status = allTestsPassed ? "pass" : "fail";
     }
     return {
@@ -4156,7 +4156,7 @@ function findFirstFailureLine(output) {
 }
 
 function isFailureLine(line) {
-  return /ERROR:|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
+  return /ERROR:|:\s*FAIL:|(?:compile|compilation|build) failed|TEST FAIL|FAIL after|command failed with exit status|Expected EXIT_|expected EXIT_|got EXIT_|got 124|does not match|timed out|did not time out as expected|exit status mismatch/i.test(line);
 }
 
 function isTestFailureLine(line) {
