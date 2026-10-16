@@ -117,6 +117,10 @@ def prepare(config_path, course, bundle, out, profile):
         text = text.replace("It is a compilation workload,\nnot an implementation to delegate to or copy into your compiler. Before PA34,\nan independent student implementation continues to use only the handouts,\nfixtures and supplied reference binaries. At PA34 you may inspect S and reduce\ninputs that expose compilation errors; fix those errors in your own compiler.",
             "Use the reference sources to diagnose port mismatches; production phases\nremain implemented in Rust. Reduce compilation failures and fix their Rust owners.")
         handout.write_text(text)
+        optimization = staged / "pa35/README.md"
+        optimization.write_text(optimization.read_text().replace(
+            "Never copy reference compiler logic into Rust or delegate a production phase.",
+            "Consult the reference sources as needed; production phases remain Rust."))
     reference = ("REFERENCE_BUNDLE := " + str(bundle.resolve()) + "\n"
                  "COMPILER := " + str(root / "obj/rust/release/cppgm") + "\n"
                  "LOWIR2NATIVE := " + str(root / "obj/rust/release/lowir2native") + "\n"
@@ -194,6 +198,12 @@ def prepare(config_path, course, bundle, out, profile):
             phase["goalTemplates"][stage] = key + "-goal"
             for suffix in ("", "-goal"):
                 template = (HERE / f"{stage}-{phase['name']}{suffix}.md").read_text()
+                if profile == "port":
+                    template = template.replace(
+                        "The reference source is a workload, not an implementation to copy or delegate to.",
+                        "Consult the pinned C++ sources to fix the Rust port; production phases remain Rust.")
+                    template = template.replace("measurement campaigns or copying the reference implementation.",
+                                                "measurement campaigns or delegating production phases.")
                 write(out / f"{name}.{key}{suffix}.md", template.replace("@PROFILE@", profile))
         if phase["name"] == "audit":
             phase["checks"] += ["referenceProof", "referenceFinalBootstrap", "referenceFinal"]
