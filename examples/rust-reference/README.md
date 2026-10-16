@@ -39,9 +39,11 @@ both the candidate and control protected manifests are staged with the new
 reviewed hashes. Source fixtures, oracle revision and oracle binaries are
 unchanged. Read the generated changes before installing them.
 
-Install at a paused boundary after the successful PA33 audit: commit the
-reviewed candidate replacements, update the optional protected control
-manifest, then restart Ralph using the staged config. Its sidecars must stay
+Install scratch at its automatic stop after the successful PA33 audit. For
+the existing port, retain its current PA34 proof and install the continuation
+at its automatic stop after PA34. Commit the reviewed candidate replacements,
+update the optional protected control manifest, then restart Ralph using the
+staged config. Its sidecars must stay
 beside that config. The config preserves the run name, workdir and state path,
 extends stages through PA35, and uses the actual Cargo release binaries.
 It leaves earlier-stage prompts/checks intact. Do not install over an active
@@ -53,3 +55,50 @@ do not merge its instruction changes into the C++ course on `main`.
 The frozen workload bundle can remain pinned
 to an earlier agreed reference revision; its source must not drift as R changes.
 PA35 retains the published 17 limits and deterministic final counter scopes.
+
+## Existing run rollout
+
+| Run | Installation boundary | Work enabled |
+| --- | --- | --- |
+| v5scratch | After its existing PA33 stop | Independent reference bootstrap, then PA35 |
+| v5rust | After its existing PA34 stop | PA35; retain the completed strict port proof |
+
+Keep both active runs' instructions unchanged until those stops. Fixture-level
+byte parity does not prove the reference source builds: the port's PA34 must
+still compile every source, match all objects/tools and pass rebuilt suites.
+If those already pass, PA34 is verification rather than a new implementation.
+
+At each boundary:
+
+1. Confirm the successful final audit and stopped worker. Record the candidate
+   commit and preserve the active config, sidecars, control manifest and final
+   acceptance evidence. Do not edit Ralph or native goal state.
+2. Regenerate preparation from the then-current checkout/config and reviewed
+   `rust-course` revision. Earlier prepared manifests are previews, since course
+   corrections or protected inputs may have changed. Use the same immutable
+   reference bundle revision for both runs; do not update the port's oracle or
+   merge the C++ solution tree into a Rust checkout.
+3. Review and commit the staged handouts, scripts, policy replacements and
+   `reference.mk` as one owner migration. Install both protected manifest copies
+   for the port. Keep PA1–PA33 fixtures and effective checks unchanged. Validate
+   the config/dependency chains, release build, Rust quality/file audit, prior
+   acceptance and a PA35 smoke check where supported. Confirm the configured
+   commands and perf counters work in the run sandbox.
+4. Select the prepared config and its colocated prompt/goal sidecars. Preserve
+   the run name, workdir and state path; extend the endpoint to PA35 and restart
+   the worker in its existing pane. Let normal stage advancement choose PA34
+   for scratch or PA35 for the completed port, then verify its first turn.
+
+For the port's PA35, freeze the accepted Rust release compiler and PA34 proof
+first. Establish throughput, RSS, scaling and generated-code baselines before
+editing. Begin with Rust implementation speed/memory changes that preserve
+generated object bytes on fixed inputs; algorithmic work counters may change
+under the explicit PA35 contract. Its codegen already reproduces the reference
+backend, so substantial generated-code work may be unnecessary. The full
+published gates decide completion. A later backend/codegen optimization is a
+separate, recorded step; preserve the original port proof and measure both
+compiler throughput and constant-source generated-code effects independently.
+
+No fresh run or replay of PA1–PA33 is needed for this continuation. Keep the
+pre-PA35 compiler and evidence immutable so future comparisons distinguish the
+completed exact port from its subsequent optimization work.
