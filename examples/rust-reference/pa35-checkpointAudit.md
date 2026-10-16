@@ -4,7 +4,7 @@ Independently review the PA35 optimization handoff.
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read REFERENCE_STAGES.md and the PA35 handout/gates. Inspect changed Rust owners
+Read the PA35 handout/gates. Inspect changed Rust owners
 for legality, bounded work and required ABI/IR facts. Check that throughput
 measures R, codegen compares A=R(S) with B=host(S), and the source/link/allocator
 inputs are fixed. Validate changed mechanisms with focused correctness and

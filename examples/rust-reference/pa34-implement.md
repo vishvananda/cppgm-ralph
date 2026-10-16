@@ -4,11 +4,10 @@ Implement a coherent PA34 reference-bootstrap fix.
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read REFERENCE_STAGES.md, spec.md and pa34/README.md. The selected profile is
-@PROFILE@. R is the Rust C++ compiler, not rustc. S is the pinned unchanged C++
-bundle. B=host(S); A=R(S); C=A(S); D=C(S). Student acceptance permits different
-first-generation code and requires C==D plus A/D rebuilt suites; the port
-profile additionally requires F=B(S) and F==A==C==D.
+Read spec.md and pa34/README.md. The handout defines this run's complete
+bootstrap and acceptance procedure. R is the Rust C++ compiler, not rustc;
+S is the pinned unchanged C++ workload. Follow the configured runner and
+handout without importing another implementation track's requirements.
 
 Use the configured object/tool progress check to group failures by the earliest
 compiler boundary. Reduce inputs in student.tests and fix the Rust owner.

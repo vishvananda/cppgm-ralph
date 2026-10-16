@@ -4,7 +4,7 @@ Independently close PA35 Rust compiler optimization.
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read REFERENCE_STAGES.md, spec.md and the PA35 handout/gates. Review final Rust
+Read spec.md and the PA35 handout/gates. Review final Rust
 ownership, optimization legality, output/ABI contracts, bounded work and quality.
 Confirm all 17 canonical gates pass on the final binaries with current input
 provenance. Throughput measures R; codegen measures A=R(S) versus B=host(S),

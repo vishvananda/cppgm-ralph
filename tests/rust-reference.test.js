@@ -32,6 +32,14 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
       fs.mkdirSync(path.dirname(path.join(course, file)), { recursive: true });
       fs.writeFileSync(path.join(course, file), `fixture ${file}\n`);
     }
+    fs.mkdirSync(path.join(course, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(course, 'scripts/rust_course.json'), JSON.stringify({ course: 'rust-reference', branch: 'rust-course' }));
+    fs.writeFileSync(path.join(course, 'pa34/README.md'), '# Rust compiler reference bootstrap\n\nA need not equal B. C == D.\n\n```sh\npython3 scripts/reference_bootstrap.py final --out obj/reference-bootstrap\n```\n');
+    fs.writeFileSync(path.join(course, 'README.md'), '# cppgm assignments\nRust course overview.\n');
+    fs.writeFileSync(path.join(root, 'README.md'), 'PA35 is reference material, not an optimization objective for this port.\n');
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), 'Original instructions.\nThe run stops after the PA33 audit. PA34/PA35 remain handout material and have\nno exit criteria in this run.\n');
+    fs.writeFileSync(path.join(root, 'spec.md'), 'choices, define acceptance. PA34 and PA35 are deferred.\n');
+    const originalAgents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
     if (profile === 'port') {
       fs.mkdirSync(path.join(root, 'scripts/clone'), { recursive: true });
       fs.writeFileSync(path.join(root, 'CLONE_CONTRACT.md'), 'Original port contract.\n');
@@ -47,7 +55,21 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     const result = spawnSync('python3', command, { cwd: repo, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(fs.readFileSync(input, 'utf8'), serialized);
-    assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), 'Original instructions.\n');
+    assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), originalAgents);
+    const candidate = path.join(out, 'candidate');
+    assert(!fs.existsSync(path.join(candidate, 'REFERENCE_STAGES.md')));
+    assert(!fs.readFileSync(path.join(candidate, 'AGENTS.md'), 'utf8').includes('stops after the PA33 audit'));
+    assert(!fs.readFileSync(path.join(candidate, 'spec.md'), 'utf8').includes('are deferred'));
+    assert(fs.readFileSync(path.join(candidate, 'pa35/reference.mk'), 'utf8').includes('obj/rust/release/cppgm'));
+    const handout = fs.readFileSync(path.join(candidate, 'pa34/README.md'), 'utf8');
+    if (profile === 'port') {
+      assert(handout.includes('F==A==C==D'));
+      assert(!handout.includes('A need not equal B'));
+      assert(handout.includes('--profile port'));
+    } else {
+      assert(handout.includes('A need not equal B'));
+      assert(!handout.includes('F==A==C==D'));
+    }
     const config = JSON.parse(fs.readFileSync(path.join(out, `${name}.config.json`)));
     assert.equal(config.name, original.name);
     assert.equal(config.stateBaseDir, original.stateBaseDir);
@@ -102,5 +124,12 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     const refused = spawnSync('python3', command, { cwd: repo, encoding: 'utf8' });
     assert.notEqual(refused.status, 0);
     assert(refused.stderr.includes('new staging directory'));
+    fs.writeFileSync(path.join(course, 'scripts/rust_course.json'), JSON.stringify({ course: 'cpp-selfhost' }));
+    const mixed = [...command];
+    mixed[mixed.indexOf('--out') + 1] = path.join(temporary, 'mixed-track');
+    const rejected = spawnSync('python3', mixed, { cwd: repo, encoding: 'utf8' });
+    assert.notEqual(rejected.status, 0);
+    assert(rejected.stderr.includes('long-lived rust-course'));
+    assert(!fs.existsSync(path.join(temporary, 'mixed-track')));
   });
 }

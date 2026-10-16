@@ -3,12 +3,13 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import shlex
 import shutil
 
 HERE = Path(__file__).resolve().parent
-SHIPPED = ["scripts/reference_bootstrap.py", "pa34/README.md", "pa35/README.md", "pa35/Makefile"]
+SHIPPED = ["scripts/reference_bootstrap.py", "pa34/README.md", "pa35/README.md", "pa35/Makefile", "scripts/rust_course.json"]
 
 
 def write(path, content):
@@ -26,28 +27,101 @@ def prepare(config_path, course, bundle, out, profile):
     for name in SHIPPED:
         if not (course / name).is_file():
             raise ValueError(f"updated course input missing: {name}")
+    variant = json.loads((course / "scripts/rust_course.json").read_text())
+    if variant.get("course") != "rust-reference" or variant.get("branch") != "rust-course":
+        raise ValueError("course must come from the long-lived rust-course branch/export")
     out.mkdir(parents=True)
     name = config["name"]
-    for path in config_path.parent.glob(name + ".*.md"):
-        shutil.copyfile(path, out / path.name)
+    # Copy only templates still selected below PA34, not obsolete stage sidecars.
+    earlier_templates = {phase[key] for phase in config["phases"] for key in ("promptTemplate", "goalTemplate")}
+    for template in earlier_templates:
+        path = config_path.parent / f"{name}.{template}.md"
+        if path.exists():
+            shutil.copyfile(path, out / path.name)
     staged = out / "candidate"
     files = SHIPPED + [p.relative_to(course).as_posix() for p in (course / "pa35/scripts").glob("*") if p.is_file()]
     for relative in files:
         target = staged / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(course / relative, target)
-    contract = (HERE / "REFERENCE_STAGES.md").read_text().replace("@PROFILE@", profile)
-    write(staged / "REFERENCE_STAGES.md", contract)
-    addendum = "\n\n## PA34/PA35 reference track\n\n" + (
-        "After the completed PA33 audit, REFERENCE_STAGES.md overrides the earlier\n"
-        "PA33/PA34 stop, PA34/35 exclusions and reference-source restrictions for\n"
-        "these two stages only. PA1–PA33 keep their original implementation contract.\n"
-        "PA34 uses the " + profile + " bootstrap profile. PA35 uses ordinary course\n"
-        "correctness/ABI/quality rules and permits valid optimization differences;\n"
-        "clone-only bytes and work-counter equality are no longer its objective.\n")
-    for relative in ("AGENTS.md", "spec.md", "CLONE_CONTRACT.md"):
-        if (root / relative).exists():
-            write(staged / relative, (root / relative).read_text() + addendum)
+    # Replace conflicting policy in place; never append an override document.
+    for relative in ("AGENTS.md", "spec.md", "CLONE_CONTRACT.md", "README.md", "RUST_STUDENT.md", "docs/rust-clone-plan.md"):
+        if not (root / relative).exists():
+            continue
+        text = (root / relative).read_text()
+        if relative == "AGENTS.md":
+            text = text.replace("through PA1–PA33.", "through PA1–PA35.")
+            text = text.replace("Do not read or copy completed compiler sources or solution\nrepositories, locally or online.",
+                "Through PA33, do not read completed compiler sources or solution repositories.\nAt PA34, inspect the pinned C++ reference only as a compilation workload; do\nnot copy its implementation into Rust.")
+            text = text.replace("The run stops after the PA33 audit. PA34/PA35 remain handout material and have\nno exit criteria in this run.",
+                "PA34 and PA35 follow their Rust course handouts. The run ends after the PA35 audit.")
+            text = text.replace("`make inception` is the final\ncross-implementation PA34 proof, not a Rust self-compiler.",
+                "PA34's final proof uses the reference-bootstrap runner in its handout.")
+            text = re.sub(r"PA35 is not an active conversion stage\..*",
+                "PA1–PA34 preserve the port's exact code generation and full PA34 equality.\nPA35 allows valid optimizations under ordinary course correctness/ABI/quality\ncontracts. Follow the current handout's single acceptance procedure.\n", text, flags=re.S)
+        elif relative == "spec.md":
+            text = text.replace("through V5 PA1–PA33.", "through V5 PA1–PA35.")
+            text = text.replace("choices, define acceptance. PA34 and PA35 are deferred.",
+                "choices, define acceptance. PA34 compiles the pinned C++ reference workload;\nPA35 optimizes Rust throughput and its generated C++ code under those handouts.")
+            text = text.replace("PA35's self-build measurements are outside this run.",
+                "PA35 measures Rust throughput and generated code using the frozen C++ bundle.")
+            text = text.replace("The run stops after the successful PA33 audit. Neither\ninception nor PA35's self-build gates are exit criteria for this run.",
+                "PA34 requires its full reference bootstrap; PA35 requires all 17 gates,\nfinal bootstrap and Rust quality. The run ends after the successful PA35 audit.")
+        elif relative == "CLONE_CONTRACT.md":
+            text = text.split("## PA34: cross-implementation bootstrap", 1)[0]
+            text += ("## PA34 and PA35\n\nPA34 follows pa34/README.md's exact-port bootstrap proof.\n"
+                     "PA35 follows pa35/README.md's optimization acceptance. Exact byte and work-\n"
+                     "counter parity in this contract applies through PA34; PA35 permits valid\n"
+                     "optimization differences while preserving course language, ABI, IR, output\n"
+                     "and quality requirements. The completed port proof remains recorded.\n")
+        elif relative == "README.md":
+            if profile == "student":
+                text = (course / "docs/student-export-root/README.md").read_text() if (course / "docs/student-export-root/README.md").exists() else (course / "README.md").read_text()
+                text = text.replace("# cppgm assignments", "# C++11 compiler implemented in Rust", 1)
+            else:
+                text = text.replace("PA35 is reference material, not an optimization objective for this port.",
+                    "PA35 optimizes throughput and generated code under its Rust handout; valid\noptimization differences are permitted after the completed PA34 port proof.")
+        elif relative == "RUST_STUDENT.md":
+            text = text.replace("The run stops after the successful PA33 audit (`stopAfterStage: pa33`).\nPA34/PA35 are deferred; their original handouts remain available. No inception\nproof or PA35 self-build/performance gate is claimed by this run.",
+                "The run continues through PA35. PA34's Rust handout defines the reference\nbootstrap; PA35's defines compiler throughput and generated-code acceptance.")
+            text = text.replace("The Rust adaptation and PA33 endpoint override the student starter's C++ build\nand PA34/35 instructions; all PA1–PA33 student language/test contracts remain.",
+                "The Rust course handouts define PA34/35 directly; PA1–PA33 keep their course contracts.")
+        elif relative == "docs/rust-clone-plan.md":
+            start = text.find("## Making PA34 prove byte identity")
+            end = text.find("The conversion is complete only when:", start)
+            if start >= 0 and end >= 0:
+                text = text[:start] + ("## PA34 bootstrap and PA35 optimization\n\n"
+                    "Follow pa34/README.md for the complete strict port proof and\n"
+                    "pa35/README.md for the subsequent optimization acceptance. The configured\n"
+                    "runner owns clean generations, inventories, fixed paths and rebuilt suites.\n"
+                    "Measure Rust throughput separately from generated C++ code, with unchanged\n"
+                    "frozen sources and the handout's cached measurement protocol.\n\n") + text[end:]
+            text = text.replace("no new code-generation optimization objective", "PA35 optimization acceptance follows its Rust handout")
+        write(staged / relative, text)
+    for relative in ("TESTING_AND_REFERENCES.md", "PROJECT_LAYOUT.md"):
+        source = course / "docs/student-export-root" / relative
+        if not source.exists():
+            source = course / relative
+        if source.exists():
+            shutil.copyfile(source, staged / relative)
+    # Student sources never need to see the alternative port acceptance.
+    if profile == "port":
+        handout = staged / "pa34/README.md"
+        text = handout.read_text().replace("Rust compiler reference bootstrap", "Rust port reference bootstrap", 1)
+        a = text.index("A need not equal B")
+        b = text.index("```sh", a)
+        text = text[:a] + ("Build F=B(S) and require F==A==C==D for every object and all nine tools.\n"
+            "A and D must pass PA1–PA33 and PA8/PA32/PA33 debug suites using their\n"
+            "own helper tools. This is the port's mandatory PA34 acceptance proof.\n\n") + text[b:]
+        text = text.replace("--out obj/reference-bootstrap", "--out obj/reference-bootstrap --profile port")
+        text = text.replace("It is a compilation workload,\nnot an implementation to delegate to or copy into your compiler. Before PA34,\nan independent student implementation continues to use only the handouts,\nfixtures and supplied reference binaries. At PA34 you may inspect S and reduce\ninputs that expose compilation errors; fix those errors in your own compiler.",
+            "Use the reference sources to diagnose port mismatches; production phases\nremain implemented in Rust. Reduce compilation failures and fix their Rust owners.")
+        handout.write_text(text)
+    reference = ("REFERENCE_BUNDLE := " + str(bundle.resolve()) + "\n"
+                 "COMPILER := " + str(root / "obj/rust/release/cppgm") + "\n"
+                 "LOWIR2NATIVE := " + str(root / "obj/rust/release/lowir2native") + "\n"
+                 "REFERENCE_OUT := " + str(root / "obj/reference-bootstrap") + "\n")
+    write(staged / "pa35/reference.mk", reference)
     # Stage both copies of the port's protected manifest for a later owner install.
     manifest_path = root / "scripts/clone/manifest.json"
     if manifest_path.exists():
@@ -130,7 +204,7 @@ def prepare(config_path, course, bundle, out, profile):
     config["extraStages"] = list(dict.fromkeys(config.get("extraStages", []) + ["pa34", "pa35"]))
     config["stopAfterStage"] = "pa35"
     write(out / f"{name}.config.json", json.dumps(config, indent=2) + "\n")
-    write(out / "activation.json", json.dumps({"workdir": str(root), "profile": profile,
+    write(out / "activation.json", json.dumps({"workdir": str(root), "profile": profile, "course_branch": "rust-course",
           "bundle": str(bundle.resolve()), "files": sorted(p.relative_to(staged).as_posix() for p in staged.rglob("*") if p.is_file()),
           "note": "Prepared only. Install candidate and optional control files at a paused PA33 boundary; then select the staged config."}, indent=2) + "\n")
     return config

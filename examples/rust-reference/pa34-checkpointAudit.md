@@ -4,7 +4,7 @@ Review the latest PA34 reference-bootstrap handoff independently.
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read REFERENCE_STAGES.md and pa34/README.md; the profile is @PROFILE@.
+Read pa34/README.md; the profile is @PROFILE@.
 Inspect changed Rust owners and the earliest mismatches or failures. Check
 source/configuration identity, complete inventories, isolated generations,
 helper routing and valid cache receipts. Fix real defects without expanding
