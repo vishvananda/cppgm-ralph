@@ -1,5 +1,10 @@
 # v5rust: exact safe Rust clone
 
+The optional [reference-stage extension](../rust-reference/README.md) prepares
+a PA35 continuation after the strict PA34 proof. It explicitly switches PA35
+to course correctness/ABI/quality contracts so valid optimizations are allowed;
+the original clone checker and this scaffold's default endpoint stay intact.
+
 This run starts from a pinned `cppgm-extended` export, with a new Rust
 implementation under `dev/`. The complete C++ solution and its freshly built
 tools live outside the writable run volume. This preserves the maintainer

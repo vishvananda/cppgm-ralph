@@ -29,6 +29,10 @@ The run stops after the successful PA33 audit (`stopAfterStage: pa33`).
 PA34/PA35 are deferred; their original handouts remain available. No inception
 proof or PA35 self-build/performance gate is claimed by this run.
 
+The optional [reference-stage extension](../rust-reference/README.md) prepares
+reviewed PA34/PA35 handouts, checks and native goal templates for installation
+after PA33. It leaves this scaffold's default endpoint and active run unchanged.
+
 Paths:
 
 | Purpose | Path |
