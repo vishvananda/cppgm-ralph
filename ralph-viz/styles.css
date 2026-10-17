@@ -2093,3 +2093,21 @@ pre { margin: 0; }
     word-break: break-word;
   }
 }
+
+.phase-check-list {
+  display: grid;
+  gap: 0.12rem;
+  margin-top: 0.3rem;
+  font-size: 0.68rem;
+}
+.phase-check {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  color: var(--muted);
+}
+.phase-check > span:last-child { text-align: right; }
+.phase-check-pass > span:last-child { color: var(--ok); }
+.phase-check-fail > span:last-child { color: var(--bad); }
+
+.phase-check-time { color: var(--muted); font-size: 0.63rem; }
