@@ -141,6 +141,26 @@
 
   function builtinInvocation(words, at) {
     const args = words.slice(at + 1);
+    const c = args.indexOf("-C");
+    const directory = c >= 0 ? args[c + 1] : args.find(v => v.startsWith("--directory="))?.slice(12);
+    const localStage = directory?.replace(/\/+$/, "").split("/").at(-1);
+    const selfTest = localStage === "pa34" && args.find(v => /^test-(?:through-)?pa\d+$/.test(v));
+    const comparison = localStage === "pa34" && args.find(v => /^compare-(pptoken|cppgm\+\+)-inception$/.test(v));
+    const inception = !directory && args.includes("inception");
+    if (selfTest || comparison || inception) {
+      // Scratch object roots and host-compiled ladder builds do not certify the
+      // production self-hosted tests.
+      if (args.some(v => /^INCEPTION_\w+=/.test(v)) || (localStage === "pa34" &&
+          args.some(v => /^CXX=/.test(v) && !/cppgm\+\+$/.test(v)))) return null;
+      const last = selfTest ? Number(selfTest.match(/pa(\d+)$/)[1]) : 0;
+      const units = selfTest ? (/^test-through-/.test(selfTest)
+        ? Array.from({ length: Math.min(5, last) }, (_, i) => `pa${i + 1}`)
+        : last <= 5 ? [`pa${last}`] : [])
+        : [comparison && comparison.includes("pptoken") ? "pptoken" : "inception"];
+      const target = localStage === "pa34" ? `-C pa34 ${selfTest || comparison}` : "inception";
+      return { kind: "inception", stages: ["pa34"], stage: "pa34", stageNumber: 34,
+        units, target, command: `make ${target}`, hasSubset: false, failFast: false };
+    }
     const through = args.find(v => /^test-report-through-pa\d+$/.test(v));
     const singles = args.filter(v => /^test-(?:report-)?pa\d+$/.test(v));
     const selection = words.find(v => /^ACTIVE_TEST_REPORT_PAS=/.test(v));
@@ -252,7 +272,12 @@
     const sources = createTracker().sources(command);
     return sources.length === 1 ? sources[0].info : null;
   }
+  function executionCommand(command) {
+    const segments = shellSegments(command);
+    return segments.length === 1 ? invocation(segments[0].tokens) : null;
+  }
+
   root.RALPH_TEST_COMMAND_PROVENANCE = {
-    shellSegments, createTracker, outputEvidence, directCommand, registerStageCommand, registerPhaseStatus,
+    executionCommand, shellSegments, createTracker, outputEvidence, directCommand, registerStageCommand, registerPhaseStatus,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

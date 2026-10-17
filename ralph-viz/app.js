@@ -1339,9 +1339,6 @@ function dockProgressBarHtml(phase, progress, model) {
 }
 
 function dockProgressLegendHtml(model, progress) {
-  if (progress?.unit === "checks") {
-    return `<div class="dock-progress-legend">${fmtInt(model.current)}/${fmtInt(model.total)}</div>`;
-  }
   const items = [];
   if (model.hasStart) {
     items.push({ key: "start", text: `start ${fmtInt(model.start)}` });
@@ -5470,29 +5467,55 @@ function buildAgentTestProgressState(records) {
 
 function buildConfiguredCheckProgress(records) {
   const byTurn = new Map();
+  const stageResults = new Map();
   for (const record of records) {
-    if (record.eventType !== "ralph.phase-status") continue;
-    const phase = record.event?.phaseStatus;
     const turn = displayTurnForRecord(record);
+    const previous = byTurn.get(turn);
+    const phase = record.eventType === "ralph.phase-status" ? record.event?.phaseStatus : null;
     const primary = phase?.primaryCheck ?? phase?.checks?.find(check => check.primary);
-    if (primary?.kind !== "generic") { byTurn.delete(turn); continue; }
-    const required = (phase.checks ?? []).filter(check => check.required !== false && check.name);
-    const ladder = required.find(check => /\btest-through-pa\d+\b/.test(check.command ?? ""));
-    // Each self-test assignment is one test, followed by the binary comparisons.
-    // Host regressions and file audit remain prerequisites outside this bar.
-    const count = Number(ladder?.command.match(/\btest-through-pa(\d+)\b/)?.[1]);
-    const tests = ladder ? [
-      ...Array.from({ length: count }, (_, index) =>
-        ladder.passed || ladder.testStages?.[`pa${index + 1}`] === true),
-      ...required.filter(check => check !== ladder &&
-        (check.primary || check.name === primary.name || /\bcompare-\S+-inception\b/.test(check.command ?? "")))
-        .map(check => check.passed === true),
-    ] : required.filter(check => check.name !== "fileAudit").map(check => check.passed === true);
-    if (!tests.length) continue;
-    const current = { passed: tests.filter(Boolean).length, total: tests.length, recordedAt: record.recordedAt };
-    byTurn.set(turn, { stage: phase.stage ?? primary.targetStage, turn,
-      recordedAt: record.recordedAt, unit: "checks", commandTarget: "stage tests",
-      status: current.passed === current.total ? "pass" : "running", current, best: current });
+    let stage = previous?.stage;
+    let results;
+    if (phase) {
+      if (primary?.kind !== "generic") { byTurn.delete(turn); continue; }
+      stage = phase.stage ?? primary.targetStage;
+      const required = (phase.checks ?? []).filter(check => check.required !== false && check.name);
+      const ladder = required.find(check => /\btest-through-pa\d+\b/.test(check.command ?? ""));
+      results = { ...(stageResults.get(stage) ?? {}) };
+      if (ladder) {
+        const count = Number(ladder.command.match(/\btest-through-pa(\d+)\b/)[1]);
+        for (let i = 1; i <= count; i++) {
+          const key = `pa${i}`;
+          if (ladder.passed) results[key] = true;
+          else if (typeof ladder.testStages?.[key] === "boolean") results[key] = ladder.testStages[key];
+          else if (!(key in results)) results[key] = false;
+        }
+        for (const check of required.filter(check => check !== ladder &&
+          (check.primary || check.name === primary.name || /\bcompare-\S+-inception\b/.test(check.command ?? "")))) {
+          const key = /compare-pptoken-inception/.test(check.command) ? "pptoken" : "inception";
+          if (check.passed || (!check.skipped && Number.isInteger(check.exitCode))) results[key] = check.passed === true;
+          else if (!(key in results)) results[key] = false;
+        }
+      } else {
+        results = Object.fromEntries(required.filter(check => check.name !== "fileAudit")
+          .map(check => [check.name, check.passed === true]));
+      }
+    } else {
+      const observation = record.eventType === "ralph.agent-progress" ? record.event?.progress : null;
+      if (!previous || !observation?.unitResults || observation.stage !== previous.stage) continue;
+      results = { ...previous.unitResults };
+      for (const [key, passed] of Object.entries(observation.unitResults)) {
+        if (key in results && typeof passed === "boolean") results[key] = passed;
+      }
+    }
+    const total = Object.keys(results).length;
+    if (!total) continue;
+    stageResults.set(stage, results);
+    const current = { passed: Object.values(results).filter(Boolean).length, total,
+      recordedAt: record.recordedAt };
+    byTurn.set(turn, { stage, turn, recordedAt: record.recordedAt, unit: "checks", unitResults: results,
+      commandTarget: "stage tests", status: current.passed === total ? "pass" : "running",
+      start: previous?.start ?? current, current,
+      best: previous?.best?.passed > current.passed ? previous.best : current });
   }
   return byTurn;
 }
@@ -5538,7 +5561,6 @@ function applyProgressBestCache(progressState, run = null) {
 }
 
 function mergeProgressBestCache(runKey, progress) {
-  if (progress?.unit === "checks") return { progress, cacheChanged: false };
   const cacheKey = progressBestCacheKey(runKey, progress);
   if (!cacheKey) {
     return { progress, cacheChanged: false };

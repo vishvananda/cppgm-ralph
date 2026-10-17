@@ -62,7 +62,7 @@ const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 20;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 19;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 20;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -868,6 +868,17 @@ export function progressEventsFromRunEvents(events) {
       commandsBySessionStoreKey.set(asyncRecordMapKey(record, sessionStoreKey), command);
     }
     const sources = testCommands.sources(command, `${record.threadId ?? ""}:${record.turnNumber}`);
+    const completed = item.batch_commands?.length ? item.batch_commands : [{ command, output,
+      exit_code: item.exit_code }];
+    for (const part of completed) {
+      const info = TEST_COMMAND_PROVENANCE.executionCommand(part.command);
+      if (info?.kind !== "inception" || !Number.isInteger(part.exit_code)) continue;
+      const observation = progressObservationFromSessionOutput(part.output ?? part.aggregated_output ?? "",
+        record.recordedAt, info.command, part.exit_code);
+      if (observation) progressEvents.push({ recordedAt: record.recordedAt, threadId: record.threadId,
+        turnNumber: record.turnNumber, eventType: "ralph.agent-progress",
+        event: { type: "ralph.agent-progress", progress: observation } });
+    }
     if (!output) {
       continue;
     }
@@ -5332,6 +5343,18 @@ export async function scanCodexSessionProgressObservations(filePath, startOffset
     const commands = call?.batchCommands?.length
       ? call.batchCommands
       : [parentCommand ?? call?.command ?? ""];
+    if (commands.some(command => TEST_COMMAND_PROVENANCE.executionCommand(command)?.kind === "inception")) {
+      const batch = buildCommandBatch(commands, payload.output);
+      const completed = batch ?? (commands.length === 1 ? [{ command: commands[0], output: payload.output,
+        exit_code: parseFunctionOutputExitCode(payload.output, commands[0]) }] : []);
+      for (const part of completed) {
+        const info = TEST_COMMAND_PROVENANCE.executionCommand(part.command);
+        if (info?.kind !== "inception" || !Number.isInteger(part.exit_code)) continue;
+        const observation = progressObservationFromSessionOutput(commandOutputText(part.output),
+          record.timestamp, info.command, part.exit_code);
+        if (observation) observations.push(observation);
+      }
+    }
     // Even silent/redirected commands establish provenance for a later log read.
     const sources = testCommands.sources(commands.join("\n"), scope);
     if (
@@ -5339,7 +5362,7 @@ export async function scanCodexSessionProgressObservations(filePath, startOffset
       !line.includes("ALL TESTS PASSED SUCCESSFULLY") &&
       !line.includes(": PASS (") &&
       !line.includes(": FAIL (") &&
-      !line.includes(": FAIL after ")
+      !line.includes(": FAIL after ") && !line.includes("MATCH ") && !line.includes("mismatch:")
     ) {
       continue;
     }
@@ -5367,8 +5390,26 @@ function progressObservationFromCodexOutputRecord(record, command = "") {
   return progressObservationFromSessionOutput(output, record.timestamp, command);
 }
 
-export function progressObservationFromSessionOutput(output, recordedAt, command = "") {
+export function progressObservationFromSessionOutput(output, recordedAt, command = "", exitCode = null) {
   const commandInfo = parseSingleStageProgressCommand(command);
+  if (commandInfo?.kind === "inception") {
+    const unitResults = {};
+    if (exitCode === 0) for (const unit of commandInfo.units) unitResults[unit] = true;
+    else if (Number.isInteger(exitCode) && commandInfo.units.length === 1) unitResults[commandInfo.units[0]] = false;
+    for (const match of String(output).matchAll(/^(pa[1-5]) tests: (PASS|FAIL)(?: \(| after )/gm)) {
+      if (commandInfo.units.includes(match[1])) unitResults[match[1]] = match[2] === "PASS";
+    }
+    for (const unit of ["pptoken", "inception"]) {
+      if (!commandInfo.units.includes(unit)) continue;
+      const tool = unit === "pptoken" ? "pptoken" : "cppgm\\+\\+";
+      if (new RegExp(`^MATCH ${tool}:`, "m").test(output)) unitResults[unit] = true;
+      else if (/^mismatch:/m.test(output)) unitResults[unit] = false;
+    }
+    if (!Object.keys(unitResults).length) return null;
+    return normalizeProgressObservation({ recordedAt, stage: "pa34", total: 7, unitResults,
+      passed: Object.values(unitResults).filter(Boolean).length,
+      status: Object.values(unitResults).every(Boolean) ? "pass" : "fail" });
+  }
   // A test summary printed by `cat`/`tail` is historical evidence, not a new
   // test execution.  Require the associated command to identify a supported
   // test target before allowing its output to move live progress.
@@ -5634,6 +5675,7 @@ function normalizeProgressObservation(raw) {
     status: raw?.status === "pass" ? "pass" : raw?.status === "running" ? "running" : "fail",
     hasSubset: raw?.hasSubset === true,
     ...(raw?.partialStage === true ? { partialStage: true } : {}),
+    ...(raw?.unitResults ? { unitResults: raw.unitResults } : {}),
   };
 }
 
@@ -5658,6 +5700,7 @@ function progressObservationKey(observation) {
     observation.total,
     observation.partialStage ? "partial" : "complete",
     observation.status,
+    JSON.stringify(observation.unitResults ?? null),
   ].join("|");
 }
 
@@ -5665,7 +5708,8 @@ function compactBestProgressEvents(events) {
   const byKey = new Map();
   for (const event of events) {
     const progress = event.event?.progress;
-    const key = [event.turnNumber, progress?.stage, progress?.total].join("|");
+    const key = [event.turnNumber, progress?.stage, progress?.total,
+      progress?.unitResults ? `${event.recordedAt}:${JSON.stringify(progress.unitResults)}` : ""].join("|");
     const previous = byKey.get(key);
     if (!previous || compareProgressEvents(event, previous) > 0) {
       byKey.set(key, event);

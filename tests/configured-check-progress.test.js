@@ -70,13 +70,12 @@ test("a skipped generic inception result cannot inherit the prior host test log"
   assert.deepEqual(f.checks[2].testStages,{pa1:true,pa2:true},"a newer log cannot rewrite an older check snapshot");
 });
 
-test("PA34 has seven equal tests and only a bar, excluding host totals and file audit",async()=>{
+test("PA34 uses the standard start/current/best legend with seven tests",async()=>{
   const b=await browser(),f=fixture();
   f.checks[2].testStages={pa1:true,pa2:true,pa3:true,pa4:false};
   const progress=b.buildAgentTestProgressState(f.records).latest;
   assert.equal(progress.current.total,7);
   assert.equal(progress.current.passed,3);
-  assert.equal(b.mergeProgressBestCache("run",progress).progress,progress);
   f.testStatus.testsTotal=6675;
   f.testStatus.testsPassed=6675;
   f.testStatus.allTestsPassed=true;
@@ -84,20 +83,28 @@ test("PA34 has seven equal tests and only a bar, excluding host totals and file 
   const model=b.RALPH_TEST_STATUS_SUMMARY.buildTurnProgressModel(progress);
   assert.equal(model.rows.length,1);
   const html=b.dockProgressBarHtml(f.phaseStatus,progress,model);
-  assert.match(html,/3\/7/);
+  assert.match(html,/start 3/);
+  assert.match(html,/current 3/);
+  assert.match(html,/best 3/);
+  assert.match(html,/7 total/);
   assert.doesNotMatch(html,/phase-check-list|6,675|File Audit|Checked/);
 });
 
-test("manual command feeds cannot replace recorded phase-check outcomes",async()=>{
+test("self-hosted results update current and preserve earlier best",async()=>{
   const b=await browser(),f=fixture();
-  f.records.push(f.record("item.completed",{item:{type:"command_execution",id:"self",
-    command:f.checks[2].command,exit_code:0,
-    aggregated_output:"pa1 tests: PASS (20/20)\npa2 tests: PASS (30/30)\n"}},"10"));
-  f.records.push(f.record("item.completed",{item:{type:"command_execution",id:"prior",
-    command:f.checks[1].command,exit_code:2,aggregated_output:""}},"11"));
+  const add=(unitResults,second)=>f.records.push(f.record("ralph.agent-progress",{progress:{
+    stage:"pa34",total:7,unitResults,passed:Object.values(unitResults).filter(Boolean).length,
+    status:"pass",hasSubset:false}},second));
+  add({pa1:true,pa2:true,pa3:true,pa4:true,pa5:true},"10");
+  add({pptoken:true},"11");
+  add({pa3:false},"12");
   const progress=b.buildAgentTestProgressState(f.records).latest;
-  assert.equal(progress.current.passed,0);
+  assert.equal(progress.start.passed,0);
+  assert.equal(progress.current.passed,5);
+  assert.equal(progress.best.passed,6);
   assert.equal(progress.current.total,7);
+  const model=b.RALPH_TEST_STATUS_SUMMARY.buildTurnProgressModel(progress);
+  assert.match(b.dockProgressBarHtml(f.phaseStatus,progress,model),/7 total/);
 });
 
 test("self tests count five and each comparison adds one, independent of file audit",async()=>{
