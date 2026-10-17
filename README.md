@@ -385,7 +385,8 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   before the phase can complete. `dependsOn` names checks that must pass earlier
   in the same phase before this check runs; a skipped required check still keeps
   the phase from completing. `targetStage` binds a non-template command to a PA
-  for state, prompts, and visualization. `onlyStages` and `excludeStages` make a
+  for state, prompts, visualization, and advancement to the next stage after the
+  final phase passes. `onlyStages` and `excludeStages` make a
   check apply only to selected PA stages.
 - `phases`
   Optional ordered array of phase definitions. Each phase has `name`, optional

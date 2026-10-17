@@ -4871,11 +4871,16 @@ function getNextStageAfterPassingCommand(testStatus, gitStatus) {
 }
 
 function getNextStageAfterCompletedPhase(testStatus) {
-  if (!testStatus?.usesStageTemplate || testStatus.exitCode !== 0) {
+  if (testStatus?.exitCode !== 0) {
     return null;
   }
-  const completedStage =
-    normalizeStageName(testStatus.passingThrough) ?? normalizeStageName(testStatus.targetStage);
+  const targetStage = normalizeStageName(testStatus.targetStage);
+  // A literal command can identify its completed stage through targetStage.
+  // Commands without either kind of stage binding remain single-command runs.
+  if (!testStatus.usesStageTemplate && !targetStage) {
+    return null;
+  }
+  const completedStage = normalizeStageName(testStatus.passingThrough) ?? targetStage;
   return getNextStageName(completedStage);
 }
 
