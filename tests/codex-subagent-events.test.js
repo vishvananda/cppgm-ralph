@@ -240,3 +240,47 @@ function record(timestamp, type, payload) {
 async function writeJsonl(filePath, records) {
   await fs.writeFile(filePath, `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 }
+
+test("child discovery reuses unchanged logs and reads appended UTF-8 records without losing resets", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-child-cache-"));
+  t.after(() => fs.rm(root, {recursive:true,force:true}));
+  const sessions = path.join(root,"sessions");
+  await fs.mkdir(sessions);
+  const parentFile = path.join(sessions,`rollout-${ROOT_THREAD}.jsonl`);
+  const childFile = path.join(sessions,`rollout-${CHILD_THREAD}.jsonl`);
+  await writeJsonl(parentFile,[record("2026-08-22T14:00:01Z","event_msg",{type:"task_started"})]);
+  await writeJsonl(childFile,[
+    record("2026-08-22T14:01:00Z","session_meta",{id:CHILD_THREAD,
+      source:{subagent:{thread_spawn:{parent_thread_id:ROOT_THREAD}}}}),
+    record("2026-08-22T14:01:02Z","event_msg",{type:"task_complete",duration_ms:2000}),
+  ]);
+  const fsSync = (await import("node:fs")).default;
+  const originalStream = fsSync.createReadStream;
+  const reads = [];
+  t.mock.method(fsSync,"createReadStream",function(file,options){
+    if(file===parentFile) reads.push(options?.start ?? 0);
+    return originalStream.call(this,file,options);
+  });
+  const events = [{recordedAt:"2026-08-22T14:00:00Z",threadId:ROOT_THREAD,turnNumber:1,
+    eventType:"ralph.prompt",event:{type:"ralph.prompt"}}];
+  const collect = () => collectCodexSubagentEvents(events,{codexDir:root});
+  assert.deepEqual(await collect(),[]);
+  assert.deepEqual(await collect(),[]);
+  assert.deepEqual(reads,[0],"unchanged parent logs must not be rescanned");
+  const offset = (await fs.stat(parentFile)).size;
+  const addition = Buffer.from(JSON.stringify(record("2026-08-22T14:01:01Z","response_item",{
+    type:"custom_tool_call_output",output:JSON.stringify({agent_id:CHILD_THREAD,nickname:"✓"}),
+  }))+"\n");
+  const split = addition.indexOf(Buffer.from("✓"))+1;
+  await fs.appendFile(parentFile,addition.subarray(0,split));
+  assert.deepEqual(await collect(),[]);
+  await fs.appendFile(parentFile,addition.subarray(split));
+  assert.equal((await collect()).length,2);
+  assert.deepEqual(reads,[0,offset,offset],"partial records retry from their original byte boundary");
+  const oldSize = (await fs.stat(parentFile)).size;
+  await fs.writeFile(parentFile," ".repeat(oldSize-1)+"\n");
+  const stamp = new Date(Date.now()+2000);
+  await fs.utimes(parentFile,stamp,stamp);
+  assert.deepEqual(await collect(),[]);
+  assert.equal(reads.at(-1),0,"rewritten logs must discard cached children");
+});

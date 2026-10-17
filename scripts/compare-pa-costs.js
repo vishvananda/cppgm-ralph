@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 import "../ralph-viz/model-pricing.js";
 import "../ralph-viz/assignment-layouts.js";
 import "../ralph-viz/turn-lifecycle.js";
+import { compactRunUsageEvent } from "../run-usage-events.js";
 import {
   collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -179,7 +180,7 @@ async function readJsonl(filePath) {
     try {
       const record = JSON.parse(line);
       if (comparisonEventRelevant(record)) {
-        records.push(record);
+        records.push(compactRunUsageEvent(record));
       }
     } catch (error) {
       throw new Error(`${filePath}:${index}: ${error.message}`);

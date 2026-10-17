@@ -10,6 +10,7 @@ import readline from "node:readline";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import "./assignment-layouts.js";
 import "./model-pricing.js";
 import "./test-progress-evidence.js";
@@ -24,6 +25,7 @@ import {
   DEFAULT_CLAUDE_PROJECTS_DIR,
 } from "../subagent-events.js";
 import { addUnrealSessionDisplayEvents } from "../unreal-session-events.js";
+import { compactRunUsageEvent } from "../run-usage-events.js";
 import { codexCommandCompletionEvent } from "../codex-session-events.js";
 
 const ROOT_DIR = process.cwd();
@@ -36,6 +38,7 @@ const SERVER_FILE = fileURLToPath(import.meta.url);
 const SPA_DIR = path.dirname(SERVER_FILE);
 const REPO_DIR = path.dirname(SPA_DIR);
 const execFileAsync = promisify(execFile);
+const gzipAsync = promisify(gzip);
 const ASSIGNMENT_LAYOUT = globalThis.RALPH_ASSIGNMENT_LAYOUT;
 const MODEL_PRICING = globalThis.RALPH_MODEL_PRICING;
 const TEST_PROGRESS_EVIDENCE = globalThis.RALPH_TEST_PROGRESS_EVIDENCE;
@@ -56,7 +59,7 @@ const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
 const RUN_USAGE_CACHE_VERSION = 28;
 const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
-const RUN_STRUCTURE_CACHE_VERSION = 1;
+const RUN_STRUCTURE_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 20;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
 const CODEX_SESSION_PROGRESS_CACHE_VERSION = 19;
@@ -76,6 +79,8 @@ const OPEN_CODEX_SESSION_READS = new Map();
 const RUN_TAIL_FILE_CACHES = new Map();
 const RUN_TAIL_FILE_READS = new Map();
 const RUN_STRUCTURE_FILE_READS = new Map();
+const RUN_STRUCTURE_FILE_CACHES = new Map();
+const RUN_STRUCTURE_CACHE_LIMIT = 16;
 let CODEX_SESSION_INDEX_CACHE = null;
 let APP_BUILD_ID_CACHE = null;
 const RUN_USAGE_REFRESHES = new Map();
@@ -481,7 +486,7 @@ function usageDominates(candidate, existing) {
 async function readRecentRunTailEvents(filePath, detailOptions) {
   const [tailEvents, structuralEvents] = await Promise.all([
     readCachedRunTailEvents(filePath),
-    readRunStructuralEvents(filePath),
+    readRunStructuralEvents(filePath, detailOptions.tailTurns ?? DEFAULT_CODEX_TAIL_TURNS),
   ]);
   const events = mergeEventStreams(structuralEvents, tailEvents);
   const wantedTurns = latestTurnNumbersFromEvents(
@@ -491,12 +496,34 @@ async function readRecentRunTailEvents(filePath, detailOptions) {
   return events.filter((event) => wantedTurns.has(event.turnNumber));
 }
 
-async function readRunStructuralEvents(filePath) {
+// Index byte ranges instead of caching entire command outputs and test reports.
+// Tail views only hydrate the requested turns; pricing keeps a small model history.
+async function readRunStructuralEvents(filePath, tailTurns = DEFAULT_CODEX_TAIL_TURNS) {
+  const index = await readRunStructureIndex(filePath);
+  const wanted = latestTurnNumbersFromEvents(index.entries, tailTurns);
+  const entries = index.entries.filter((entry) => wanted.has(entry.turnNumber));
+  const events = [];
+  const handle = await fs.open(filePath, "r");
+  try {
+    for (const entry of entries) {
+      const buffer = Buffer.allocUnsafe(entry.length);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, entry.offset);
+      try {
+        events.push(JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")));
+      } catch (_) {
+        // The worker may have reset the log while this request was reading it.
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+  return events;
+}
+
+async function readRunStructureIndex(filePath) {
   const cacheKey = path.resolve(filePath);
   const pending = RUN_STRUCTURE_FILE_READS.get(cacheKey);
-  if (pending) {
-    return pending;
-  }
+  if (pending) return pending;
   const read = refreshRunStructureCache(filePath);
   RUN_STRUCTURE_FILE_READS.set(cacheKey, read);
   try {
@@ -511,82 +538,84 @@ async function readRunStructuralEvents(filePath) {
 async function refreshRunStructureCache(filePath) {
   const stat = await fs.stat(filePath);
   const cachePath = runStructureCachePath(filePath);
-  let cache = null;
-  try {
-    cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      cache = null;
-    }
+  const cacheKey = path.resolve(filePath);
+  let cache = RUN_STRUCTURE_FILE_CACHES.get(cacheKey);
+  if (!cache) {
+    try {
+      cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
+    } catch (_) {}
   }
-
   if (
     cache?.version !== RUN_STRUCTURE_CACHE_VERSION ||
     !Number.isFinite(cache?.fileSize) ||
-    cache.fileSize < 0 ||
-    cache.fileSize > stat.size ||
-    !Array.isArray(cache?.events)
+    cache.fileSize < 0 || cache.fileSize > stat.size ||
+    (cache.fileSize === stat.size && cache.mtimeMs !== stat.mtimeMs) ||
+    !Array.isArray(cache?.entries) || !Array.isArray(cache?.phaseEvents)
   ) {
-    cache = {
-      version: RUN_STRUCTURE_CACHE_VERSION,
-      fileSize: 0,
-      trailingText: "",
-      events: [],
-    };
+    cache = { version: RUN_STRUCTURE_CACHE_VERSION, fileSize: 0,
+      trailingBytes: "", entries: [], phaseEvents: [] };
   }
-
   if (cache.fileSize < stat.size) {
     const delta = await scanRunStructuralEventDelta(
-      filePath,
-      cache.fileSize,
-      stat.size,
-      cache.trailingText,
+      filePath, cache.fileSize, stat.size, cache.trailingBytes,
     );
     cache.fileSize = stat.size;
-    cache.trailingText = delta.trailingText;
-    cache.events.push(...delta.events);
+    cache.mtimeMs = stat.mtimeMs;
+    cache.trailingBytes = delta.trailingBytes;
+    cache.entries = cache.entries.concat(delta.entries);
+    cache.phaseEvents = cache.phaseEvents.concat(delta.phaseEvents);
     await writeJsonAtomically(cachePath, cache);
   }
-  return cache.events;
+  // LRU bounds retention when browsing many runs in a long-lived server.
+  RUN_STRUCTURE_FILE_CACHES.delete(cacheKey);
+  RUN_STRUCTURE_FILE_CACHES.set(cacheKey, cache);
+  while (RUN_STRUCTURE_FILE_CACHES.size > RUN_STRUCTURE_CACHE_LIMIT) {
+    RUN_STRUCTURE_FILE_CACHES.delete(RUN_STRUCTURE_FILE_CACHES.keys().next().value);
+  }
+  return cache;
 }
 
-async function scanRunStructuralEventDelta(filePath, start, end, leadingText = "") {
-  const events = [];
-  let buffered = String(leadingText ?? "");
-  if (end <= start) {
-    return { events, trailingText: buffered };
-  }
+async function scanRunStructuralEventDelta(filePath, start, end, leadingBytes = "") {
+  const entries = [];
+  const phaseEvents = [];
+  let buffered = Buffer.from(leadingBytes, "base64");
+  let offset = start - buffered.length;
+  if (end <= start) return { entries, phaseEvents, trailingBytes: leadingBytes };
   const stream = createReadStream(filePath, {
-    encoding: "utf8",
-    start: Math.max(0, start),
-    end: Math.max(0, end - 1),
+    start: Math.max(0, start), end: Math.max(0, end - 1),
   });
   for await (const chunk of stream) {
-    buffered += chunk;
+    buffered = buffered.length ? Buffer.concat([buffered, chunk]) : chunk;
+    let lineStart = 0;
     let newline;
-    while ((newline = buffered.indexOf("\n")) >= 0) {
-      const line = buffered.slice(0, newline).trim();
-      buffered = buffered.slice(newline + 1);
-      if (!line) {
-        continue;
-      }
+    while ((newline = buffered.indexOf(10, lineStart)) >= 0) {
+      const length = newline + 1 - lineStart;
+      const line = buffered.subarray(lineStart, newline + 1).toString("utf8");
+      lineStart = newline + 1;
       try {
         const event = JSON.parse(line);
         if (event && typeof event === "object" && isAlwaysKeptSessionEvent(event)) {
-          events.push(event);
+          entries.push({ turnNumber: event.turnNumber, offset, length });
+          if (event.eventType === "ralph.phase-status") {
+            phaseEvents.push({ recordedAt: event.recordedAt, threadId: event.threadId,
+              turnNumber: event.turnNumber, eventType: event.eventType,
+              event: { type: event.eventType, action: event.event?.action,
+                agentProfile: event.event?.agentProfile } });
+          }
         }
-      } catch (_) {
-        // A partial final line is retained and completed by the next refresh.
-      }
+      } catch (_) {}
+      offset += length;
     }
+    buffered = buffered.subarray(lineStart);
   }
-  return { events, trailingText: buffered };
+  return { entries, phaseEvents, trailingBytes: buffered.toString("base64") };
 }
 
 function runStructureCachePath(filePath) {
   const fileBase = path.basename(filePath, ".jsonl");
   const runDir = path.dirname(path.dirname(filePath));
-  return path.join(runDir, RUN_USAGE_CACHE_DIR, `${fileBase}.structure.json`);
+  // A separate filename avoids ever parsing the old, potentially huge cache.
+  return path.join(runDir, RUN_USAGE_CACHE_DIR, `${fileBase}.structure-v2.json`);
 }
 
 async function writeJsonAtomically(filePath, value) {
@@ -630,6 +659,7 @@ async function refreshRunTailFileCache(cacheKey, filePath) {
   if (
     !entry ||
     stat.size < entry.fileSize ||
+    (stat.size === entry.fileSize && entry.mtimeMs !== stat.mtimeMs) ||
     stat.size - entry.fileSize > RUN_RESPONSE_TURN_MAX_BYTES
   ) {
     const bytesToRead = Math.min(stat.size, RUN_RESPONSE_TURN_MAX_BYTES);
@@ -638,6 +668,7 @@ async function refreshRunTailFileCache(cacheKey, filePath) {
     const split = splitCompleteSessionLines(text, start > 0);
     entry = {
       fileSize: stat.size,
+      mtimeMs: stat.mtimeMs,
       lastUsedAt: Date.now(),
       records: parseRunTailRecords(split.lines),
       trailingText: split.trailingText,
@@ -656,6 +687,7 @@ async function refreshRunTailFileCache(cacheKey, filePath) {
     entry.trailingText = split.trailingText;
     trimRunTailFileCache(entry);
   }
+  entry.mtimeMs = stat.mtimeMs;
   entry.lastUsedAt = Date.now();
   return entry;
 }
@@ -1286,7 +1318,7 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
 
   let summary = normalizeRunUsageSummary(cacheEntry.summary, stat, fileBase);
   const deltaEvents = cachedSize < stat.size
-    ? await readRunEventsFromOffset(filePath, cachedSize, stat.size)
+    ? await readRunEventsFromOffset(filePath, cachedSize, stat.size, compactRunUsageEvent)
     : [];
 
   if (deltaEvents.length) {
@@ -1294,7 +1326,7 @@ async function refreshStaleFastRunUsageSummary(shape, filePath, fileBase, stat, 
       // Finalize completed turns from the complete Ralph log. Incremental
       // fragments cannot safely bridge a long reasoning interval or distinguish
       // it from a recorded restart/quota wait without the preceding boundary.
-      const fullEvents = await appendSubagentUsageEvents(await readRunFile(filePath));
+      const fullEvents = await appendSubagentUsageEvents(await readRunEventsFromOffset(filePath, 0, null, compactRunUsageEvent));
       summary = buildRunLogUsageSummary(fileBase, stat, fullEvents, usageMode);
     } else {
       extendRunLogUsageSummaryFromEvents(summary, deltaEvents, usageMode);
@@ -1329,7 +1361,7 @@ async function replaceTouchedSummaryThreadUsages(summary, events) {
     .map(([threadId, usage]) => ({ threadId, usage: normalizeUsage(usage) }));
 }
 
-async function readRunEventsFromOffset(filePath, offset, endOffset = null) {
+async function readRunEventsFromOffset(filePath, offset, endOffset = null, project = (event) => event) {
   const events = [];
   const stream = createReadStream(filePath, {
     encoding: "utf8",
@@ -1347,7 +1379,7 @@ async function readRunEventsFromOffset(filePath, offset, endOffset = null) {
     try {
       const parsed = JSON.parse(line);
       if (parsed && typeof parsed === "object") {
-        events.push(parsed);
+        events.push(project(parsed));
       }
     } catch (_) {
       // If the cached byte offset landed in the middle of a line, the first
@@ -1912,7 +1944,7 @@ async function readLooseRunUsageCacheEntry(shape, fileBase) {
 async function readRunUsageSummary(shape, filePath, fileBase, usageMode) {
   const stat = await fs.stat(filePath);
   const precision = runUsagePrecision(usageMode);
-  const events = await readRunFile(filePath);
+  const events = await readRunEventsFromOffset(filePath, 0, null, compactRunUsageEvent);
   const usageEvents = precision ? await appendSubagentUsageEvents(events) : events;
   if (precision === "fast") {
     const summary = buildRunLogUsageSummary(fileBase, stat, usageEvents, usageMode);
@@ -7431,12 +7463,21 @@ async function currentRunId() {
 }
 
 async function sendJson(res, payload, status = 200) {
-  const body = JSON.stringify(payload);
+  let body = JSON.stringify(payload);
+  const acceptsGzip = String(res.req?.headers?.["accept-encoding"] ?? "")
+    .split(",").some((encoding) => {
+      const match = encoding.match(/^\s*gzip(?:\s*;\s*q=(0(?:\.\d+)?|1(?:\.0+)?))?\s*$/i);
+      return match && Number(match[1] ?? 1) > 0;
+    });
+  const compressed = acceptsGzip && Buffer.byteLength(body) >= 16 * 1024;
+  if (compressed) body = await gzipAsync(body, { level: 1 });
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store, max-age=0, must-revalidate",
     "Pragma": "no-cache",
     "Expires": "0",
+    "Vary": "Accept-Encoding",
+    ...(compressed ? { "Content-Encoding": "gzip" } : {}),
     "Content-Length": Buffer.byteLength(body),
   });
   res.end(body);
@@ -7882,9 +7923,9 @@ async function requestHandler(req, res) {
           })
         : await readFastShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
       const configured = await configuredRunMetadataForShape(runRef.shape);
-      const structuralEvents = await readRunStructuralEvents(runRef.filePath);
+      const { phaseEvents } = await readRunStructureIndex(runRef.filePath);
       const attributionEvents = mergeEventStreams(
-        structuralEvents.filter((event) => event.eventType === "ralph.phase-status"),
+        phaseEvents,
         events,
       );
       shapeUsage = attributeShapeUsageModels(shapeUsage, attributionEvents, configured.model);

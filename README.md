@@ -172,6 +172,11 @@ refreshes local comparison accounting once per minute. Override the baseline
 artifact with `RALPH_VIZ_PUBLISHED_COMPARISON_URL`; by default it uses the
 public `ralph-run-viewer-zippy-960` export.
 
+Tail views index event byte ranges in `.ralph/<run>/usage-cache` and load
+command output and test reports only for the selected turns. Usage and comparison
+accounting retain compact metadata instead of full transcripts. The index is
+rebuilt from the event log when missing or invalid.
+
 Build the static viewer with:
 
 ```bash

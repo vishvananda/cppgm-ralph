@@ -15,6 +15,9 @@ import {
 const CODEX_INDEX_TTL_MS = 2_000;
 const THREAD_ID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const sessionIndexes = new Map();
+const childReferenceCaches = new Map();
+const childReferenceReads = new Map();
+const CHILD_REFERENCE_CACHE_LIMIT = 128;
 
 export const DEFAULT_CODEX_DIR = path.join(os.homedir(), ".codex");
 
@@ -122,31 +125,67 @@ function subagentItem(child, status) {
 async function readChildReferences(filePaths) {
   const refs = new Map();
   for (const filePath of filePaths) {
-    const lines = readline.createInterface({
-      input: fsSync.createReadStream(filePath, { encoding: "utf8" }),
-      crlfDelay: Infinity,
-    });
-    for await (const line of lines) {
-      if (!line.includes("agent_id") && !line.includes("agent_path") && !line.includes("subagent_notification")) {
-        continue;
-      }
-      let raw;
-      try {
-        raw = JSON.parse(line);
-      } catch (_) {
-        continue;
-      }
-      const recordedAt = textValue(raw.timestamp);
-      const text = responsePayloadText(raw.payload);
-      for (const threadId of extractAgentThreadIds(text)) {
-        mergeChildReference(refs, { threadId, startedAt: recordedAt });
-      }
-      for (const notification of parseSubagentNotifications(text, recordedAt)) {
-        mergeChildReference(refs, notification);
-      }
-    }
+    const cached = await readChildReferencesFromFile(filePath);
+    for (const reference of cached.values()) mergeChildReference(refs, reference);
   }
   return refs;
+}
+
+async function readChildReferencesFromFile(filePath) {
+  const pending = childReferenceReads.get(filePath);
+  if (pending) return pending;
+  const read = refreshChildReferences(filePath);
+  childReferenceReads.set(filePath, read);
+  try {
+    return await read;
+  } finally {
+    if (childReferenceReads.get(filePath) === read) childReferenceReads.delete(filePath);
+  }
+}
+
+async function refreshChildReferences(filePath) {
+  const stat = await fs.stat(filePath);
+  let entry = childReferenceCaches.get(filePath);
+  if (!entry || stat.size < entry.size ||
+      (stat.size === entry.size && stat.mtimeMs !== entry.mtimeMs)) {
+    entry = { refs: new Map(), offset: 0, size: 0 };
+  }
+  if (stat.size > entry.offset) {
+    let buffered = Buffer.alloc(0);
+    const stream = fsSync.createReadStream(filePath, { start: entry.offset, end: stat.size - 1 });
+    for await (const chunk of stream) {
+      buffered = buffered.length ? Buffer.concat([buffered, chunk]) : chunk;
+      let start = 0;
+      let newline;
+      while ((newline = buffered.indexOf(10, start)) >= 0) {
+        const line = buffered.subarray(start, newline + 1).toString("utf8");
+        entry.offset += newline + 1 - start;
+        start = newline + 1;
+        if (!line.includes("agent_id") && !line.includes("agent_path") &&
+            !line.includes("subagent_notification")) continue;
+        let raw;
+        try { raw = JSON.parse(line); } catch (_) { continue; }
+        const recordedAt = textValue(raw.timestamp);
+        const text = responsePayloadText(raw.payload);
+        for (const threadId of extractAgentThreadIds(text)) {
+          mergeChildReference(entry.refs, { threadId, startedAt: recordedAt });
+        }
+        for (const notification of parseSubagentNotifications(text, recordedAt)) {
+          mergeChildReference(entry.refs, notification);
+        }
+      }
+      buffered = buffered.subarray(start);
+    }
+    // Retry partial final records from their byte offset on the next refresh.
+  }
+  entry.size = stat.size;
+  entry.mtimeMs = stat.mtimeMs;
+  childReferenceCaches.delete(filePath);
+  childReferenceCaches.set(filePath, entry);
+  while (childReferenceCaches.size > CHILD_REFERENCE_CACHE_LIMIT) {
+    childReferenceCaches.delete(childReferenceCaches.keys().next().value);
+  }
+  return entry.refs;
 }
 
 function mergeChildReference(refs, update) {
