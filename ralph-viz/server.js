@@ -3436,7 +3436,7 @@ export async function augmentLatestTestStatusFromLog(events, filePath) {
   const primary = phase?.primaryCheck ?? phase?.checks?.find((check) => check.primary);
   if (primary?.kind === "generic" && primary.command === statusRecord.event.testStatus.command) {
     const phaseRecord = [...events].reverse().find((record) => record.event?.phaseStatus === phase);
-    await augmentGenericPhaseCheckCounts(phaseRecord, stateDir);
+    await augmentSelfTestStages(phaseRecord, stateDir);
     return;
   }
 
@@ -3483,38 +3483,23 @@ export async function augmentLatestTestStatusFromLog(events, filePath) {
   replaceCopies(original, derived);
 }
 
-async function augmentGenericPhaseCheckCounts(record, stateDir) {
-  const phase = record?.event?.phaseStatus;
+async function augmentSelfTestStages(record, stateDir) {
   const recordedMs = Date.parse(record?.recordedAt ?? "");
-  if (!phase || !Number.isFinite(recordedMs)) return;
-  for (const check of phase.checks ?? []) {
-    if (check.skipped || !/^[A-Za-z0-9._-]+$/.test(check.name ?? "")) continue;
+  if (!Number.isFinite(recordedMs)) return;
+  for (const check of record?.event?.phaseStatus?.checks ?? []) {
+    if (check.skipped || !/\btest-through-pa\d+\b/.test(check.command ?? "") ||
+        !/^[A-Za-z0-9._-]+$/.test(check.name ?? "")) continue;
     const logPath = path.join(stateDir, "checks", `last-${check.name}.log`);
     try {
       const stat = await fs.stat(logPath);
-      // Last-check files are overwritten. A newer log belongs to a later
-      // validation and cannot repair an older phase snapshot.
       if (stat.mtimeMs > recordedMs + 1000) continue;
       const lines = readline.createInterface({ input: createReadStream(logPath, { encoding: "utf8" }),
         crlfDelay: Infinity });
-      const reports = [];
+      check.testStages = {};
       for await (const line of lines) {
-        if (/^=====|^.+?: (?:PASS|FAIL)(?: \(| after )/.test(line)) reports.push(line);
+        const match = line.match(/^(pa\d+) tests: (PASS|FAIL)(?: \(| after )/);
+        if (match) check.testStages[match[1]] = match[2] === "PASS";
       }
-      const output = reports.join("\n");
-      const summary = parseTestReportSummary(output);
-      if (summary?.hasCounts && summary.testsTotal > 0) {
-        check.testCounts = { passed: summary.testsPassed, total: summary.testsTotal };
-        continue;
-      }
-      const stages = new Set([...output.matchAll(/^(pa\d+)(?=[/ ])/gm)].map(match => match[1]));
-      const observations = [...stages].map(stage => parseSingleStageProgressFromSessionOutput(
-        output, stage, { allowPartialTargets: true })).filter(Boolean);
-      const total = observations.reduce((sum, observation) => sum + observation.total, 0);
-      if (total > 0) check.testCounts = {
-        passed: observations.reduce((sum, observation) => sum + observation.passed, 0),
-        total, observedOnly: !check.passed,
-      };
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }

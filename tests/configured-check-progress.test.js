@@ -62,35 +62,30 @@ test("a skipped generic inception result cannot inherit the prior host test log"
   assert.equal(f.records[1].event.testStatus.testsPassed,0);
   assert.equal(f.records[1].event.testStatus.allTestsPassed,false);
   assert.equal(f.checks[1].testStatus.testsTotal,6675);
-  assert.deepEqual(f.checks[2].testCounts,{passed:50,total:50,observedOnly:true});
-  assert.equal(f.checks[4].testCounts,undefined);
+  assert.deepEqual(f.checks[2].testStages,{pa1:true,pa2:true});
+  assert.equal(f.checks[4].testStages,undefined);
   await fs.writeFile(selfLog,"pa1 tests: PASS (999/999)\n");
   await fs.utimes(selfLog,new Date("2026-10-17T03:38:10Z"),new Date("2026-10-17T03:38:10Z"));
   await augmentLatestTestStatusFromLog(f.records,path.join(root,"events","run.jsonl"));
-  assert.equal(f.checks[2].testCounts.total,50,"a newer log cannot rewrite an older check snapshot");
+  assert.deepEqual(f.checks[2].testStages,{pa1:true,pa2:true},"a newer log cannot rewrite an older check snapshot");
 });
 
-test("PA34 counts five checks and nests prerequisite test totals",async()=>{
+test("PA34 has seven equal tests and only a bar, excluding host totals and file audit",async()=>{
   const b=await browser(),f=fixture();
+  f.checks[2].testStages={pa1:true,pa2:true,pa3:true,pa4:false};
   const progress=b.buildAgentTestProgressState(f.records).latest;
-  assert.equal(progress.stage,"pa34");
-  assert.equal(progress.unit,"checks");
-  assert.equal(progress.current.total,5);
-  assert.equal(progress.current.passed,2);
-  assert.equal(progress.checks[1].counts.total,6675);
-  assert.equal(b.mergeProgressBestCache("run",progress).progress,progress,
-    "recorded check outcomes must not inherit browser estimates");
+  assert.equal(progress.current.total,7);
+  assert.equal(progress.current.passed,3);
+  assert.equal(b.mergeProgressBestCache("run",progress).progress,progress);
   f.testStatus.testsTotal=6675;
   f.testStatus.testsPassed=6675;
   f.testStatus.allTestsPassed=true;
-  assert.equal(b.buildAgentTestProgressState(f.records).latest.current.total,5,
-    "older inflated API results must not contaminate check progress");
+  assert.equal(b.buildAgentTestProgressState(f.records).latest.current.total,7);
   const model=b.RALPH_TEST_STATUS_SUMMARY.buildTurnProgressModel(progress);
+  assert.equal(model.rows.length,1);
   const html=b.dockProgressBarHtml(f.phaseStatus,progress,model);
-  assert.match(html,/5 checks/);
-  assert.match(html,/6,675\/6,675 tests/);
-  assert.match(html,/phase-check-skipped/);
-  assert.doesNotMatch(html,/6,675 total/);
+  assert.match(html,/3\/7/);
+  assert.doesNotMatch(html,/phase-check-list|6,675|File Audit|Checked/);
 });
 
 test("manual command feeds cannot replace recorded phase-check outcomes",async()=>{
@@ -101,26 +96,25 @@ test("manual command feeds cannot replace recorded phase-check outcomes",async()
   f.records.push(f.record("item.completed",{item:{type:"command_execution",id:"prior",
     command:f.checks[1].command,exit_code:2,aggregated_output:""}},"11"));
   const progress=b.buildAgentTestProgressState(f.records).latest;
-  assert.equal(progress.current.passed,2);
-  assert.equal(progress.current.total,5);
-  assert.equal(progress.checks[1].passed,true);
-  assert.equal(progress.checks[2].passed,false);
+  assert.equal(progress.current.passed,0);
+  assert.equal(progress.current.total,7);
 });
 
-test("new harness results advance checks and retain nested test counts",async()=>{
+test("self tests count five and each comparison adds one, independent of file audit",async()=>{
   const b=await browser(),f=fixture();
   const checked=structuredClone(f.phaseStatus);
+  checked.checks[0].passed=false;
+  checked.checks[1].passed=false;
   checked.checks[2].passed=true;
-  checked.checks[2].exitCode=0;
-  checked.checks[2].testCounts={passed:50,total:50};
   f.records.push(f.record("ralph.phase-status",{action:"checked",phaseStatus:checked},"12"));
+  assert.equal(b.buildAgentTestProgressState(f.records).latest.current.passed,5);
+  checked.checks[3].passed=true;
+  assert.equal(b.buildAgentTestProgressState(f.records).latest.current.passed,6);
+  checked.checks[4].passed=true;
   const progress=b.buildAgentTestProgressState(f.records).latest;
-  assert.equal(progress.current.passed,3);
-  assert.equal(progress.current.total,5);
-  assert.equal(progress.start.passed,2);
-  assert.equal(progress.checks[2].counts.total,50);
-  assert.equal(progress.checks[2].counts.passed,50);
-  assert.equal(progress.checks[4].passed,false);
+  assert.equal(progress.current.passed,7);
+  assert.equal(progress.current.total,7);
+  assert.equal(progress.status,"pass");
 });
 
 test("a later normal test stage keeps its own numeric suite progress",async()=>{

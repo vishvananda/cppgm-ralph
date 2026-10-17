@@ -1333,13 +1333,15 @@ function dockProgressBarHtml(phase, progress, model) {
           <div class="dock-progress-fallback${singleRowClass}">${fallback}</div>
         </div>
         ${dockProgressLegendHtml(model, progress)}
-        ${configuredCheckListHtml(progress)}
       </div>
     </div>
   `;
 }
 
 function dockProgressLegendHtml(model, progress) {
+  if (progress?.unit === "checks") {
+    return `<div class="dock-progress-legend">${fmtInt(model.current)}/${fmtInt(model.total)}</div>`;
+  }
   const items = [];
   if (model.hasStart) {
     items.push({ key: "start", text: `start ${fmtInt(model.start)}` });
@@ -1356,7 +1358,7 @@ function dockProgressLegendHtml(model, progress) {
     ...(passingFocusedProgressText(progress, { plain: true })
       ? [{ key: "focused", text: passingFocusedProgressText(progress, { plain: true }), noSwatch: true }]
       : []),
-    { key: "total", text: `${fmtInt(model.total)} ${progress?.unit === "checks" ? "checks" : "total"}` },
+    { key: "total", text: `${fmtInt(model.total)} total` },
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
     <span class="dock-progress-legend-item${item.key === "total" ? " dock-progress-legend-total" : ""}">
@@ -5457,8 +5459,7 @@ function buildAgentTestProgressState(records) {
   }
 
   // Generic primaries report one terminal outcome. Show their required phase
-  // checks as the progress units, keeping each prerequisite's test counts inside
-  // that check rather than mixing them into the assignment's denominator.
+  // test targets as the progress units, without prerequisite test totals.
   let latest = tracker.latest;
   for (const [turn, progress] of buildConfiguredCheckProgress(records)) {
     byTurn.set(turn, progress);
@@ -5468,59 +5469,35 @@ function buildAgentTestProgressState(records) {
 }
 
 function buildConfiguredCheckProgress(records) {
-  // Use recorded harness outcomes in every view. The combined feed omits older
-  // command cards, so inferring these gates from it would yield different scores.
   const byTurn = new Map();
   for (const record of records) {
+    if (record.eventType !== "ralph.phase-status") continue;
+    const phase = record.event?.phaseStatus;
     const turn = displayTurnForRecord(record);
-    const phase = record.eventType === "ralph.phase-status" ? record.event?.phaseStatus : null;
     const primary = phase?.primaryCheck ?? phase?.checks?.find(check => check.primary);
-    if (phase && primary?.kind !== "generic") byTurn.delete(turn);
-    if (phase && primary?.kind === "generic") {
-      const checks = (phase.checks ?? []).filter(check => check.required !== false && check.name)
-        .map(check => ({ ...check, counts: check.testCounts ?? configuredCheckCounts(check.outputPreview, check.kind === "test" ? check.testStatus : null) }));
-      if (!checks.length) continue;
-      const passed = checks.filter(check => check.passed).length;
-      const previous = byTurn.get(turn);
-      const current = { passed, passedUpperBound: passed, total: checks.length,
-        recordedAt: record.recordedAt };
-      byTurn.set(turn, { stage: phase.stage ?? primary.targetStage, turn,
-        recordedAt: record.recordedAt, unit: "checks", checks,
-        commandTarget: "required phase checks", checkedAt: record.recordedAt, status: passed === checks.length ? "pass" : "running",
-        start: previous?.start ?? current, current,
-        best: previous?.best?.passed > passed ? previous.best : current });
-      continue;
-    }
+    if (primary?.kind !== "generic") { byTurn.delete(turn); continue; }
+    const required = (phase.checks ?? []).filter(check => check.required !== false && check.name);
+    const ladder = required.find(check => /\btest-through-pa\d+\b/.test(check.command ?? ""));
+    // Each self-test assignment is one test, followed by the binary comparisons.
+    // Host regressions and file audit remain prerequisites outside this bar.
+    const count = Number(ladder?.command.match(/\btest-through-pa(\d+)\b/)?.[1]);
+    const tests = ladder ? [
+      ...Array.from({ length: count }, (_, index) =>
+        ladder.passed || ladder.testStages?.[`pa${index + 1}`] === true),
+      ...required.filter(check => check !== ladder &&
+        (check.primary || check.name === primary.name || /\bcompare-\S+-inception\b/.test(check.command ?? "")))
+        .map(check => check.passed === true),
+    ] : required.filter(check => check.name !== "fileAudit").map(check => check.passed === true);
+    if (!tests.length) continue;
+    const current = { passed: tests.filter(Boolean).length, total: tests.length, recordedAt: record.recordedAt };
+    byTurn.set(turn, { stage: phase.stage ?? primary.targetStage, turn,
+      recordedAt: record.recordedAt, unit: "checks", commandTarget: "stage tests",
+      status: current.passed === current.total ? "pass" : "running", current, best: current });
   }
   return byTurn;
 }
 
-function configuredCheckCounts(output = "", testStatus = null) {
-  const summary = parseLastTestReportSummary(String(output ?? ""));
-  if (summary?.hasCounts && summary.testsTotal > 0) {
-    return { passed: summary.testsPassed, total: summary.testsTotal };
-  }
-  if (testStatus?.testsTotal > 0) {
-    return { passed: testStatus.testsPassed ?? 0, total: testStatus.testsTotal };
-  }
-  return null;
-}
 
-function configuredCheckListHtml(progress) {
-  if (progress?.unit !== "checks") return "";
-  return `<div class="phase-check-list" role="list" aria-label="Required checks">
-    <div class="phase-check-time">Checked ${escapeHtml(fmtShort(progress.checkedAt))}</div>${progress.checks.map(check => {
-    const status = check.passed ? "pass" : check.skipped ? "skipped"
-      : Number.isInteger(check.exitCode) ? "fail" : "pending";
-    const words = String(check.name).replace(/^pa\d+/, "").replace(/Through(?:Pa)?(\d+)/g, "ThroughPA$1")
-      .replace(/([a-z0-9])([A-Z])/g, "$1 $2");
-    const label = words.charAt(0).toUpperCase() + words.slice(1);
-    const counts = check.counts?.total > 0
-      ? ` · ${fmtInt(check.counts.passed)}/${fmtInt(check.counts.total)} ${check.counts.observedOnly ? "observed tests" : "tests"}` : "";
-    return `<div class="phase-check phase-check-${status}" role="listitem" title="${escapeHtml(check.skipReason ?? check.command ?? "")}">
-      <span>${escapeHtml(label)}</span><span>${escapeHtml(status + counts)}</span></div>`;
-  }).join("")}</div>`;
-}
 
 function applyProgressBestCache(progressState, run = null) {
   if (!progressState) {
@@ -6645,7 +6622,7 @@ function dockProgressText(progress) {
     return "";
   }
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
-  if (progress.unit === "checks") return `${turnText} ${progress.stage} ${progressRatioText(progress.current)} checks`;
+  if (progress.unit === "checks") return `${turnText} ${progress.stage} ${progressRatioText(progress.current)} tests`;
   const runningText = progress.status === "running" ? " running" : "";
   const focused = passingFocusedProgressText(progress, { plain: true });
   return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${focused ? `; ${focused}` : ""}${runningText}`;
@@ -6657,7 +6634,7 @@ function dockPhaseProgressText(phase, progress) {
   const target = phaseTargetText(phase) || progress?.stage || "";
   if (target) parts.push(target);
   if (progress?.current) {
-    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " checks" : ""}`);
+    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
     if (progress.start) parts.push(`start ${progressRatioText(progress.start)}`);
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
@@ -6677,7 +6654,7 @@ function turnPhaseProgressText(phase, progress) {
   const target = phaseTargetText(phase) || progress?.stage || "";
   if (target) parts.push(target);
   if (progress?.current) {
-    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " checks" : ""}`);
+    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
     }
