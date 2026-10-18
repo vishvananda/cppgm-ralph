@@ -9,6 +9,8 @@ owner operations; the compiler worker must not modify its frozen gate.
 
 | Repository | Tag | Commit |
 | --- | --- | --- |
+| cppgm-extended | v5.2 | `ddcec92a2b2aa2376c858ae1aa3a6c18383b1aec` |
+| cppgm-assignments | v5.2 | `017f950a1b28ea8ea9ee24a48c4192cbe6a75033` |
 | cppgm-extended | v5.1 | `3438f5aea24d8fcc9a0113316f7e27c890cd5ac6` |
 | cppgm-assignments | v5.1 | `0bf28e39bca37f7e4173ae1e9ca557659ada7523` |
 
@@ -16,6 +18,30 @@ The assignments export's `reference-binaries/manifest.tsv` must pin the matching
 extended source commit. Publish extended only after its PR checks pass, wait
 for main CI and the automatic assignments export, verify the pins, then tag
 both repositories. A release tag alone does not update an existing run.
+
+## v5.2: PA21 lifetime acceptance
+
+v5.2 fixes static-initialization completion in the reference compiler and moves
+26 PA21 lifetime regressions to behavior controls. Twelve now assert their
+previously printed traces. A new completion regression brings PA21 to 233 tests
+(172 LowIR/fact fixtures and 61 controls). The PA33 link to a moved fixture
+also changes. Compiler sources change, so an exact Rust-port oracle update
+requires rebuilding and repinning its tools; changing only the course tag is
+insufficient. The v5.2 fix passed PA35 smoke and frozen-workload hardware-counter
+comparisons without a measured instruction-count regression.
+
+For a student run already on export `9209cd392`, cherry-pick the v5.2 export
+commit with `-x`. Keep unrelated local corrections. Modified reference sidecars
+retired by these reviewed control moves are removed with their old fixtures;
+the controls use their stated outcomes instead. Verify the source/spec hashes,
+new manifest and real checks, then update the run's assignment provenance.
+
+When a course update resolves a blocked goal's acceptance issue, retain that
+old goal and its failed attempt history. After fresh checks, record the new
+baseline and schedule the required audit with a fresh native goal; do not mark
+the old blocked goal complete or skip the audit. Passing controls do not waive
+unresolved structural or correctness findings. The original v5.1 migration
+instructions below remain useful for older baselines.
 
 ## Student runs: v5scratch and v5sol
 
