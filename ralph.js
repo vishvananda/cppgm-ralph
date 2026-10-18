@@ -1925,6 +1925,18 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
       stages = [syntheticStage];
     }
   }
+  // Reconciled, complete reports describe the current suite. Historical hints
+  // exist for partial/fail-fast output, not as a floor on a new full report.
+  if (isFullStageCountContext(options) && reportSummary?.hasCounts &&
+      stageCountsMatchReportSummary(stages, reportSummary) &&
+      stages.every(stage => stage.targets.every(target => target.evidence === "exact"))) {
+    for (const stage of stages) {
+      stage.totalFromReport = true;
+      STAGE_COUNT_HINTS.set(stage.name, {
+        name: stage.name, status: "pass", passed: stage.total, total: stage.total,
+      });
+    }
+  }
   applyReportSummaryToStages(stages, previousStatus, reportSummary, options);
   applyStageCountHintFloors(stages, options);
 
@@ -2205,6 +2217,7 @@ function applyInferredCurrentStageCountAnchor(stages, reportSummary, options = {
   }
 
   const target = stages[targetIndex];
+  if (target.totalFromReport) return;
   const hint = getStageCountHint(target.name);
   const anchoredTotal = Math.max(target.total ?? 0, hint?.total ?? 0, inferredTotal);
   if (anchoredTotal <= (target.total ?? 0)) {
@@ -2226,6 +2239,7 @@ function applyStageCountHintFloors(stages, options = {}) {
     return;
   }
   for (const stage of stages) {
+    if (stage.totalFromReport) continue;
     const hint = getStageCountHint(stage.name);
     if (!hint || hint.total <= (stage.total ?? 0)) {
       continue;
@@ -2248,7 +2262,9 @@ function applyStageCountHintFloors(stages, options = {}) {
 }
 
 function isFullStageCountContext(options = {}) {
-  return !normalizeTestSubset(options.targetSubset);
+  return !normalizeTestSubset(options.targetSubset) &&
+    !/\b(?:GLOB|TEST)\s*=/.test(options.command ?? "") &&
+    !TEST_PROGRESS_EVIDENCE.directStageTestCommand(options.command)?.hasSubset;
 }
 
 function rememberStageCountHint(stageName, total) {
@@ -8638,6 +8654,12 @@ function addStageCountHintsFromTestStatus(hints, testStatus) {
     return;
   }
   for (const stage of testStatus?.stages ?? []) {
+    if (stage?.totalFromReport && hasStageCounts(stage)) {
+      hints.set(stage.name, {
+        name: stage.name, status: "pass", passed: stage.total, total: stage.total,
+      });
+      continue;
+    }
     if (stage?.status !== "pass" || !hasStageCounts(stage) || stage.passed !== stage.total) {
       continue;
     }
@@ -8686,6 +8708,7 @@ function addInferredStageCountHintFromStatus(hints, testStatus) {
     return;
   }
   const target = stages[targetIndex];
+  if (target.totalFromReport) return;
   const previous = hints.get(target.name);
   const total = Math.max(inferredTotal, target.total ?? 0);
   if (!previous || total > previous.total) {

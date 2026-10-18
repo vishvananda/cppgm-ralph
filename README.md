@@ -112,6 +112,12 @@ starting the next provider turn. Restarting later resumes from saved state.
 Creating the file while Ralph is stopped and then launching it verifies the
 last turn and exits without starting a new one.
 
+Complete counted test reports take precedence over historical stage totals when
+their exact target rows reconcile with the summary. This permits changed suites
+and performance profiles to report their actual totals; partial and fail-fast
+reports still use historical coverage hints. The checkpoint guard continues to
+reject reduced coverage against an unchanged baseline.
+
 To stop automatically after a completed PA, set `"stopAfterStage": "pa7"` in
 the run config or `RALPH_STOP_AFTER_STAGE=pa7`. Ralph waits for all phases of
 PA7 to pass (including its audit phase, if configured), saves PA8 as the next
