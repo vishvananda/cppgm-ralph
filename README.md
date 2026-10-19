@@ -121,7 +121,11 @@ Creating the file while Ralph is stopped and then launching it verifies the
 last turn and exits without starting a new one.
 
 Complete counted test reports take precedence over historical stage totals when
-their exact target rows reconcile with the summary. This permits changed suites
+their exact target rows reconcile with the summary. Quiet direct-assignment
+failure summaries also establish their executed counts when no target rows are
+printed, just as quiet success summaries do; excluded regression/debug files
+in the directory cannot inflate them. Focused and cumulative summaries do not
+establish an individual assignment's denominator. This permits changed suites
 and performance profiles to report their actual totals; partial and fail-fast
 reports still use historical coverage hints. The checkpoint guard continues to
 reject reduced coverage against an unchanged baseline.

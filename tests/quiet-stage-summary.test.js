@@ -7,15 +7,16 @@ import test from "node:test";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import "../ralph-viz/test-progress-evidence.js";
+import { evaluateStageProgress } from "../checkpoint-progress.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const source = await fs.readFile(path.join(ROOT, "ralph.js"), "utf8");
 const summary = "===== ALL TESTS PASSED SUCCESSFULLY! (54 / 54) =====\n";
 
-function parser() {
+function parser(hints = new Map()) {
   const context = vm.createContext({
     TEST_PROGRESS_EVIDENCE: globalThis.RALPH_TEST_PROGRESS_EVIDENCE,
-    STAGE_COUNT_HINTS: new Map(),
+    STAGE_COUNT_HINTS: hints,
     getPrimaryCheck: () => ({ command: "make test-pa1" }),
   });
   const start = source.indexOf("function analyzeTestProgress(");
@@ -37,6 +38,44 @@ test("quiet counted success retains the direct command's stage and exact counts"
   assert.equal(status.stages[0].passed, 54);
   assert.equal(status.stages[0].total, 54);
   assert.equal(status.testsUnknown, 0);
+});
+
+test("quiet counted failure keeps the executed denominator rather than directory hints", () => {
+  for (const header of ["", "===== pa24 =====\n"]) {
+    const hints = new Map([["pa24", { name: "pa24", status: "pass", passed: 435, total: 435 }]]);
+    const parse = parser(hints);
+    const baseline = parse(header + "pa24/tests/behavior/case.t: ERROR: wrong output\n" +
+      "===== TEST SUMMARY: 295 / 296 TESTS PASSED =====\n",
+    { command: "make test-pa24", targetStage: "pa24", exitCode: 2 });
+    assert.equal(baseline.testsPassed, 295);
+    assert.equal(baseline.testsTotal, 296);
+    assert.equal(baseline.stages[0].failed, 1);
+    assert.equal(baseline.stages[0].totalFromReport, true);
+    assert.equal(hints.get("pa24").total, 296);
+    const current = parse("===== ALL TESTS PASSED SUCCESSFULLY! (296 / 296) =====\n",
+      { command: "make test-pa24", targetStage: "pa24", exitCode: 0 });
+    assert.equal(evaluateStageProgress({ baselineTestStatus: baseline,
+      currentTestStatus: current, stage: "pa24" }).passed, true);
+  }
+});
+
+test("real counted coverage reductions still fail the progress guard", () => {
+  const parse = parser();
+  const baseline = parse("===== pa24 =====\n===== TEST SUMMARY: 295 / 435 TESTS PASSED =====\n",
+    { command: "make test-pa24", targetStage: "pa24", exitCode: 2 });
+  const current = parse("===== ALL TESTS PASSED SUCCESSFULLY! (296 / 296) =====\n",
+    { command: "make test-pa24", targetStage: "pa24", exitCode: 0 });
+  assert.equal(evaluateStageProgress({ baselineTestStatus: baseline,
+    currentTestStatus: current, stage: "pa24" }).reason, "coverage-reduced");
+});
+
+test("focused and cumulative quiet failure summaries cannot establish a full-stage denominator", () => {
+  for (const command of ["make -C pa24 check TEST=tests/example.t",
+    "make test-pa24 GLOB=tests/example.t", "make test-report-through-pa24"]) {
+    const status = parser()("===== TEST SUMMARY: 1 / 2 TESTS PASSED =====\n",
+      { command, targetStage: "pa24", exitCode: 2 });
+    assert.equal(status.stageCount, 0);
+  }
 });
 
 test("cumulative, focused and uncounted summaries cannot invent full-stage counts", () => {

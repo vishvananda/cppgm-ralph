@@ -1957,6 +1957,20 @@ function analyzeTestProgress(output, previousStatus = null, options = {}) {
       stages = [syntheticStage];
     }
   }
+  // A quiet direct-stage failure can have only diagnostics and its counted
+  // summary. Its denominator describes the executed suite, just like a quiet
+  // success; directory hints can include excluded regression/debug fixtures.
+  const directStageCommand = TEST_PROGRESS_EVIDENCE.directStageTestCommand(options.command);
+  if (isFullStageCountContext(options) && directStageCommand &&
+      directStageCommand.stage === options.targetStage &&
+      reportSummary?.hasCounts && !reportSummary.allPassed &&
+      reportSummary.passed >= 0 && reportSummary.passed < reportSummary.total &&
+      stages.length <= 1 && stageHeaders.length <= 1 &&
+      (!stages.length || (stages[0].name === options.targetStage && stages[0].targets.length === 0))) {
+    const stage = stages[0] ?? parseStageStatus(options.targetStage, normalizedOutput, options);
+    setStageStatus(stage, "fail", reportSummary.passed, reportSummary.total);
+    stages = [stage];
+  }
   // Reconciled, complete reports describe the current suite. Historical hints
   // exist for partial/fail-fast output, not as a floor on a new full report.
   if (isFullStageCountContext(options) && reportSummary?.hasCounts &&
