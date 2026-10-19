@@ -66,7 +66,10 @@ and the source ownership ledger. Native goals describe a coherent phase
 handoff, not an impossible demand to finish an entire assignment in one turn.
 
 Checks retain every protected manifest anchor and add discovered `paN/tests/**/*.t`
-cases once, using the same differential checks and per-case reporting. This
+cases once, using the same differential checks and per-case reporting. Debug
+fixtures retain their separate `test-debuginfo`/release targets, as in the frozen
+manifest. A counted stage summary keeps those inventories distinct from generic
+directory-count hints. This
 includes regressions added during implementation or audit; missing frozen files
 remain required. Passing identities from both sets are preserved using Ralph's
 read-only state. The 2026-10-19 correction resolves a checkpoint blocker where

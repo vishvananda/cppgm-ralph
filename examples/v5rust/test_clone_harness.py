@@ -64,7 +64,8 @@ class StageInventoryTests(unittest.TestCase):
     def test_discovery_adds_cases_once_and_keeps_missing_frozen_anchors(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ["general/existing.t", "controls/extra.t", "controls/ignored.cpp"]:
+            for name in ["general/existing.t", "controls/extra.t", "controls/ignored.cpp",
+                         "debuginfo/executable/debug.t"]:
                 path = root / "pa20/tests" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch()
@@ -98,6 +99,7 @@ class StageInventoryTests(unittest.TestCase):
             report = json.loads((root / "artifacts/results/pa20.json").read_text())
             self.assertEqual([row["case"] for row in report["results"]], cases)
             self.assertIn("clone/pa20/tests/controls/extra.t: FAIL (0/1)", output.getvalue())
+            self.assertIn("===== TEST SUMMARY: 1 / 2 TESTS PASSED =====", output.getvalue())
             # The same identity mechanism used for frozen cases must require a
             # newly passing supplemental case on later turns as well.
             (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{

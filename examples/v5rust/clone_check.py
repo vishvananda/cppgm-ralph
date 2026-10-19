@@ -122,11 +122,12 @@ def stage_cases(stage):
     # regressions must also enter differential checks and identity preservation.
     frozen = manifest()["stages"][stage]
     discovered = {path.relative_to(ROOT / stage).as_posix()
-                  for path in (ROOT / stage / "tests").rglob("*.t") if path.is_file()}
+                  for path in (ROOT / stage / "tests").rglob("*.t")
+                  if path.is_file() and "debuginfo" not in path.relative_to(ROOT / stage).parts}
     return [*frozen, *sorted(discovered - set(frozen))]
 
 
-def stage_check(stage, self_check=False):
+def stage_check(stage, self_check=False, *, summarize=True):
     if stage == "pa34":
         from clone_bootstrap import progress
         return progress()
@@ -143,7 +144,10 @@ def stage_check(stage, self_check=False):
         "stage": stage, "manifest_sha256": file_digest(CONTROL / "manifest.json"),
         "binaries": {tool: file_digest(candidate_path(tool)) for tool in TOOLS},
         "results": results})
-    return all(result["passed"] for result in results)
+    passed = sum(result["passed"] for result in results)
+    if summarize:
+        print(f"===== TEST SUMMARY: {passed} / {len(results)} TESTS PASSED =====")
+    return passed == len(results)
 
 
 def passing_targets(status, stage):
@@ -249,7 +253,7 @@ def main():
     limit = int(args.stage[2:]) - (1 if args.mode == "prior" else 0)
     passed = True
     for number in range(1, limit + 1):
-        passed = stage_check(f"pa{number}") and passed
+        passed = stage_check(f"pa{number}", summarize=False) and passed
         if number <= 33:
             passed = course(f"pa{number}") and passed
     if limit == 0:

@@ -141,7 +141,9 @@ with its protected hash refreshed at a clean handoff. Record the validation and
 commit the synchronized update before restarting.
 
 The clone stage checker must execute both the immutable manifest anchors and
-all additional `paN/tests/**/*.t` cases, once per identity. The 2026-10-19
+all additional ordinary `paN/tests/**/*.t` cases, once per identity. Preserve
+the manifest's separate `debuginfo` lane and emit a counted stage summary so
+generic directory hints cannot enlarge the primary gate. The 2026-10-19
 inventory fix adds those regressions to stage, prior/through, focused-case and
 oracle-self checks; the manifest is not regenerated to absorb them. Install
 `clone_check.py` and its harness tests in both locations and refresh only their
