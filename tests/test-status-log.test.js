@@ -155,8 +155,8 @@ test("historical totals cannot enlarge the current turn's explicit report or its
           "===== ALL TESTS PASSED SUCCESSFULLY! (219 / 219) =====\n",
       } } },
   ];
-  assert.equal(browser.buildStageTotalAnchors(records).get("pa32"), 425,
-    "the fixture must retain the older inflated hint");
+  assert.equal(browser.buildStageTotalAnchors(records).get("pa32"), 219,
+    "the verified report replaces the older inflated hint");
   const progress = browser.buildAgentTestProgressState(records).latest;
   assert.equal(progress.start.passed, 213);
   assert.equal(progress.start.passedUpperBound, 213);

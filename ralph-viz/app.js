@@ -5033,6 +5033,18 @@ function buildStageTotalAnchors(records) {
       addStageTotalAnchorsFromStatus(anchors, status, prefixTotals);
     }
   }
+  // Historical inferred totals can include excluded fixture populations. A
+  // later verified report describes the actual suite, even when it is smaller.
+  for (const record of records) {
+    for (const status of testStatusesFromRecord(record)) {
+      if (!isFullStageTestStatus(status) || parseAgentTestCommand(status.command ?? "")?.hasSubset) continue;
+      for (const stage of status?.stages ?? []) {
+        if (stage?.totalFromReport === true && finitePositiveNumber(stage.total)) {
+          anchors.set(stage.name, stage.total);
+        }
+      }
+    }
+  }
   return anchors;
 }
 
@@ -5936,7 +5948,12 @@ function seedAgentTestProgressTracker(tracker, record) {
     return;
   }
   for (const stage of stages) {
-    updateKnownStageTotal(tracker, stage?.name, stage?.total);
+    if (stage?.totalFromReport === true && finitePositiveNumber(stage.total) &&
+        !parseAgentTestCommand(testStatus.command ?? "")?.hasSubset) {
+      tracker.stageTotals.set(stage.name, stage.total);
+    } else {
+      updateKnownStageTotal(tracker, stage?.name, stage?.total);
+    }
   }
 }
 
