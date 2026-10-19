@@ -65,8 +65,12 @@ turn. Fresh threads recover context from committed `docs/port/paN.md` files
 and the source ownership ledger. Native goals describe a coherent phase
 handoff, not an impossible demand to finish an entire assignment in one turn.
 
-Checks use a protected manifest and scripts, count exact per-case outcomes,
-and preserve previously passing case identities using Ralph's read-only state.
+Checks retain every protected manifest anchor and add discovered `paN/tests/**/*.t`
+cases once, using the same differential checks and per-case reporting. This
+includes regressions added during implementation or audit; missing frozen files
+remain required. Passing identities from both sets are preserved using Ralph's
+read-only state. The 2026-10-19 correction resolves a checkpoint blocker where
+the frozen-only command omitted added controls but Ralph counted them as unrun.
 The ordinary C++ test workers are retained. Test-only adapters implement their
 batch transport and compare actual Rust invocations against the oracle, using
 identical input/output paths. They never supply oracle output to the candidate.

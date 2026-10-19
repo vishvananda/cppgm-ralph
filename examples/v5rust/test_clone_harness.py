@@ -60,6 +60,54 @@ class RustAuditTests(unittest.TestCase):
         self.assertEqual(self.inspect(dispatch), [])
 
 
+class StageInventoryTests(unittest.TestCase):
+    def test_discovery_adds_cases_once_and_keeps_missing_frozen_anchors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ["general/existing.t", "controls/extra.t", "controls/ignored.cpp"]:
+                path = root / "pa20/tests" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            frozen = ["tests/general/missing.t", "tests/general/existing.t"]
+            with patch.object(clone_check, "ROOT", root), \
+                    patch.object(clone_check, "manifest", return_value={"stages": {"pa20": frozen}}):
+                self.assertEqual(clone_check.stage_cases("pa20"),
+                                 [*frozen, "tests/controls/extra.t"])
+
+    def test_supplemental_failure_is_executed_reported_and_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = ["tests/general/frozen.t", "tests/controls/extra.t"]
+            for case in cases:
+                path = root / "pa20" / case
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            output = io.StringIO()
+            def execute(stage, case, self_check):
+                self.assertEqual(stage, "pa20")
+                self.assertTrue(self_check)
+                return {"case": case, "passed": case == cases[0], "trace": "trace", "log": "log"}
+            with patch.object(clone_check, "ROOT", root), \
+                    patch.object(clone_check, "ARTIFACTS", root / "artifacts"), \
+                    patch.object(clone_check, "manifest", return_value={"stages": {"pa20": cases[:1]}}), \
+                    patch.object(clone_check, "file_digest", return_value="hash"), \
+                    patch.object(clone_check, "execute_case", side_effect=execute) as check, \
+                    contextlib.redirect_stdout(output):
+                self.assertFalse(clone_check.stage_check("pa20", self_check=True))
+            self.assertEqual(check.call_count, 2)
+            report = json.loads((root / "artifacts/results/pa20.json").read_text())
+            self.assertEqual([row["case"] for row in report["results"]], cases)
+            self.assertIn("clone/pa20/tests/controls/extra.t: FAIL (0/1)", output.getvalue())
+            # The same identity mechanism used for frozen cases must require a
+            # newly passing supplemental case on later turns as well.
+            (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{
+                "name": "pa20", "targets": [{"name": "clone/pa20/" + cases[1], "status": "pass"}]}]}}))
+            (root / "last-test.log").write_text(output.getvalue())
+            with patch.dict(clone_check.SETTINGS, {"state_dir": directory}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(clone_check.preserve("pa20"))
+
+
 class ComparisonTests(unittest.TestCase):
     def compare_stack(self, outcomes, arguments=(), runner=None):
         with tempfile.TemporaryDirectory() as directory:

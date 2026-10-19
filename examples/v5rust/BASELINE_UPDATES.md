@@ -140,6 +140,17 @@ also needs the matching `clone_check.py` in both the control bundle and candidat
 with its protected hash refreshed at a clean handoff. Record the validation and
 commit the synchronized update before restarting.
 
+The clone stage checker must execute both the immutable manifest anchors and
+all additional `paN/tests/**/*.t` cases, once per identity. The 2026-10-19
+inventory fix adds those regressions to stage, prior/through, focused-case and
+oracle-self checks; the manifest is not regenerated to absorb them. Install
+`clone_check.py` and its harness tests in both locations and refresh only their
+reviewed protected hashes. Validate the complete case inventory and preservation
+gate, retaining genuine failures. If recovering a blocked audit, save its runner
+state and raw evidence, record the corrected baseline from a fresh full check,
+and retry the audit with a fresh goal. Retain the former blocked goal and history;
+the count correction does not complete a stage or waive its remaining work.
+
 Ralph reads `stopAfterStage` / `RALPH_STOP_AFTER_STAGE` at process startup.
 For an active run, request its ordinary `stop-after-turn`, let its checks and
 handoff finish, then restart with a temporary stage stop if needed. For the

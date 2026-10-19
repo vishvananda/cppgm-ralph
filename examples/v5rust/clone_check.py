@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Protected, fixed-manifest assignment gates for v5rust."""
+"""Protected assignment gates with frozen anchors and added course cases."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
@@ -117,11 +117,20 @@ def execute_case(stage, case, self_check=False):
             "trace": str(trace)}
 
 
+def stage_cases(stage):
+    # Frozen anchors remain required even if a file disappears. New executed
+    # regressions must also enter differential checks and identity preservation.
+    frozen = manifest()["stages"][stage]
+    discovered = {path.relative_to(ROOT / stage).as_posix()
+                  for path in (ROOT / stage / "tests").rglob("*.t") if path.is_file()}
+    return [*frozen, *sorted(discovered - set(frozen))]
+
+
 def stage_check(stage, self_check=False):
     if stage == "pa34":
         from clone_bootstrap import progress
         return progress()
-    cases = manifest()["stages"][stage]
+    cases = stage_cases(stage)
     print(f"===== {stage} =====", flush=True)
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda case: execute_case(stage, case, self_check), cases))
@@ -225,8 +234,8 @@ def main():
     if args.mode == "preflight":
         return 0
     if args.mode == "case":
-        if args.case not in manifest()["stages"][args.stage]:
-            parser.error("case is not in the fixed stage manifest")
+        if args.case not in stage_cases(args.stage):
+            parser.error("case is not in the stage inventory")
         result = execute_case(args.stage, args.case)
         print(json.dumps(result, indent=2))
         return 0 if result["passed"] else 1
