@@ -52,6 +52,7 @@ import {
   requiresCodexGoalCompletion,
 } from "./codex-goal-completion.js";
 import { readResumableCodexGoal } from "./codex-goal-resume.js";
+import { interruptedCodexAuthentication, isCodexAuthenticationError } from "./codex-auth-recovery.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
 import { StrandsAgentEventConverter } from "./strands-agent-events.js";
@@ -391,6 +392,11 @@ async function main() {
   // --continue resumes the most recent provider thread for the next turn only;
   // afterwards the configured freshThreadPerTurn behavior applies again.
   let continueThreadId = persistedLimitResume?.threadId ?? null;
+  const authenticationFailure = interruptedCodexAuthentication(state);
+  if (!configuredThreadId && !continueThreadId && authenticationFailure && startupAgentProfile.provider === "codex") {
+    continueThreadId = authenticationFailure.threadId;
+    log(`Resuming credential-interrupted Codex turn ${state.activeTurn.turnNumber}; keeping its goal and accounting.`);
+  }
   if (process.argv.includes("--continue") && !configuredThreadId && !continueThreadId) {
     continueThreadId = state.threadId ?? (await findLatestEventLogThreadId());
     if (continueThreadId) {
@@ -401,6 +407,7 @@ async function main() {
   }
   const reuseLastChecksRequested =
     Boolean(persistedLimitResume) ||
+    Boolean(authenticationFailure) ||
     process.argv.includes("--reuse-last-checks") ||
     process.argv.includes("--skip-checks") ||
     parseBoolean(process.env.RALPH_REUSE_LAST_CHECKS, false);
@@ -457,7 +464,8 @@ async function main() {
       continueThreadId = null;
     }
     const phaseStatus = reuseLastChecksForNextTurn
-      ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId })
+      ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId,
+        resumeTurnNumber: authenticationFailure ? state.activeTurn?.turnNumber : null })
       : await runPhaseChecks(state, phase, phaseCheckReuse);
     reuseLastChecksForNextTurn = false;
     phaseCheckReuse = null;
@@ -522,7 +530,10 @@ async function main() {
           `despite current worktree cleanupOnly=${computedCleanupOnlyTurn ? "true" : "false"}.`,
       );
     }
-    const shouldRunRequiredPhaseTurn = shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
+    // Passing checks cannot finish an interrupted model handoff. An explicit
+    // continuation (including credential recovery) must return to the worker.
+    const shouldRunRequiredPhaseTurn = (phaseStatus.allRequiredPassed && Boolean(resumedTurnContext)) ||
+      shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
     log(`Phase check status: ${formatPhaseCheckResults(phaseStatus)}`);
     log(`Primary test status: ${formatTestStatusSummary(testStatus)}`);
     if (testStatus.stages.length > 0) {
@@ -981,15 +992,36 @@ async function main() {
         const failedAt = new Date().toISOString();
         const failedThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
         state.threadId = failedThreadId;
-        state.activeTurn = { ...state.activeTurn, status: "failed", endedAt: failedAt, error: formatErrorMessage(error) };
+        const authenticationError = agentProfile.provider === "codex" && isCodexAuthenticationError(error);
+        const failureMessage = authenticationError
+          ? `Codex authentication failed: ${formatErrorMessage(error)}`
+          : formatErrorMessage(error);
+        state.activeTurn = { ...state.activeTurn, status: "failed", endedAt: failedAt, error: failureMessage };
         await appendRalphEventRecord({
           recordedAt: failedAt,
           threadId: failedThreadId,
           turnNumber: turnNumber + 1,
           eventType: "ralph.turn-failed",
-          event: { type: "ralph.turn-failed", sender: "ralph", startedAt: state.activeTurn.startedAt, error: { message: formatErrorMessage(error) } },
+          event: { type: "ralph.turn-failed", sender: "ralph", startedAt: state.activeTurn.startedAt, error: { message: failureMessage } },
         });
         await saveState({ ...state, updatedAt: failedAt });
+        if (authenticationError) {
+          // Codex can mark a native goal blocked on a terminal credential error.
+          // Undo only that timestamp-matched infrastructure transition; exit
+          // for login repair without consuming the turn or accepting its work.
+          const failure = interruptedCodexAuthentication(state);
+          if (failure && requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
+            try {
+              await withCodexAppServer(client => readResumableCodexGoal(client, failedThreadId, {
+                authenticationFailure: failure,
+              }));
+            } catch (recoveryError) {
+              log(`Credential interruption saved; goal recovery will be retried on restart: ${formatErrorMessage(recoveryError)}`);
+            }
+          }
+          throw new Error(`Codex authentication interrupted turn ${turnNumber + 1}: ${formatErrorMessage(error)}. ` +
+            "Repair the default Codex login, then restart Ralph; the same turn and goal will resume.");
+        }
         if (isCodexUsageLimitError(error, agentProfile.provider) && !shutdownInProgress) {
           providerLimitRetryAttempts += 1;
           const retryMax = codexLimitRetryMax();
@@ -3334,7 +3366,7 @@ async function runPhaseChecks(state, phase, reuse = null) {
   };
 }
 
-async function reuseLatestPhaseChecksFromEventLog({ state, phase, threadId }) {
+async function reuseLatestPhaseChecksFromEventLog({ state, phase, threadId, resumeTurnNumber = null }) {
   const expectation = buildPhaseCheckExpectation(state, phase);
   const eventLogPaths = await getEventLogPathsForCheckReuse(state, threadId);
   if (eventLogPaths.length === 0) {
@@ -3343,7 +3375,9 @@ async function reuseLatestPhaseChecksFromEventLog({ state, phase, threadId }) {
 
   for (const eventLogPath of eventLogPaths) {
     const record = await findLatestMatchingJsonlRecord(eventLogPath, (candidate) =>
-      isCompatiblePhaseStatusRecord(candidate, expectation));
+      isCompatiblePhaseStatusRecord(candidate, expectation) &&
+      (resumeTurnNumber == null || (candidate.turnNumber === resumeTurnNumber &&
+        candidate.event?.action === "turn-start" && candidate.threadId === threadId)));
     if (!record) {
       continue;
     }
@@ -3971,9 +4005,11 @@ async function prepareLoopGoalForTurn({
   if (preserveExistingGoal) {
     if (!threadId) throw new Error("Cannot preserve a Codex goal without its thread id");
     return withCodexAppServer(async (client) => {
-      const { goal, reactivated } = await readResumableCodexGoal(client, threadId);
+      const { goal, reactivated } = await readResumableCodexGoal(client, threadId, {
+        authenticationFailure: interruptedCodexAuthentication(await loadState()),
+      });
       if (reactivated) {
-        log(`Reactivated usage-limited Codex goal for thread ${threadId}`);
+        log(`Reactivated interrupted Codex goal for thread ${threadId}`);
       }
       log(`Preserving existing Codex loop goal: ${previewText(goal.objective)}`);
       return { threadId, goal, startedThread: false, preserved: true };

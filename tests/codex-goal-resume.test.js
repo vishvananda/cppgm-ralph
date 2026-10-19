@@ -46,6 +46,23 @@ test("rejects a status update that replaces goal accounting", async () => {
   await assert.rejects(readResumableCodexGoal(client, threadId), /changed the goal or its usage/);
 });
 
+test("credential-induced blocking resumes with the original objective and accounting", async () => {
+  const failure = { threadId, failedAt: "2026-10-19T01:20:43.876Z", error: "Codex authentication failed" };
+  const blocked = { ...original, status: "blocked", updatedAt: Date.parse(failure.failedAt) / 1000 };
+  const calls = [];
+  const client = { async request(method, params) {
+    calls.push({ method, params });
+    return { goal: method === "thread/goal/get" ? blocked : { ...blocked, status: "active" } };
+  } };
+  const resumed = await readResumableCodexGoal(client, threadId, { authenticationFailure: failure });
+  assert.equal(resumed.reactivated, true);
+  assert.deepEqual(resumed.goal, { ...blocked, status: "active" });
+  assert.deepEqual(calls[1], { method: "thread/goal/set", params: { threadId, status: "active" } });
+  await assert.rejects(readResumableCodexGoal(client, threadId, { authenticationFailure: {
+    ...failure, failedAt: "2026-10-18T01:20:43.876Z",
+  } }), /goal is blocked/);
+});
+
 for (const status of ["paused", "blocked", "budgetLimited"]) {
   test(`does not reactivate a ${status} goal`, async () => {
     const client = {

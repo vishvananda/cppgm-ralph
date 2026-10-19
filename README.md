@@ -77,7 +77,15 @@ prompt. The CLI path can be overridden with `claudePath` / `RALPH_CLAUDE_PATH`.
 Codex `Reconnecting... N/M` notices leave its stream running while the CLI
 retries. If the stream ultimately fails, transport errors use Ralph's bounded
 transient-error backoff without consuming another turn. Authentication and
-configuration errors remain fatal. Failed attempts retain their phase for
+configuration errors remain fatal. Credential failures retain the interrupted
+turn and goal; after repairing the default Codex login, restart Ralph normally
+to resume that same turn, preserving its objective, budget and usage. Codex may
+mark a goal blocked on authentication failure: Ralph undoes only a blocked
+transition timestamp-matched to its recorded credential failure. Model-declared
+blockers, pauses and budget limits remain stopped. Passing checks never accept
+the interrupted handoff without returning to the worker. Codex uses its shared
+cached login as described in the [official authentication documentation](https://learn.chatgpt.com/docs/auth).
+Failed attempts retain their phase for
 resumption but stop the viz's live clock; elapsed attempt time is preserved,
 excluding downtime before a retry.
 For native Codex loop goals, a final message or `turn.completed` event is not

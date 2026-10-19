@@ -1,11 +1,13 @@
+import { isAuthenticationBlockedGoal } from "./codex-auth-recovery.js";
+
 // A usage limit stops native goal continuation until the caller explicitly
 // reactivates it. A status-only update keeps the persisted objective and usage.
-export async function readResumableCodexGoal(client, threadId) {
+export async function readResumableCodexGoal(client, threadId, { authenticationFailure = null } = {}) {
   const { goal } = await client.request("thread/goal/get", { threadId });
   if (!goal || goal.threadId !== threadId) {
     throw new Error(`Cannot preserve Codex goal for ${threadId}: missing or mismatched goal`);
   }
-  if (goal.status === "usageLimited") {
+  if (goal.status === "usageLimited" || isAuthenticationBlockedGoal(goal, authenticationFailure)) {
     const response = await client.request("thread/goal/set", { threadId, status: "active" });
     const resumed = response?.goal;
     if (resumed?.threadId !== threadId || resumed.status !== "active" ||

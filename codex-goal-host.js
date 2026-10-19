@@ -104,6 +104,7 @@ export async function runCodexGoalHost({
       if (completed?.id === params.turn.id) return;
       if (params.turn.status !== "completed") {
         const error = new Error(params.turn.error?.message ?? `Codex turn ${params.turn.status}.`);
+        error.codexErrorInfo = params.turn.error?.codexErrorInfo;
         if (params.turn.error?.codexErrorInfo === "usageLimitExceeded") {
           error.codexUsageLimit = true;
           error.codexErrorInfo = "usage_limit_exceeded";
@@ -117,6 +118,7 @@ export async function runCodexGoalHost({
       schedule();
     } else if (method === "error" && !params.willRetry) {
       const error = new Error(params.error?.message ?? "Codex app-server reported an error.");
+      error.codexErrorInfo = params.error?.codexErrorInfo;
       if (params.error?.codexErrorInfo === "usageLimitExceeded") {
         error.codexUsageLimit = true;
         error.codexErrorInfo = "usage_limit_exceeded";

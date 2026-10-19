@@ -60,7 +60,7 @@ test("goal outputs support direct JSON and Code Mode text blocks, with thread va
   assert.equal(codexSessionTaskCompletion([event(1000,"task_complete",{error:{codex_error_info:"usage_limit_exceeded"}})],options).status,"usage_limit");
 });
 
-for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "restart", "reopened", "interactive-request"]) {
+for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "restart", "auth-restart", "reopened", "interactive-request"]) {
   test(`native Codex goal subprocess: ${scenario}`, async (t) => {
     const privateWrite = scenario === "native-private-write";
     const isolated = scenario === "native-isolation" || privateWrite;
@@ -82,16 +82,17 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     execFileSync("git",["init","--bare","-q",remote]);
     execFileSync("git",["remote","add","origin",remote],{cwd:workdir});
     execFileSync("git",["push","-qu","origin","HEAD"],{cwd:workdir});
-    const providerSettings={scenario:scenario==="restart"?"exhausted":scenario,workdir,codexDir,trace,goalFile,stateDir};
-    await fs.writeFile(provider, fakeCodexSource(providerSettings),{mode:0o755});
     const checkCounter=path.join(root,"check-runs");
+    const providerSettings={scenario:scenario==="restart"?"exhausted":scenario,workdir,codexDir,trace,goalFile,stateDir,
+      ...(["restart","auth-restart"].includes(scenario)?{checkCounter}:{})};
+    await fs.writeFile(provider, fakeCodexSource(providerSettings),{mode:0o755});
     const config=path.join(root,"config.json");
     await fs.writeFile(config,JSON.stringify({name:"goal-test",provider:"codex",model:"fake",reasoningEffort:"high",
       workdir,useExistingWorkdir:true,stateBaseDir,codexPath:provider,loopGoalsEnabled:true,freshThreadPerTurn:true,
       eventLogScope:"run",maxTurns:2,initialStage:"pa1",additionalDirectories:privateWrite?[]:[root],
       resourceLimits:isolated?{enabled:true,memoryMax:"512M",cleanupTimeoutSec:0.2}:false,
       sessionIsolation:privateWrite?{enabled:true,privateWriteDir:privateRoot}:isolated,
-      checks:{verify:{command:(scenario==="restart"?`printf check >> '${checkCounter}' && `:"")+(privateWrite?"printf check > /tmp/check-scratch && ":"")+"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
+      checks:{verify:{command:(["restart","auth-restart"].includes(scenario)?`printf check >> '${checkCounter}' && `:"")+(privateWrite?"printf check > /tmp/check-scratch && ":"")+"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
       phases:[{name:"audit",runWhenChecksPass:true,checks:["verify"]}]}));
     const runOptions={encoding:"utf8",timeout:25000,
       env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1"}};
@@ -107,7 +108,8 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     if (privateWrite) assert.match(invocations[0].input, /Storage: checkout and scratch share .*Ralph state is read-only\./s);
     assert.equal(invocations.length,["active-exit","transport-retry"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
     assert.equal(traces.filter(r=>r.method==="thread/start").length,1,"incomplete work resumes even with freshThreadPerTurn");
-    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,1,"never reset or forcibly complete the model's goal");
+    assert.equal(traces.filter(r=>r.method==="thread/goal/set" && r.params.objective != null).length,1,"never reset or forcibly complete the model's goal");
+    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,scenario==="auth-restart"?2:1);
     if(scenario==="active-exit") {
       assert.match(invocations[1].input,/Continue the active loop goal/);
       assert.doesNotMatch(invocations[1].input,/Clean up `audit`/);
@@ -134,6 +136,32 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
       assert.ok(events.some(r=>r.event?.item?.text==='Audit done.'));
     }
     if (scenario === "interactive-request") assert.match(run.stderr,/requires host interaction/);
+    if (scenario === "auth-restart") {
+      assert.match(run.stderr, /Repair the default Codex login/);
+      const originalGoal = JSON.parse(await fs.readFile(goalFile, "utf8"));
+      assert.equal(originalGoal.status, "active", "credential-induced blocking is undone before exit");
+      assert.equal(originalGoal.tokensUsed, 423);
+      assert.equal(state.activeTurn.status, "failed");
+      assert.match(state.activeTurn.error, /authentication failed/);
+      const cfg = JSON.parse(await fs.readFile(config, "utf8"));
+      const entryChecks = await fs.readFile(checkCounter, "utf8");
+      cfg.phases[0].runWhenChecksPass = false;
+      await fs.writeFile(config, JSON.stringify(cfg));
+      const resumed = spawnSync(process.execPath, [path.resolve("ralph.js")], runOptions);
+      assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
+      assert.match(resumed.stdout, /Resuming credential-interrupted Codex turn 1/);
+      assert.match(resumed.stdout, /preserving original turn 1 start classification/);
+      const traceRows = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse);
+      assert.equal(traceRows.filter(r => r.method === "thread/start").length, 1);
+      assert.equal(traceRows.filter(r => r.method === "thread/goal/clear").length, 1);
+      const executions = traceRows.filter(r => r.kind === "exec");
+      assert.equal(executions.length, 2, "passing checks must return to the interrupted worker");
+      assert.deepEqual(executions[1].goal, originalGoal);
+      assert.equal(executions[1].entryChecks, entryChecks, "original entry checks and progress baseline survive auth recovery");
+      const recovered = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8"));
+      assert.equal(recovered.turnsCompleted, 1);
+      assert.equal(recovered.activeTurn ?? null, null);
+    }
     if (scenario === "restart") {
       const existingGoal={...JSON.parse(await fs.readFile(goalFile,"utf8")),
         objective:"Original audit objective, not regenerated on restart",tokensUsed:688895,timeUsedSeconds:5706,tokenBudget:900000};
@@ -217,6 +245,11 @@ async function runTurn(r) {
  if(scenario==='transport-retry'&&!attempt) {
   notify('error',{willRetry:false,error:{message:'request timed out'}});return;
  }
+ if(scenario==='auth-restart'&&!attempt) {
+  saveGoal({...getGoal(),status:'blocked',tokensUsed:423,timeUsedSeconds:17,updatedAt:Date.now()/1000});
+  notify('error',{willRetry:false,error:{message:'Your access token could not be refreshed. Please sign in again.',codexErrorInfo:'unauthorized'}});
+  return;
+ }
  if(scenario==='exhausted'||(scenario==='active-exit'&&!attempt)) {
   end('Audit remains active. Evidence and review records are unresolved.',turnId);
   setTimeout(()=>process.exit(0),20);return;
@@ -255,7 +288,7 @@ async function runTurn(r) {
    if(r.method==='thread/goal/clear')saveGoal(null);
    if(r.method==='thread/goal/set') {
     if(r.params.status==='complete') {emit({id:r.id,error:{message:'Ralph must not force completion'}});continue;}
-    const g={...r.params,createdAt:Date.now()/1000,tokensUsed:0,timeUsedSeconds:0};saveGoal(g);record('thread_goal_updated',{goal:g});result={goal:g};
+    const g=r.params.objective==null?{...getGoal(),...r.params,updatedAt:Date.now()/1000}:{...r.params,createdAt:Date.now()/1000,tokensUsed:0,timeUsedSeconds:0};saveGoal(g);record('thread_goal_updated',{goal:g});result={goal:g};
    }
    if(r.method==='thread/goal/get') {
     if(scenario==='verify-error') {emit({id:r.id,error:{message:'verification unavailable'}});continue;}
