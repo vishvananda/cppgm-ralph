@@ -24,6 +24,10 @@ and checkpoint review every third partial handoff match v5sol. Safe Rust,
 rustfmt, Clippy, Cargo tests and a syntax-aware Rust file audit are required.
 The architecture/performance spec preserves typed phase boundaries and bounded,
 question-driven measurements, translating C++ ownership rules into Rust.
+Validation shares results between equivalent Make/direct check commands on
+unchanged inputs and options, with focused controls and compact evidence updates.
+Ralph reloads prompt/goal sidecars before each new provider turn; edits apply
+without restarting the worker. Config changes require a restart.
 
 The run stops after the successful PA33 audit (`stopAfterStage: pa33`).
 PA34/PA35 are deferred; their original handouts remain available. No inception

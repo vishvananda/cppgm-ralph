@@ -15,21 +15,22 @@ consumers together; continue while the same understanding enables progress.
 A commit or minimum test gain is not a handoff boundary. Fix known correctness
 and architecture defects without opening unrelated optimization investigations.
 
-Apply spec architecture to supported capabilities from their first version.
-Validate changed owners with focused correctness and scaling controls. Follow
-spec section 11: state a measurement question, qualify the whole selected set
-first, measure affected inputs after code stabilizes and reuse valid evidence.
-No routine whole-stage/host matrix refresh; expand only for a demonstrated
-regression or an uncovered affected consumer. Generated-code quality is
-judged by the owning course checks through PA33; PA34/PA35 are deferred.
+Apply spec architecture from the first supported version. Use representative
+positive, negative and boundary controls for changed owners; add modes and
+consumers only when affected. Follow spec section 11: qualify inputs before
+measuring stable, affected work; reuse valid evidence. PA34/PA35 are deferred.
 
-Before editing, record HEAD as `Stage base commit` and `Last reviewed commit`
-in the compact stage plan. Keep decisions, remaining behavior groups, evidence
-links and a handoff ledger; old plans do not override current instructions.
-Earlier PAs and the Rust quality and file audits pass; current failures decrease without
-reduced coverage. For a partial handoff finish a coherent group and explain why
-further related work is impractical. Ralph reviews every third incomplete
-handoff and independently audits a passing stage.
+Run required checks once on final code and tests with unchanged options.
+Make/direct aliases share one result. A through report covers earlier PAs;
+run the stage separately only where required. Reuse scripts and receipts.
+This supersedes older plan/script checklists; all course gates apply.
+
+Before editing, record HEAD as `Stage base commit` and `Last reviewed commit`.
+Keep one compact plan/ledger delta with decisions, remaining groups and evidence
+links. Earlier PAs, quality and file audits pass; failures decrease at unchanged
+coverage. Finish a coherent group before partial handoff and explain why related
+work cannot continue. Ralph reviews every third incomplete handoff and audits
+a passing stage.
 
 Preserve course contracts and reference outputs. Corrections require a reduced
 reproducer, cited C++11/LowIR rules and the bundle revision; compiler agreement
@@ -40,7 +41,6 @@ Required checks:
 
 Commit cohesive changes and leave `git status --short` empty.
 
-Ralph creates and schedules the native phase goal. Satisfy this phase, call
-`update_goal` with status `complete`, and return a validated handoff. Partial
-implementation completion ends this turn, not the assignment. Never create or
-replace the goal, edit its state, or wait for Ralph-owned checks.
+Ralph owns the goal. Complete the phase with `update_goal` status `complete`
+and return a validated handoff. Partial completion ends the turn, not the stage.
+Never create/replace goals, edit their state or wait for Ralph-owned checks.

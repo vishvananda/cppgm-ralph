@@ -15,16 +15,18 @@ interactions. Cite concrete owners for the spec's supported invariants; fix
 violations and correctness defects rather than treating fixtures as proof.
 Do not audit later capabilities as though they already exist.
 
-Follow spec section 11. Review the fixed evidence set for missing or invalidated
-results; measure those after fixes stabilize and reuse unchanged qualification,
-host and baseline data. Complete coverage means relevant supported capabilities,
-not every historical input. Profile demonstrated excessive work; a slow rank
-alone is not a defect. Refresh canonical course acceptance on final code.
-Do not turn final review into repeated exploratory benchmark campaigns.
+Follow spec section 11. Review complete supported coverage; refresh only missing
+or invalidated evidence after fixes stabilize. Reuse host/baseline data and
+qualification; profile demonstrated excess. Avoid historical matrix expansion.
 
-Consolidate plan/audit once: alignment, findings, changes, evidence links,
-validation and handoff ledger. Earlier stages and the Rust quality and file audits pass.
-No known stage correctness or architecture defect remains.
+Run required checks once on final code and tests with unchanged options.
+Make/direct aliases share one result. A through report covers earlier PAs;
+run the stage separately only where required. Reuse scripts and receipts.
+This supersedes older plan/script checklists; all course gates apply.
+
+Refresh final course acceptance; earlier stages, quality and file audits pass.
+No known stage correctness or architecture defect remains. Record one compact
+audit/ledger delta with findings, fixes and evidence links.
 
 Preserve course contracts and reference outputs. Corrections require a reduced
 reproducer, cited C++11/LowIR rules and the bundle revision; compiler agreement
@@ -35,7 +37,6 @@ Required checks:
 
 Commit cohesive changes and leave `git status --short` empty.
 
-Ralph creates and schedules the native phase goal. Satisfy this phase, call
-`update_goal` with status `complete`, and return a validated handoff. Partial
-implementation completion ends this turn, not the assignment. Never create or
-replace the goal, edit its state, or wait for Ralph-owned checks.
+Ralph owns the goal. Complete the phase with `update_goal` status `complete`
+and return a validated handoff. Partial completion ends the turn, not the stage.
+Never create/replace goals, edit their state or wait for Ralph-owned checks.

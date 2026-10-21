@@ -15,16 +15,18 @@ boundary from history. Review interactions and supported architecture across
 that range, not just the latest commit. Fix violations at their owning paths
 and use focused language/reference comparisons beyond fixtures.
 
-Use existing evidence and spec section 11. Refresh only affected correctness,
-scaling and performance controls. A shared change requires representative
-consumer smokes; it does not authorize a historical matrix rerun. Profile a
-measured excess before optimizing. Record unresolved uncertainty rather than
-expanding measurements without a question. Preserve the checkpoint's course
-progress and earlier-stage behavior.
+Follow spec section 11. Use focused correctness/boundary controls for changed
+owners; add modes/consumers only when affected. Reuse valid measurements;
+profile demonstrated excess. Preserve stage progress and earlier PAs.
 
-After code fixes and validation, record that code tip as `Last reviewed commit`.
-Commit a compact plan/audit delta and one ledger row without further code edits.
-Distinguish unfinished implementation from review questions; neither is waived.
+Run required checks once on final code and tests with unchanged options.
+Make/direct aliases share one result. A through report covers earlier PAs;
+run the stage separately only where required. Reuse scripts and receipts.
+This supersedes older plan/script checklists; all course gates apply.
+
+After validation set `Last reviewed commit` to the reviewed tip. Record one
+compact audit/ledger delta; link evidence. Keep unfinished work and uncertainty
+explicit.
 
 Preserve course contracts and reference outputs. Corrections require a reduced
 reproducer, cited C++11/LowIR rules and the bundle revision; compiler agreement
@@ -35,7 +37,6 @@ Required checks:
 
 Commit cohesive changes and leave `git status --short` empty.
 
-Ralph creates and schedules the native phase goal. Satisfy this phase, call
-`update_goal` with status `complete`, and return a validated handoff. Partial
-implementation completion ends this turn, not the assignment. Never create or
-replace the goal, edit its state, or wait for Ralph-owned checks.
+Ralph owns the goal. Complete the phase with `update_goal` status `complete`
+and return a validated handoff. Partial completion ends the turn, not the stage.
+Never create/replace goals, edit their state or wait for Ralph-owned checks.
