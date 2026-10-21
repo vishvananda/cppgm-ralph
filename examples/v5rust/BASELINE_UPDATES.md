@@ -98,6 +98,14 @@ Update these together while the worker is stopped:
 | Both `CLONE_CONTRACT.md` copies | Record the new oracle revision. |
 | Candidate `docs/port/baseline.md` | Record the old/new pins, changed behavior, counts and validation receipts. |
 
+Preserve Git file modes during imports, especially mode `120000`. Replace a
+symlink itself atomically; writing blob bytes through the old link follows it
+and can create a bogus test at a retired target. Check `readlink` against the
+Git blob separately from the target-content hash, then validate the complete
+symlink inventory and deleted paths. `baseline_files.py` provides atomic blob
+installation and mode/link verification; run its regression tests with
+`python3 -m unittest discover -s examples/v5rust -p test_baseline_files.py`.
+
 Changing only `revision` is insufficient: preflight validates actual protected
 file and tool hashes. Refresh expected hashes only for the reviewed update,
 after confirming the previous protected files match their existing manifest.
