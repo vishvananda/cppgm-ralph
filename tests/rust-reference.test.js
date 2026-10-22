@@ -119,6 +119,10 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     } else {
       assert(config.checks.referencePrior.command.includes('reference_bootstrap.py course'));
     }
+    for (const [key, stage] of [['referenceObjects', 'pa34'], ['referenceProof', 'pa34'],
+      ['referencePerf', 'pa35'], ['referenceFinal', 'pa35']]) {
+      assert.equal(config.checks[key].targetStage, stage, `${key} must bind its literal command to a stage`);
+    }
     assert(config.checks.referenceFinalBootstrap.command.includes('--profile student'));
     assert(config.checks.referenceProof.command.includes(`--profile ${profile}`));
     assert(config.checks.referenceFinal.command.includes('obj/rust/release/cppgm'));

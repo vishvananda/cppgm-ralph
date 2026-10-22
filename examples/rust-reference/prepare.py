@@ -176,16 +176,16 @@ def prepare(config_path, course, bundle, out, profile):
     required34 = required + (["referencePortPrior"] if profile == "port" else ["referencePrior"])
     required35 = required + ["referencePrior"]
     check("referenceObjects", boot + " progress" + reference, stages=("pa34",),
-          kind="test", primary=True, required=False, dependsOn=["referenceBuild"])
+          kind="test", primary=True, required=False, targetStage="pa34", dependsOn=["referenceBuild"])
     check("referenceObjectProgress", "ralph:current-stage-progress referenceObjects {{testStage}}",
           stages=("pa34",), dependsOn=required34)
     check("referenceObjectPreserved", "ralph:current-stage-progress referenceObjects {{testStage}} mode=preserve",
           stages=("pa34",), dependsOn=required34)
     check("referenceProof", boot + " final" + reference, stages=("pa34",),
-          kind="generic", primary=True, dependsOn=required34)
+          kind="generic", primary=True, targetStage="pa34", dependsOn=required34)
     check("referenceSmoke", "make -C pa35 test-smoke" + perf, stages=("pa35",), dependsOn=["referenceBuild"])
     check("referencePerf", "make -C pa35 test-progress" + perf, stages=("pa35",),
-          kind="test", primary=True, required=False, dependsOn=["referenceBuild"])
+          kind="test", primary=True, required=False, targetStage="pa35", dependsOn=["referenceBuild"])
     check("referencePerfProgress", "ralph:current-stage-progress referencePerf {{testStage}}",
           stages=("pa35",), dependsOn=required35 + ["referenceSmoke"])
     check("referencePerfPreserved", "ralph:current-stage-progress referencePerf {{testStage}} mode=preserve",
@@ -194,7 +194,7 @@ def prepare(config_path, course, bundle, out, profile):
     check("referenceFinalBootstrap", boot + " final" + reference.replace("--profile port", "--profile student"),
           stages=("pa35",), kind="generic", dependsOn=required35)
     check("referenceFinal", "make -C pa35 test" + perf, stages=("pa35",),
-          kind="test", primary=True, dependsOn=required35 + ["referenceFinalBootstrap"])
+          kind="test", primary=True, targetStage="pa35", dependsOn=required35 + ["referenceFinalBootstrap"])
     for phase in config["phases"]:
         phase["checks"] += list(dict.fromkeys(required34 + required35))
         phase["promptTemplates"] = dict(phase.get("promptTemplates", {}))
