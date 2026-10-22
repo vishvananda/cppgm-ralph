@@ -47,10 +47,10 @@ test("complete build inventory leaves two proof checks pending in the standard b
   const model = b.RALPH_TEST_STATUS_SUMMARY.buildTurnProgressModel(progress);
   assert.equal(model.rows.length, 1);
   const html = b.dockProgressBarHtml({}, progress, model);
-  for (const text of ["start 236", "current 236", "best 236", "238 total", "bootstrap proof pending"]) {
+  for (const text of ["start 236", "current 236", "best 236", "238 total"]) {
     assert.ok(html.includes(text), text);
   }
-  assert.doesNotMatch(html, /dock-progress-block dock-progress-pass/);
+  assert.doesNotMatch(html, /dock-progress-block dock-progress-pass|bootstrap proof pending/);
 });
 
 test("fixed point and rebuilt suites count independently and cannot mask a proof regression", async () => {

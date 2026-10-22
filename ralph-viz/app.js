@@ -1356,7 +1356,6 @@ function dockProgressLegendHtml(model, progress) {
       ? [{ key: "focused", text: passingFocusedProgressText(progress, { plain: true }), noSwatch: true }]
       : []),
     { key: "total", text: `${fmtInt(model.total)} total` },
-    ...(progress?.progressNote ? [{ key: "note", noSwatch: true, text: progress.progressNote }] : []),
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
     <span class="dock-progress-legend-item${item.key === "total" ? " dock-progress-legend-total" : ""}">
