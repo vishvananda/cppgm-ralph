@@ -1356,6 +1356,7 @@ function dockProgressLegendHtml(model, progress) {
       ? [{ key: "focused", text: passingFocusedProgressText(progress, { plain: true }), noSwatch: true }]
       : []),
     { key: "total", text: `${fmtInt(model.total)} total` },
+    ...(progress?.progressNote ? [{ key: "note", noSwatch: true, text: progress.progressNote }] : []),
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
     <span class="dock-progress-legend-item${item.key === "total" ? " dock-progress-legend-total" : ""}">
@@ -5474,7 +5475,100 @@ function buildAgentTestProgressState(records) {
     byTurn.set(turn, progress);
     if (!latest || turn >= latest.turn) latest = progress;
   }
+  for (const [turn, progress] of buildReferenceBootstrapProgress(records)) {
+    byTurn.set(turn, progress);
+    if (!latest || turn >= latest.turn) latest = progress;
+  }
   return { byTurn, latest, testStatusesByTurn };
+}
+
+function referenceBootstrapAction(command) {
+  if (!String(command ?? "").includes("reference_bootstrap.py")) return null;
+  const segments = TEST_COMMAND_PROVENANCE.shellSegments(unwrapCommand(command ?? ""));
+  if (segments.length !== 1) return null;
+  const words = segments[0].tokens;
+  let at = 0;
+  while (/^[A-Za-z_]\w*=/.test(words[at] ?? "")) at++;
+  if (/^python(?:3(?:\.\d+)?)?$/.test(words[at]?.split("/").at(-1) ?? "")) at++;
+  if (words[at]?.split("/").at(-1) !== "reference_bootstrap.py") return null;
+  return ["progress", "final"].includes(words[at + 1]) ? words[at + 1] : null;
+}
+
+function buildReferenceBootstrapProgress(records) {
+  const byTurn = new Map();
+  let inventory = null;
+  let proof = {};
+  let proofFailed = false;
+  const starts = new Map();
+  for (const record of records) {
+    const turn = displayTurnForRecord(record);
+    const phase = record.eventType === "ralph.phase-status" ? record.event?.phaseStatus : null;
+    const item = record.event?.item;
+    const itemKey = `${record.threadId ?? ""}:${item?.id ?? ""}`;
+    if (record.eventType === "item.started" && item?.type === "command_execution" && item.id) {
+      starts.set(itemKey, item.command);
+    }
+    let action = null;
+    let status = null;
+    let output = "";
+    let check = null;
+    if (phase?.stage === "pa34") {
+      check = phase.primaryCheck ?? phase.checks?.find(candidate => candidate.primary);
+      action = referenceBootstrapAction(check?.command);
+      status = check?.testStatus ?? phase.testStatus;
+    } else if (record.eventType === "ralph.test-status") {
+      status = record.event?.testStatus;
+      action = referenceBootstrapAction(status?.command);
+    } else if (record.eventType === "item.completed" && item?.type === "command_execution") {
+      action = referenceBootstrapAction(item.command ?? starts.get(itemKey));
+      starts.delete(itemKey);
+      output = commandOutputText(item.aggregated_output);
+    }
+    if (!action) continue;
+    const targets = (status?.stages ?? []).flatMap(stage => stage.targets ?? []);
+    if (action === "progress") {
+      const total = status?.testsTotal;
+      if (!(total > 0)) continue;
+      inventory = { total, passed: Math.min(total, status.testsPassed ?? 0) };
+      // A new build result does not certify a proof made with an older compiler.
+      proof = {};
+      proofFailed = false;
+    } else {
+      proof = {};
+      const exitCode = check?.exitCode ?? status?.exitCode ?? item?.exit_code;
+      proofFailed = Number.isInteger(exitCode) && exitCode !== 0 && !check?.skipped;
+      for (const key of ["fixed-point", "rebuilt-suites"]) {
+        const target = targets.find(target => target.name === `reference-bootstrap/${key}`);
+        const match = [...output.matchAll(/^reference-bootstrap\/(fixed-point|rebuilt-suites): (PASS|FAIL) \([01]\/1\)$/gm)]
+          .find(match => match[1] === key);
+        if (target) proof[key] = target.status === "pass";
+        if (match) proof[key] = match[2] === "PASS";
+      }
+      const verified = ["fixed-point", "rebuilt-suites"].every(key => proof[key] === true);
+      if (check?.passed === true || (status?.allTestsPassed === true && status.exitCode === 0) ||
+          (exitCode === 0 && verified)) {
+        proof = { "fixed-point": true, "rebuilt-suites": true };
+        if (inventory) inventory.passed = inventory.total;
+      } else if (proofFailed && verified) {
+        proof = {};
+      }
+    }
+    if (!inventory) continue;
+    const total = inventory.total + 2;
+    const passed = inventory.passed + Object.values(proof).filter(Boolean).length;
+    const current = { passed, total, recordedAt: record.recordedAt };
+    const previous = byTurn.get(turn);
+    const proofPassed = Object.values(proof).filter(Boolean).length;
+    proofFailed ||= Object.values(proof).some(value => value === false);
+    byTurn.set(turn, { stage: "pa34", turn, recordedAt: record.recordedAt,
+      commandTarget: "reference build and bootstrap proof", unit: "build items",
+      status: passed === total ? "pass" : proofFailed || inventory.passed < inventory.total ? "fail" : "running",
+      progressNote: proofPassed === 2 ? "bootstrap proof passed"
+        : proofFailed ? "bootstrap proof failed" : "bootstrap proof pending",
+      start: previous?.start ?? current, current,
+      best: previous?.best?.passed > passed ? previous.best : current });
+  }
+  return byTurn;
 }
 
 function buildConfiguredCheckProgress(records) {
