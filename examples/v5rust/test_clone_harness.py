@@ -105,9 +105,47 @@ class StageInventoryTests(unittest.TestCase):
             (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{
                 "name": "pa20", "targets": [{"name": "clone/pa20/" + cases[1], "status": "pass"}]}]}}))
             (root / "last-test.log").write_text(output.getvalue())
-            with patch.dict(clone_check.SETTINGS, {"state_dir": directory}), \
+            with patch.object(clone_check, "manifest", return_value={"stages": {}}), \
+                    patch.dict(clone_check.SETTINGS, {"state_dir": directory}), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertFalse(clone_check.preserve("pa20"))
+
+
+class CaseRelocationTests(unittest.TestCase):
+    old = "clone/pa26/tests/general/old.t"
+    new = "clone/pa26/tests/general/new.t"
+    future = "clone/pa32/tests/host/o1/new.t"
+
+    def preserve(self, replacement, current):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{
+                "name": "pa26", "targets": [{"name": self.old, "status": "pass"}]}]}}))
+            (root / "last-test.log").write_text(f"{current}: PASS (1/1)\n")
+            stage, case = replacement.removeprefix("clone/").split("/", 1)
+            frozen = {"stages": {stage: [case]},
+                      "case_identity_relocations": {self.old: replacement}}
+            with patch.object(clone_check, "manifest", return_value=frozen), \
+                    patch.dict(clone_check.SETTINGS, {"state_dir": directory}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                return clone_check.preserve("pa26")
+
+    def test_renamed_case_still_must_pass(self):
+        self.assertTrue(self.preserve(self.new, self.new))
+        self.assertFalse(self.preserve(self.new, "clone/pa26/tests/general/other.t"))
+
+    def test_reviewed_move_is_required_at_its_new_stage(self):
+        self.assertTrue(self.preserve(self.future, self.new))
+        frozen = {"stages": {"pa32": ["tests/host/o1/new.t"]},
+                  "case_identity_relocations": {self.old: self.future}}
+        self.assertEqual(clone_check.case_relocations(frozen)[self.old], self.future)
+
+    def test_invalid_destinations_and_cycles_are_rejected(self):
+        for mapping in [{self.old: self.new}, {self.old: self.old},
+                        {self.old: self.future, self.future: self.old},
+                        {self.old: "clone/pa32/tests/../new.t"}]:
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                clone_check.case_relocations({"stages": {}, "case_identity_relocations": mapping})
 
 
 class ComparisonTests(unittest.TestCase):
@@ -337,7 +375,7 @@ class ComparisonTests(unittest.TestCase):
             (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{
                 "name": "pa1", "targets": [{"name": "clone/pa1/a", "status": "pass"}]}]}}))
             (root / "last-test.log").write_text("clone/pa1/b: PASS (1/1)\nclone/pa1/a: FAIL (0/1)\n")
-            with patch.dict(clone_check.SETTINGS, {"state_dir": directory}), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(clone_check, "manifest", return_value={"stages": {}}), patch.dict(clone_check.SETTINGS, {"state_dir": directory}), contextlib.redirect_stdout(io.StringIO()):
                 self.assertFalse(clone_check.preserve("pa1"))
 
     def test_bootstrap_requires_object_inventory_and_all_tool_hashes(self):

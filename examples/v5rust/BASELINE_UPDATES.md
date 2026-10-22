@@ -106,6 +106,14 @@ symlink inventory and deleted paths. `baseline_files.py` provides atomic blob
 installation and mode/link verification; run its regression tests with
 `python3 -m unittest discover -s examples/v5rust -p test_baseline_files.py`.
 
+For reviewed test renames or moves, record full `clone/paN/tests/...t` identities
+in the protected manifest's `case_identity_relocations` mapping. Each retired
+identity must point directly to an existing new frozen anchor; chains, cycles
+and missing destinations are rejected. Preservation still requires a renamed
+case to pass. A case moved to a later assignment remains required by that
+assignment's gate instead of pulling its requirements into an earlier stage.
+Keep historical runner results unchanged and report the relocation explicitly.
+
 Changing only `revision` is insufficient: preflight validates actual protected
 file and tool hashes. Refresh expected hashes only for the reviewed update,
 after confirming the previous protected files match their existing manifest.

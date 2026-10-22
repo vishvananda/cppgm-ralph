@@ -33,6 +33,7 @@ def build():
 
 def preflight():
     frozen = manifest()
+    case_relocations(frozen)
     for name, expected in frozen["protected"].items():
         path = ROOT / name
         if not path.is_file() or file_digest(path) != expected:
@@ -155,6 +156,23 @@ def passing_targets(status, stage):
             for target in entry.get("targets", []) if target.get("status") == "pass"}
 
 
+def case_relocations(frozen):
+    """Validate owner-reviewed identity changes against the frozen inventory."""
+    relocations = frozen.get("case_identity_relocations", {})
+    anchors = {f"clone/{stage}/{case}" for stage, cases in frozen["stages"].items()
+               for case in cases}
+    if not isinstance(relocations, dict):
+        raise ValueError("case identity relocations must be a mapping")
+    pattern = r"clone/pa(?:[1-9]|[12][0-9]|3[0-3])/tests/[^\s]+\.t"
+    for old, new in relocations.items():
+        if (not isinstance(old, str) or not isinstance(new, str)
+                or not re.fullmatch(pattern, old) or not re.fullmatch(pattern, new)
+                or any(part in (".", "..", "") for name in (old, new) for part in name.split("/"))
+                or old in anchors or new not in anchors):
+            raise ValueError(f"invalid case identity relocation: {old!r} -> {new!r}")
+    return relocations
+
+
 def preserve(stage):
     state_dir = Path(SETTINGS["state_dir"])
     current_log = state_dir / "last-test.log"
@@ -176,6 +194,15 @@ def preserve(stage):
                     continue
                 if event.get("action") == "checked":
                     required |= passing_targets(event.get("phaseStatus", {}).get("testStatus", {}), stage)
+    relocations = case_relocations(manifest())
+    canonical = set()
+    for target in sorted(required):
+        replacement = relocations.get(target, target)
+        if replacement != target:
+            print(f"Reviewed case relocation: {target} -> {replacement}")
+        if replacement.split("/", 2)[1] == stage:
+            canonical.add(replacement)
+    required = canonical
     missing = sorted(required - current)
     for target in missing:
         print("Previously passing case regressed:", target)
