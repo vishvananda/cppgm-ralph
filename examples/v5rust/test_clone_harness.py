@@ -116,11 +116,11 @@ class CaseRelocationTests(unittest.TestCase):
     new = "clone/pa26/tests/general/new.t"
     future = "clone/pa32/tests/host/o1/new.t"
 
-    def preserve(self, replacement, current):
+    def preserve(self, replacement, current, required=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "state.json").write_text(json.dumps({"lastTestStatus": {"stages": [{
-                "name": "pa26", "targets": [{"name": self.old, "status": "pass"}]}]}}))
+                "name": "pa26", "targets": [{"name": required or self.old, "status": "pass"}]}]}}))
             (root / "last-test.log").write_text(f"{current}: PASS (1/1)\n")
             stage, case = replacement.removeprefix("clone/").split("/", 1)
             frozen = {"stages": {stage: [case]},
@@ -133,6 +133,9 @@ class CaseRelocationTests(unittest.TestCase):
     def test_renamed_case_still_must_pass(self):
         self.assertTrue(self.preserve(self.new, self.new))
         self.assertFalse(self.preserve(self.new, "clone/pa26/tests/general/other.t"))
+
+    def test_unmapped_historical_identity_remains_required(self):
+        self.assertFalse(self.preserve(self.new, self.new, required="legacy/unmapped"))
 
     def test_reviewed_move_is_required_at_its_new_stage(self):
         self.assertTrue(self.preserve(self.future, self.new))

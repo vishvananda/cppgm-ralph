@@ -200,7 +200,7 @@ def preserve(stage):
         replacement = relocations.get(target, target)
         if replacement != target:
             print(f"Reviewed case relocation: {target} -> {replacement}")
-        if replacement.split("/", 2)[1] == stage:
+        if replacement == target or replacement.split("/", 2)[1] == stage:
             canonical.add(replacement)
     required = canonical
     missing = sorted(required - current)
