@@ -110,6 +110,15 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
         }
       }
     }
+    if (profile === 'student') {
+      assert(config.checks.referencePrior.command.startsWith('make test-report-through-pa33'));
+      for (const stage of [8, 32, 33]) {
+        assert(config.checks.referencePrior.command.includes(`make -C pa${stage} test-debuginfo`));
+      }
+      assert(!config.checks.referencePrior.command.includes('reference_bootstrap.py course'));
+    } else {
+      assert(config.checks.referencePrior.command.includes('reference_bootstrap.py course'));
+    }
     assert(config.checks.referenceFinalBootstrap.command.includes('--profile student'));
     assert(config.checks.referenceProof.command.includes(`--profile ${profile}`));
     assert(config.checks.referenceFinal.command.includes('obj/rust/release/cppgm'));

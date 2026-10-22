@@ -161,7 +161,14 @@ def prepare(config_path, course, bundle, out, profile):
         # Preserve the exact port's through-PA33 proof while completing PA34.
         check("referencePortPrior", checks["priorThroughTests"]["command"].replace("{{testStage}}", "pa34"),
               stages=("pa34",), dependsOn=["referenceIntegrity"])
-    check("referencePrior", boot + f" course --course-root . --tools-dir {q(str(tools))} --out obj/reference-course",
+    prior = boot + f" course --course-root . --tools-dir {q(str(tools))} --out obj/reference-course"
+    if profile == "student":
+        # Keep the independent student's established comparison rules. The
+        # rebuilt C++ generations still run their own strict bootstrap suites.
+        prior = "make test-report-through-pa33" + "".join(
+            f" && make -C pa{n} test-debuginfo CPPGM_SKIP_DEV_REBUILD=1"
+            for n in (8, 32, 33))
+    check("referencePrior", prior,
           stages=("pa35",) if profile == "port" else ("pa34", "pa35"),
           kind="generic", targetStage="pa33", dependsOn=["referenceBuild"])
     required = ["referenceBuild", "referenceQuality"]

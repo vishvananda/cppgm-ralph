@@ -46,7 +46,9 @@ update the optional protected control manifest, then restart Ralph using the
 staged config. Its sidecars must stay
 beside that config. The config preserves the run name, workdir and state path,
 extends stages through PA35, and uses the actual Cargo release binaries.
-It leaves earlier-stage prompts/checks intact. Do not install over an active
+It leaves earlier-stage prompts/checks intact. The student's prior gate keeps its
+normal through-PA33 comparisons and PA8/PA32/PA33 debug targets; strict LowIR
+text comparison belongs to the rebuilt C++ generations, not the independent Rust compiler. Do not install over an active
 worker or manually advance/edit Ralph or goal state.
 
 Keep Rust handout changes on `rust-course`; update it deliberately with future
