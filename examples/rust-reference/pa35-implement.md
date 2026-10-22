@@ -6,7 +6,7 @@ Primary log: {{lastTestLogPath}}
 
 Read spec.md, pa35/README.md and gates.txt. PA34 used the
 @PROFILE@ profile; PA35 permits valid optimizer/backend and internal counter
-differences under ordinary course contracts. Preserve its completed port proof
+differences under ordinary course contracts. Preserve its completed bootstrap proof
 as history, not a byte-equality restriction on new optimizations.
 R's C++ compile time/RSS/scaling measures compiler throughput. A=R(S) relative
 to B=host(S) measures generated code. S is immutable; C/D fixed-point binaries

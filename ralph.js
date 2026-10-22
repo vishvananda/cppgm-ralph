@@ -4783,6 +4783,10 @@ function resolveActiveTestStage(state) {
   if (savedStage) {
     return savedStage;
   }
+  const continuationStage = completedRunContinuationStage(state);
+  if (continuationStage) {
+    return continuationStage;
+  }
   const explicitTargetStage = normalizeStageName(state?.lastTestStatus?.targetStage);
   if (explicitTargetStage && state?.lastTestStatus?.usesStageTemplate === false) {
     return explicitTargetStage;
@@ -4835,7 +4839,20 @@ function resolveActivePhase(state) {
   return CONFIG.phases.find((phase) => !phase.checkpointOnly && phaseAppliesToCurrentTarget(phase, state)) ?? CONFIG.phases[0];
 }
 
+function completedRunContinuationStage(state) {
+  if (!hasCompletedRunStateMarkers(state)) {
+    return null;
+  }
+  const nextStage = getNextStageAfterCompletedPhase(state.lastTestStatus);
+  const stop = stageNumber(CONFIG.stopAfterStage);
+  return nextStage && (stop == null || stageNumber(nextStage) <= stop) ? nextStage : null;
+}
+
 function isCompletedRunState(state) {
+  return hasCompletedRunStateMarkers(state) && !completedRunContinuationStage(state);
+}
+
+function hasCompletedRunStateMarkers(state) {
   return Boolean(
     state &&
     state.turnsCompleted > 0 &&

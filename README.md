@@ -135,6 +135,10 @@ the run config or `RALPH_STOP_AFTER_STAGE=pa7`. Ralph waits for all phases of
 PA7 to pass (including its audit phase, if configured), saves PA8 as the next
 target, and exits before starting PA8. Remove the setting to resume. Keeping
 it set also prevents a later restart from beginning PA8.
+A run that finished its last known stage can also continue when newly discovered
+stages or `extraStages` extend the course. Raise or remove `stopAfterStage` and
+restart: Ralph selects the next stage after the saved successful target without
+replaying its completed audit or editing state.
 
 The first-turn default prompt can be customized with a Markdown sidecar file next
 to the config file. For a config named `goals-2026-05-14.config.json`, Ralph

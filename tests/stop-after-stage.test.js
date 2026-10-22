@@ -91,3 +91,91 @@ emit({ type: "driver.completed", usage: { inputTokens: 1, outputTokens: 1 } });
   result = run();
   assert.equal(attempts(), 3, `removing stopAfterStage did not resume PA8:\n${result.output}`);
 });
+
+test("completed run resumes added stages after its endpoint is extended", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "ralph-stage-extension-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const workdir = path.join(root, "work");
+  const remote = path.join(root, "origin.git");
+  const stateBaseDir = path.join(root, "state");
+  const marker = path.join(root, "passed");
+  const attemptsFile = path.join(root, "attempts");
+  const checkPath = path.join(root, "check.sh");
+  const runnerPath = path.join(root, "runner.mjs");
+  const configPath = path.join(root, "ralph.config.json");
+  await fsp.mkdir(path.join(workdir, "pa7"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: workdir });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: workdir });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workdir });
+  await fsp.writeFile(path.join(workdir, "pa7", "README.md"), "PA7\n");
+  execFileSync("git", ["add", "."], { cwd: workdir });
+  execFileSync("git", ["commit", "-qm", "fixture"], { cwd: workdir });
+  execFileSync("git", ["init", "--bare", "-q", remote]);
+  execFileSync("git", ["remote", "add", "origin", remote], { cwd: workdir });
+  execFileSync("git", ["push", "-qu", "origin", "HEAD"], { cwd: workdir });
+  await fsp.writeFile(checkPath, `#!/bin/sh
+if test -f ${JSON.stringify(marker)}; then
+  echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='
+  exit 0
+fi
+exit 1
+`, { mode: 0o755 });
+  await fsp.writeFile(runnerPath, `import fs from "node:fs";
+let attempts = 0;
+try { attempts = Number(fs.readFileSync(${JSON.stringify(attemptsFile)}, "utf8")); } catch {}
+fs.writeFileSync(${JSON.stringify(attemptsFile)}, String(attempts + 1));
+fs.writeFileSync(${JSON.stringify(marker)}, "passed");
+const emit = record => process.stdout.write(JSON.stringify(record) + "\\n");
+emit({ type: "driver.started", sessionId: "fixture" });
+emit({ type: "model.start" });
+emit({ type: "model.content", block: { text: "done" } });
+emit({ type: "model.complete" });
+emit({ type: "driver.completed", usage: { inputTokens: 1, outputTokens: 1 } });
+`);
+  const config = {
+    provider: "strands", name: "extend-stage", model: "fake-model", reasoningEffort: "high",
+    workdir, useExistingWorkdir: true, stateBaseDir, strandsPath: runnerPath,
+    testCommand: `${checkPath} test-report-through-{{testStage}}`, initialStage: "pa7", maxTurns: 5,
+    loopGoalsEnabled: false, resourceLimits: false, sessionIsolation: false,
+    stopAfterStage: "pa7",
+    phases: [
+      { name: "implement", checks: ["tests"] },
+      { name: "audit", runWhenChecksPass: true, checks: ["tests"] },
+    ],
+  };
+  const run = () => {
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    const result = spawnSync(process.execPath, [path.join(RALPH_ROOT, "ralph.js")], {
+      cwd: RALPH_ROOT, encoding: "utf8", timeout: 30_000,
+      env: { ...process.env, RALPH_CONFIG: configPath, RALPH_RESOURCE_LIMITS: "0" },
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    return result.stdout;
+  };
+  const attempts = () => Number(fs.readFileSync(attemptsFile, "utf8"));
+  const state = () => JSON.parse(fs.readFileSync(path.join(stateBaseDir, "extend-stage-fake-model-high", "state.json"), "utf8"));
+  run();
+  assert.equal(attempts(), 2);
+  assert.equal(state().activeStage, null);
+  assert.equal(state().activePhase, null);
+  assert.equal(state().lastTestStatus.targetStage, "pa7");
+  assert.equal(state().lastTestStatus.passingThrough, null, "exercise the quiet cumulative report");
+  assert.match(run(), /Run state is already complete/);
+  assert.equal(attempts(), 2);
+
+  await fsp.mkdir(path.join(workdir, "pa8"));
+  await fsp.writeFile(path.join(workdir, "pa8", "README.md"), "PA8\n");
+  execFileSync("git", ["add", "."], { cwd: workdir });
+  execFileSync("git", ["commit", "-qm", "add next assignment"], { cwd: workdir });
+  run();
+  assert.equal(attempts(), 2, "adding a stage must still respect the old stop");
+  config.stopAfterStage = "pa8";
+  const output = run();
+  assert.equal(attempts(), 3, output);
+  assert.equal(state().lastTestStatus.targetStage, "pa8");
+  assert.equal(state().turnsCompleted, 3);
+  assert.equal(state().activeStage, null);
+  assert.equal(state().activePhase, null);
+  assert.match(run(), /Run state is already complete/);
+  assert.equal(attempts(), 3, "completed audits must not replay");
+});
