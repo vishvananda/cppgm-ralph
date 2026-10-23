@@ -65,7 +65,7 @@ def prepare(config_path, course, bundle, out, profile):
     for relative in files:
         target = staged / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(course / relative, target)
+        shutil.copy2(course / relative, target)
     # Replace conflicting policy in place; never append an override document.
     for relative in ("AGENTS.md", "spec.md", "CLONE_CONTRACT.md", "README.md", "RUST_STUDENT.md", "docs/rust-clone-plan.md"):
         if not (root / relative).exists():

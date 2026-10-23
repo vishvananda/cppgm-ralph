@@ -33,6 +33,7 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
       fs.writeFileSync(path.join(course, file), `fixture ${file}\n`);
     }
     fs.mkdirSync(path.join(course, 'scripts'), { recursive: true });
+    fs.chmodSync(path.join(course, 'pa35/scripts/check.pl'), 0o755);
     fs.writeFileSync(path.join(course, 'scripts/rust_course.json'), JSON.stringify({ course: 'rust-reference', branch: 'rust-course' }));
     fs.writeFileSync(path.join(course, 'pa34/README.md'), '# Rust compiler reference bootstrap\n\nA need not equal B. C == D.\n\n```sh\npython3 scripts/reference_bootstrap.py final --out obj/reference-bootstrap\n```\n');
     fs.writeFileSync(path.join(course, 'README.md'), '# cppgm assignments\nRust course overview.\n');
@@ -64,6 +65,7 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     assert(fs.readFileSync(path.join(candidate, 'pa35/reference.mk'), 'utf8').includes('obj/rust/release/cppgm'));
     assert.equal(fs.readFileSync(path.join(candidate, 'pa35/gates.txt'), 'utf8'),
       fs.readFileSync(path.join(course, 'pa35/gates.txt'), 'utf8'));
+    assert.equal(fs.statSync(path.join(candidate, 'pa35/scripts/check.pl')).mode & 0o777, 0o755);
     const handout = fs.readFileSync(path.join(candidate, 'pa34/README.md'), 'utf8');
     if (profile === 'port') {
       assert(handout.includes('F==A==C==D'));
