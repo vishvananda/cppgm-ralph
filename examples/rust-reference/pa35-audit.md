@@ -12,7 +12,12 @@ using fixed S/flags/link/allocator inputs and the published measurement scope.
 Require the complete final student-profile bootstrap, rebuilt course/debug
 suites, earlier Rust correctness and quality. Historical exact-port bytes do
 not constrain legitimate PA35 optimization, but course comparisons still do.
-Fix remaining issues, refresh invalidated final acceptance, consolidate the
+During fixes use focused controls and valid caches. Refresh affected canonical
+groups once after stabilization. Review changed provenance once; historical
+reports are evidence, not recurring checklists. Avoid whole-cache inventories,
+repeated receipt sealing and unaffected suites. A broader diagnostic must resolve
+an implementation or acceptance uncertainty cheaper checks cannot. Fix remaining
+issues, refresh invalidated final acceptance, consolidate the
 compact audit/evidence ledger, commit and leave clean. Do not finish the audit
 goal on partial progress or stale observations. Complete Ralph's existing
 native goal with update_goal; never create/replace it or edit checker/Ralph state.

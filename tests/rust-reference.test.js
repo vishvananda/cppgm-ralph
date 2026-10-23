@@ -27,7 +27,7 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     fs.writeFileSync(path.join(root, 'spec.md'), 'Original specification.\n');
     fs.writeFileSync(path.join(bundle, 'reference-bundle.json'), '{"commit":"fixture","files":{}}');
     const shipped = ['scripts/reference_bootstrap.py', 'pa34/README.md', 'pa35/README.md',
-      'pa35/Makefile', 'pa35/scripts/PA35.pm', 'pa35/scripts/check.pl'];
+      'pa35/Makefile', 'pa35/gates.txt', 'pa35/scripts/PA35.pm', 'pa35/scripts/check.pl'];
     for (const file of shipped) {
       fs.mkdirSync(path.dirname(path.join(course, file)), { recursive: true });
       fs.writeFileSync(path.join(course, file), `fixture ${file}\n`);
@@ -60,7 +60,10 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
     assert(!fs.existsSync(path.join(candidate, 'REFERENCE_STAGES.md')));
     assert(!fs.readFileSync(path.join(candidate, 'AGENTS.md'), 'utf8').includes('stops after the PA33 audit'));
     assert(!fs.readFileSync(path.join(candidate, 'spec.md'), 'utf8').includes('are deferred'));
+    assert(fs.readFileSync(path.join(candidate, 'spec.md'), 'utf8').includes('coherent optimization batch'));
     assert(fs.readFileSync(path.join(candidate, 'pa35/reference.mk'), 'utf8').includes('obj/rust/release/cppgm'));
+    assert.equal(fs.readFileSync(path.join(candidate, 'pa35/gates.txt'), 'utf8'),
+      fs.readFileSync(path.join(course, 'pa35/gates.txt'), 'utf8'));
     const handout = fs.readFileSync(path.join(candidate, 'pa34/README.md'), 'utf8');
     if (profile === 'port') {
       assert(handout.includes('F==A==C==D'));
@@ -130,6 +133,7 @@ for (const [name, profile] of [['v5scratch', 'student'], ['v5rust', 'port']]) {
       const manifest = JSON.parse(fs.readFileSync(path.join(out, 'control/manifest.json')));
       assert(manifest.protected['AGENTS.md']);
       assert(manifest.protected['pa35/scripts/check.pl']);
+      assert(manifest.protected['pa35/gates.txt']);
       assert.deepEqual(manifest.oracle_tools, { fixture: 'hash' });
       assert.equal(fs.readFileSync(path.join(out, 'control/manifest.json'), 'utf8'),
         fs.readFileSync(path.join(out, 'candidate/scripts/clone/manifest.json'), 'utf8'));

@@ -57,6 +57,11 @@ do not merge its instruction changes into the C++ course on `main`.
 The frozen workload bundle can remain pinned
 to an earlier agreed reference revision; its source must not drift as R changes.
 PA35 retains the published 17 limits and deterministic final counter scopes.
+Preparation includes `pa35/gates.txt` with the Rust handout and scripts, so a
+course refresh cannot leave older limits behind. PA35 prompts use coherent
+optimization batches, focused iteration and one canonical refresh at handoff;
+historical plans remain evidence rather than recurring checklists. Preserve the
+Rust quality, prior/debug and final bootstrap requirements when adapting prompts.
 
 ## Existing run rollout
 

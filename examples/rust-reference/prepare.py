@@ -9,7 +9,29 @@ import shlex
 import shutil
 
 HERE = Path(__file__).resolve().parent
-SHIPPED = ["scripts/reference_bootstrap.py", "pa34/README.md", "pa35/README.md", "pa35/Makefile", "scripts/rust_course.json"]
+SHIPPED = ["scripts/reference_bootstrap.py", "pa34/README.md", "pa35/README.md", "pa35/Makefile", "pa35/gates.txt", "scripts/rust_course.json"]
+PA35_BATCH_POLICY = """For PA35, one implementation turn owns a coherent optimization batch. Address
+a dominant measured owner/model limitation and its related producers/consumers;
+continue beyond the first local win or rung while related profitable work remains.
+Justify the batch boundary with evidence. Iterate with reduced controls and cached
+hardware counts before whole-source A/B builds. Refresh affected canonical groups
+once after stabilization, before handoff. Earlier simulation must resolve an
+implementation choice cheaper tools cannot. Review changed provenance once;
+avoid whole-cache inventories and repeated receipt sealing. Keep one compact
+current plan/ledger; historical plans are evidence, not recurring instructions.
+Preserve coverage and required checks, reduce canonical failures, and retain all
+17 gates and the complete final bootstrap for acceptance.
+
+"""
+
+
+def update_pa35_policy(text):
+    if "For PA35, one implementation turn owns a coherent optimization batch." in text:
+        return text
+    marker = "## Architecture review"
+    if marker in text:
+        return text.replace(marker, PA35_BATCH_POLICY + marker, 1)
+    return text.rstrip() + "\n\n" + PA35_BATCH_POLICY
 
 
 def write(path, content):
@@ -67,6 +89,7 @@ def prepare(config_path, course, bundle, out, profile):
                 "PA35 measures Rust throughput and generated code using the frozen C++ bundle.")
             text = text.replace("The run stops after the successful PA33 audit. Neither\ninception nor PA35's self-build gates are exit criteria for this run.",
                 "PA34 requires its full reference bootstrap; PA35 requires all 17 gates,\nfinal bootstrap and Rust quality. The run ends after the successful PA35 audit.")
+            text = update_pa35_policy(text)
         elif relative == "CLONE_CONTRACT.md":
             text = text.split("## PA34: cross-implementation bootstrap", 1)[0]
             text += ("## PA34 and PA35\n\nPA34 follows pa34/README.md's exact-port bootstrap proof.\n"
