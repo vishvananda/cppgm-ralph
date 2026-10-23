@@ -63,6 +63,16 @@ optimization batches, focused iteration and one canonical refresh at handoff;
 historical plans remain evidence rather than recurring checklists. Preserve the
 Rust quality, prior/debug and final bootstrap requirements when adapting prompts.
 
+When refreshing an active PA35 rubric, pause at a clean turn boundary and retain
+the old policy and receipts. Install the reviewed handout, gates and protocol
+together, then refresh the affected canonical groups. A limit change can change
+the rung denominator without removing tests. Before creating the next native
+goal, start Ralph with `stop-after-turn` present so its checks record the new
+baseline and exit. Confirm the preservation check uses the new denominator on
+both sides. Resume with fresh goal templates; `--reuse-last-checks` can reuse
+that verification if its inputs are unchanged. Never pad rungs, waive coverage
+or continue a blocked goal whose validation still describes the old rubric.
+
 ## Existing run rollout
 
 | Run | Installation boundary | Work enabled |
