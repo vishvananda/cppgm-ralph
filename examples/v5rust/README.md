@@ -100,6 +100,9 @@ retains its hash. Failures are never cached. Changed/missing evidence reruns the
 gate; `clone_check.py prior paN --fresh` or `clone_quality.py --fresh` forces it.
 Current-stage tests, preservation, course and release/bootstrap checks still run.
 No case, comparison, lint or acceptance requirement is removed.
+Validation subprocesses use `validation_path` from the protected settings when
+configured. Pin the owner's existing tool path at installation; temporary agent
+PATH entries then neither change the selected tools nor prevent evidence reuse.
 
 After the final stage, prior and quality checks, create a compact index:
 

@@ -68,14 +68,15 @@ def metadata_identity(roots):
 def host_identity():
     """System header/library metadata detects installation changes on this host."""
     executables = {}
+    environment = common.clean_env()
     for name in ('g++', 'gcc', 'cc', 'ld', 'as', 'perl', 'python3', 'cargo', 'rustc', 'rustfmt', 'clippy-driver'):
-        path = shutil.which(name)
+        path = shutil.which(name, path=environment.get('PATH'))
         executables[name] = None if path is None else [path, str(Path(path).resolve()), common.file_digest(path)]
     versions = {}
     for tool in ('rustc', 'cargo'):
-        result = subprocess.run([tool, '-vV'], capture_output=True, timeout=30, check=True)
+        result = subprocess.run([tool, '-vV'], env=environment, capture_output=True, timeout=30, check=True)
         versions[tool] = result.stdout.decode()
-    sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], text=True).strip())
+    sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], env=environment, text=True).strip())
     cargo = Path(common.clean_env()['CARGO_HOME'])
     return {'system': list(os.uname()), 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'headers_libraries': metadata_identity(('/usr/include', '/usr/lib/x86_64-linux-gnu', '/lib/x86_64-linux-gnu')),
@@ -115,7 +116,7 @@ def inputs(context):
     return {'version': VERSION, 'context': context, 'checkout': str(root), 'control': str(control),
             'files': tree_identity(paths),
             'binaries': {tool: common.file_digest(common.candidate_path(tool)) for tool in common.TOOLS},
-            'environment': {key: os.environ.get(key) for key in ENV_KEYS},
+            'environment': {key: common.clean_env().get(key) for key in ENV_KEYS},
             'limits': {str(key): list(resource.getrlimit(key)) for key in
                        (resource.RLIMIT_STACK, resource.RLIMIT_AS, resource.RLIMIT_DATA, resource.RLIMIT_NOFILE)},
             'host': host_identity()}

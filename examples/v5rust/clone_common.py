@@ -34,6 +34,8 @@ def clean_env():
                CARGO_TARGET_DIR=str(ROOT / "obj/rust"),
                CLIPPY_CONF_DIR=str(ROOT / "dev"), CARGO_BUILD_WARNINGS="deny",
                PYTHONDONTWRITEBYTECODE="1")
+    if SETTINGS.get("validation_path"):
+        env["PATH"] = SETTINGS["validation_path"]
     return env
 
 

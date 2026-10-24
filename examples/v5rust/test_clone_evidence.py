@@ -16,6 +16,12 @@ import clone_quality
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_validation_path_is_pinned_without_changing_other_environment(self):
+        with patch.dict(clone_common.SETTINGS, {'validation_path':'/configured/tools'}), \
+                patch.dict('os.environ', {'PATH':'/temporary/agent/tools'}):
+            self.assertEqual(clone_common.clean_env()['PATH'],'/configured/tools')
+            self.assertEqual(clone_common.clean_env()['CPPGM_LOWIR_DIRECT_TEXT_COMPARE'],'1')
+
     def run_cache(self, root, state, action, paths=(), fresh=False):
         with patch.object(clone_common, 'ARTIFACTS', root), \
                 patch.object(evidence, 'inputs', side_effect=lambda context: {'context': context, **state}), \
