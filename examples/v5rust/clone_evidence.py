@@ -79,6 +79,7 @@ def host_identity():
     sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], env=environment, text=True).strip())
     cargo = Path(common.clean_env()['CARGO_HOME'])
     return {'system': list(os.uname()), 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            'tool_directories': metadata_identity(tuple(directory for directory in environment['PATH'].split(os.pathsep) if directory)),
             'headers_libraries': metadata_identity(('/usr/include', '/usr/lib/x86_64-linux-gnu', '/lib/x86_64-linux-gnu')),
             'rust_dependencies': metadata_identity((sysroot / 'bin', sysroot / 'lib', cargo / 'registry/src', cargo / 'git/checkouts',
                                                     common.CONTROL / 'venv/bin', common.CONTROL / 'venv/lib')),
