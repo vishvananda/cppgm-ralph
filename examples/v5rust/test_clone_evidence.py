@@ -22,6 +22,14 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(clone_common.clean_env()['PATH'],'/configured/tools')
             self.assertEqual(clone_common.clean_env()['CPPGM_LOWIR_DIRECT_TEXT_COMPARE'],'1')
 
+    def test_diagnostic_format_is_the_same_in_worker_and_runner(self):
+        with patch.dict('os.environ', {'NO_COLOR':'1'}):
+            worker=clone_common.clean_env()['NO_COLOR']
+        with patch.dict('os.environ', {}, clear=True):
+            runner=clone_common.clean_env()['NO_COLOR']
+        self.assertEqual(worker,runner)
+        self.assertEqual(worker,'1')
+
     def run_cache(self, root, state, action, paths=(), fresh=False):
         with patch.object(clone_common, 'ARTIFACTS', root), \
                 patch.object(evidence, 'inputs', side_effect=lambda context: {'context': context, **state}), \

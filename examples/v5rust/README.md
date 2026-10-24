@@ -103,6 +103,8 @@ No case, comparison, lint or acceptance requirement is removed.
 Validation subprocesses use `validation_path` from the protected settings when
 configured. Pin the owner's existing tool path at installation; temporary agent
 PATH entries then neither change the selected tools nor prevent evidence reuse.
+Diagnostic formatting is fixed with `LC_ALL=C`, `TZ=UTC` and `NO_COLOR=1` in
+both worker and runner subprocesses.
 
 After the final stage, prior and quality checks, create a compact index:
 
