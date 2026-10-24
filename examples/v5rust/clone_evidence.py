@@ -102,12 +102,9 @@ def inputs(context):
     # Discovery also runs ignored, newly added .t cases. Include their input
     # sidecars even when Git's untracked inventory excludes them.
     for tests in root.glob('pa*/tests'):
-        for case in tests.rglob('*.t'):
-            paths.append(case)
-            stem = case.name[:-2]
-            paths += [path for path in case.parent.glob(stem + '.*')
-                      if path.name.startswith((stem + '.ref', stem + '.t.'))
-                      or path.name in (stem + '.flags', stem + '.expect')]
+        paths += [path for path in tests.rglob('*') if '.my' not in path.name
+                  and (path.name.endswith(('.t', '.flags', '.expect'))
+                       or '.t.' in path.name or '.ref' in path.name)]
     paths += [root / 'dev',
               root / '.cargo', root / 'dev/.cargo', root / 'rust-toolchain.toml']
     paths += [path for path in control.glob('*.py')]
