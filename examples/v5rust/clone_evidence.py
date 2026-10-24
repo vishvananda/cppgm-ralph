@@ -107,6 +107,7 @@ def inputs(context):
                        or '.t.' in path.name or '.ref' in path.name)]
     paths += [root / 'dev',
               root / '.cargo', root / 'dev/.cargo', root / 'rust-toolchain.toml']
+    paths += [root / name for name in ('rustfmt.toml', '.rustfmt.toml', 'clippy.toml', '.clippy.toml')]
     paths += [path for path in control.glob('*.py')]
     paths += [control / 'bin', control / 'settings.json', control / 'manifest.json']
     paths += [root.parent / 'cache/cargo/config.toml', root.parent / 'cache/cargo/config',
