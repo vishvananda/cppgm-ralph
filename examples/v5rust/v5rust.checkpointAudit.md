@@ -1,34 +1,36 @@
-Audit the accepted partial work for {{testStage}} without requiring future
-unimplemented behavior to pass.
+Independently audit accepted batches for {{testStage}}.
 
 {{briefState}}
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read AGENTS.md, CLONE_CONTRACT.md, spec.md, the handout and stage ledger. Review
-the diff since its last-audited commit (initially the stage base), relevant C++
-owners and the Rust source map. Trace behavior through typed representations,
-including failure paths, lifetimes, rollback, demand and deterministic order.
+Read the current spec/contract, handout and compact ledger. Review every change
+since its last-audited tip against the frozen C++ owners and Rust source map.
+Historical reports supply evidence, not new checklists. Trace typed ownership,
+failure/rollback, exact numbers/diagnostics, demand and emission order. Check
+algorithmic completeness, lifetimes and bounded work; no delegation, shortcuts,
+unsafe, needless cloning, global scans or lint/file-limit evasion.
 
-Check real algorithmic completeness for the groups marked done. Look for
-fixture-specific shortcuts, C++/oracle delegation, needless cloning or global
-scans, duplicate parsers, unsafe paths, suppressed Clippy warnings, mechanical
-file splits and missing ownership invariants. Check exact numeric semantics,
-diagnostic bytes and emission order where touched. Production tool names stay
-compatible; Rust identifiers follow Rust naming conventions.
-Use CLONE_CONTRACT.md's protected stack qualification for resource-limited
-probes; native exhaustion cutoffs and diagnostic positions need not match.
+Resolve concrete findings in the completed scope, adding required regressions
+in their owning executed lane. Use existing focused probes and valid evidence.
+Add controls only for a specific missing invariant; do not routinely multiply
+mode matrices, scaling studies, round trips or native-stack campaigns. Relevant
+stack probes use the protected match/stack_qualification receipt. Do not demand
+future unimplemented groups pass or waive findings because counts are unchanged.
 
-Fix findings in the completed groups, add required regressions in the owning
-lane and run meaningful validation. Preserve the entire accepted passing-case
-set and all earlier stages. Do not waive a finding because the fixture count
-is unchanged. Do not require the entire current assignment to be finished.
-For PA34 audit source/object mapping, fresh-build provenance and path identity;
-do not substitute a C++ object for a failed Rust output.
+Refresh invalidated checks once after fixes stabilize. Protected successful
+prior/quality receipts may be reused only with identical keys and intact raw
+logs. Current-stage and case-preservation checks still execute; --fresh forces
+new observations. Do not repeat unchanged suites solely to review a handoff.
+Use python3 scripts/clone_evidence.py snapshot {{testStage}} --out PATH to index current evidence
+without copying thousands of receipts or inventing count-specific validators.
 
-Record findings, fixes, commands and evidence in the stage ledger; advance its
-last-audited commit to the reviewed implementation commit. Commit a coherent
-audit result and leave a clean checkout. Complete Ralph's existing phase goal
-and hand control back; do not create/reset goals or edit Ralph state.
+Preserve all accepted cases and earlier stages. For PA34 require real source,
+object/tool and fixed-path bootstrap proof; never substitute C++ objects.
+Replace the compact ledger with reviewed tip, findings/fixes, evidence delta
+and next groups; retain history in Git and raw artifacts. Advance last-audited
+tip only to reviewed implementation. Commit and leave clean, complete Ralph's
+existing native goal and return. This audit need not complete the assignment.
+Never create/reset goals or edit protected policy or Ralph state.
 
 {{modelValidation}}

@@ -88,6 +88,18 @@ PA33's parameter-address control accepts both standalone loads
 and loads folded into add memory operands. Its O2/O3 and driver invocations
 must all match the oracle bytes. See `docs/port/baseline.md`.
 
+Required prior/quality commands may reuse successful evidence only through the
+protected content-bound receipts. Current binary/source, fixture/checker,
+toolchain/dependency, environment and raw-evidence identities must match; failures
+are not reusable and --fresh forces execution. Current-stage, case-preservation,
+course and final acceptance checks remain required. During iteration use focused
+controls for changed invariants; expand mode matrices, stack qualification or
+resource measurements only for a concrete question. Refresh invalidated gates
+once after a coherent batch stabilizes. Keep one compact current ledger and an
+evidence index; raw receipts stay in place and historical plans remain in Git.
+Do not invent per-batch validators with hardcoded counts or copy every prior
+receipt just to produce another handoff.
+
 Earlier completed stages stay green. An implementation checkpoint must reduce
 failures in the fixed manifest and retain previously passing cases. Added
 passing tests do not count as progress. Finish a coherent behavior group,

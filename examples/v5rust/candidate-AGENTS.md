@@ -29,7 +29,11 @@ reads under `dev/src/`; collect them in `dev/bin/` and pass typed options.
 The companion file audit is authoritative for source
 limits; passing Clippy alone is insufficient.
 
-For each stage record its base commit, last audited commit, C++/Rust owners,
+Keep one compact current ledger; replace historical handoffs rather than append
+them. Use the protected evidence index and valid prior/quality receipts; refresh
+only invalidated evidence after stabilization. Raw cases stay in artifacts and
+previous plans in Git. Add broad probes/resource studies only for a changed
+invariant or stated question. For each stage record its base and audited tip, C++/Rust owners,
 completed behavior groups, exact failing case IDs, next dependency boundary,
 validation commands/artifact paths and measured resource costs. Do not claim a
 stage complete from fixture counts alone. Keep source responsibilities and

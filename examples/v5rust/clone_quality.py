@@ -4,7 +4,7 @@ import sys
 from clone_common import CONTROL, ROOT, run
 
 
-def main():
+def checks():
     commands = [
         ["cargo", "fmt", "--manifest-path", "dev/Cargo.toml", "--all", "--", "--check"],
         ["cargo", "clippy", "--manifest-path", "dev/Cargo.toml", "--workspace",
@@ -19,6 +19,11 @@ def main():
         if code:
             return code
     return 0
+
+
+def main():
+    from clone_evidence import cached_gate
+    return cached_gate("quality", checks, lambda: [], fresh="--fresh" in sys.argv)
 
 
 if __name__ == "__main__":

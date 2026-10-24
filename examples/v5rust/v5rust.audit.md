@@ -29,8 +29,14 @@ path remains. PA32 and PA33 preserve existing optimizer/backend policies;
 PA35 optimization objectives are excluded. Record resource observations for
 affected hot paths separately from generated-code equality.
 
-Update the ledger with reviewed commits, completeness reasoning, findings,
-commands and artifact paths. Commit the audit/fixes and leave a clean checkout.
+Use focused controls while fixing findings; refresh invalidated gates once
+after stabilization. Protected successful prior/quality receipts may be reused
+only with identical inputs and intact raw evidence; --fresh forces execution.
+Current-stage/course/release/bootstrap acceptance still runs. Index evidence
+with python3 scripts/clone_evidence.py; do not copy every prior receipt or
+write count-specific validators. Keep historical reports in Git and replace
+the compact current ledger with reviewed commits, completeness, findings and
+evidence links. Commit the audit/fixes and leave a clean checkout.
 Complete Ralph's existing phase goal and return an evidence-backed handoff.
 Do not create/reset the goal, change acceptance policy or edit Ralph state.
 

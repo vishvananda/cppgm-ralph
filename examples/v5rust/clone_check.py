@@ -247,6 +247,17 @@ def ownership_complete():
     return not pending
 
 
+def completed_stages(limit):
+    passed = True
+    for number in range(1, limit + 1):
+        passed = stage_check(f"pa{number}", summarize=False) and passed
+        if number <= 33:
+            passed = course(f"pa{number}") and passed
+    if limit == 0:
+        print("No earlier assignments are due: PASS")
+    return 0 if passed else 1
+
+
 def main():
     global ACTIVE_STAGE
     parser = argparse.ArgumentParser()
@@ -254,6 +265,7 @@ def main():
                                          "preserve", "course", "release", "oracle-self-check"])
     parser.add_argument("stage", nargs="?", default="pa1")
     parser.add_argument("case", nargs="?")
+    parser.add_argument("--fresh", action="store_true", help="rerun a successful prior gate instead of reusing exact evidence")
     args = parser.parse_args()
     if not re.fullmatch(r"pa(?:[1-9]|[12][0-9]|3[0-4])", args.stage):
         parser.error("stage must be pa1 through pa34")
@@ -278,14 +290,11 @@ def main():
         passed = all([course(stage, "test-debuginfo") for stage in ("pa8", "pa32", "pa33")])
         return 0 if ownership_complete() and passed else 1
     limit = int(args.stage[2:]) - (1 if args.mode == "prior" else 0)
-    passed = True
-    for number in range(1, limit + 1):
-        passed = stage_check(f"pa{number}", summarize=False) and passed
-        if number <= 33:
-            passed = course(f"pa{number}") and passed
-    if limit == 0:
-        print("No earlier assignments are due: PASS")
-    return 0 if passed else 1
+    if args.mode == "prior" and limit:
+        from clone_evidence import cached_gate, evidence_files
+        return cached_gate(f"prior-{args.stage}", lambda: completed_stages(limit),
+                           lambda: evidence_files(limit), fresh=args.fresh)
+    return completed_stages(limit)
 
 
 if __name__ == "__main__":

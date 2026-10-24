@@ -1,10 +1,12 @@
-Independently audit the completed implementation groups for {{testStage}}
-against the frozen C++ owners, CLONE_CONTRACT.md and spec.md. Follow the full
-accompanying prompt. Fix defects in the reviewed scope, preserve all previously
-passing cases and earlier stages, and pass Rust quality/audit checks. Record
-findings and validation in the stage ledger, update the last-audited commit,
-commit and leave the checkout clean. The rest of this assignment may remain
-unfinished; this goal certifies only the reviewed partial checkpoint.
-Apply the contract's protected stack qualification to native resource limits.
+Independently audit all accepted {{testStage}} batches since the reviewed tip.
+Follow current prompt/spec/contract and frozen C++ ownership. Fix defects in the
+reviewed scope; preserve exact behavior, prior cases, architecture and Rust quality.
+Use existing focused controls, add only missing invariants, refresh invalidated
+checks after fixes and reuse only keyed successful raw evidence. No routine
+matrix/resource expansion, copied receipt trees or hardcoded handoff validators.
+Record reviewed tip, findings and evidence delta in the compact current ledger;
+update last-audited implementation, commit and leave clean. Future unimplemented
+groups may remain. Complete Ralph's existing native goal without creating/resetting
+it or editing the oracle, protected checker policy or Ralph state.
 
 {{modelValidation}}

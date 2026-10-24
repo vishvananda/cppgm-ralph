@@ -89,6 +89,40 @@ and 2,046 full-course invocations passed with identical counts and output hashes
 These are elapsed times on a shared host; artifacts for the original experiment
 are under `private/v5rust/artifacts/prior-parallel-benchmark/` on the setup host.
 
+## Reusing validation evidence
+
+Protected `prior` and Rust-quality commands retain successful raw logs and a
+content-bound receipt under `artifacts/clone/validation/`. Repeated handoff and
+Ralph checks reuse that success only when candidate binaries/sources, course
+inputs, control scripts/settings, toolchain/dependency metadata, relevant
+environment and resource limits match, and every referenced raw evidence file
+retains its hash. Failures are never cached. Changed/missing evidence reruns the
+gate; `clone_check.py prior paN --fresh` or `clone_quality.py --fresh` forces it.
+Current-stage tests, preservation, course and release/bootstrap checks still run.
+No case, comparison, lint or acceptance requirement is removed.
+
+After the final stage, prior and quality checks, create a compact index:
+
+```sh
+python3 scripts/clone_evidence.py snapshot pa29 \
+  --out "$RALPH_ARTIFACT_DIR/pa29-current-evidence.json"
+```
+
+It checks current binary/manifest/case identities and valid prior/quality receipts,
+then links the existing stage report and raw evidence without copying every case.
+It is an index, not an acceptance certificate. Keep the current stage ledger
+compact: owners, mechanism, counts, evidence links, findings and next dependency.
+Earlier plans remain in Git. During implementation use small affected controls;
+expand matrices, stack probes or resource measurements only for a concrete
+changed invariant or unresolved question. Run full required checks once after
+the related batch stabilizes and let Ralph reuse their unchanged evidence.
+
+Install tool and prompt changes together at a clean stopped turn boundary.
+Update only the reviewed protected file hashes in both manifests, retain the
+oracle and all test identities, run harness regressions and real prior/quality
+checks, then restart with a fresh goal. Preserve successful cache receipts and
+their raw files; never rewrite timestamps or outcomes to make them reusable.
+
 The 2026-10-11 harness correction recognizes standalone `preproc`, `lowir` and
 `abimangle` statistics and excludes numeric `arena_bytes`/`name_arena_bytes`
 from exact comparison, as required by the existing storage-measurement rule.

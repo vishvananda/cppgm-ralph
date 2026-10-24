@@ -1,30 +1,27 @@
-# PA_STAGE port ledger
+# PA_STAGE current port handoff
 
 Stage base commit: INITIAL
 Last audited commit: INITIAL
+Reviewed implementation / current candidate:
 
-## Contract and ownership
+## Current batch
 
-- Handout and relevant C++ owners:
-- Rust owners and typed phase boundary:
-- Due tools/lanes and fixed manifest:
-
-## Coherent behavior groups
-
-- Completed and validated:
-- Current first divergent boundary:
-- Remaining dependencies (including behavior not covered by fixtures):
+- Shared C++ owner and Rust producers/consumers:
+- Mechanism and invariant; why this related batch is complete:
+- Current first divergence and next dependency groups:
 
 ## Evidence
 
-- Candidate commit and binary hashes:
-- Commands, case IDs and full artifact/log paths:
-- Earlier-stage preservation:
-- Formatting, Clippy, file/architecture audit:
-- Supported hot-path workload, latency/RSS/scaling observations:
+- Current stage counts, fixed failures and preserved identities:
+- Protected evidence-index path (compiler/input keys, prior/quality receipts):
+- Focused controls and exact raw mismatch/fixture paths:
+- Resource observation only when this batch changes allocation/work/scaling:
 
-## Handoff
+## Review and handoff
 
-- Next group and why it is the right ownership boundary:
-- Independent audit questions:
-- Oracle instability or harness issues (never silently redefine the gate):
+- Independent findings / fixes and reviewed implementation tip:
+- Next group and remaining risks / baseline issues:
+
+Replace this current summary rather than append a turn transcript. Keep case
+lists and raw records in artifacts; use Git for previous plans. Required gates
+and exact acceptance remain authoritative; this ledger never certifies them.
