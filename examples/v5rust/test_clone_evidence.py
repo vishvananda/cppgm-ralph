@@ -130,6 +130,13 @@ class EvidenceTests(unittest.TestCase):
                 (root/'docs/port').mkdir(parents=True)
                 (root/'docs/port/pa1.md').write_text('journal update')
                 self.assertEqual(keys[-1],common_key('prior-pa2'))
+                (root/'.gitignore').write_text('*.t\n*.ref\n')
+                ignored=fixture.parent/'ignored.t';ignored.write_text('first')
+                a=common_key('prior-pa2');ignored.write_text('second')
+                self.assertNotEqual(a,common_key('prior-pa2'))
+                sidecar=fixture.parent/'ignored.ref';sidecar.write_text('first')
+                a=common_key('prior-pa2');sidecar.write_text('second')
+                self.assertNotEqual(a,common_key('prior-pa2'))
 
     def test_prior_builds_and_preflights_before_success_reuse(self):
         with patch.object(clone_check,'build') as build,patch.object(clone_check,'preflight') as preflight, \

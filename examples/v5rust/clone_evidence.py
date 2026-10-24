@@ -97,6 +97,15 @@ def inputs(context):
              and name not in ('.test_counts', '.test_failed')
              and not Path(name).name.startswith('.')]
     paths = [root / name for name in names if not name.startswith('dev/')]
+    # Discovery also runs ignored, newly added .t cases. Include their input
+    # sidecars even when Git's untracked inventory excludes them.
+    for tests in root.glob('pa*/tests'):
+        for case in tests.rglob('*.t'):
+            paths.append(case)
+            stem = case.name[:-2]
+            paths += [path for path in case.parent.glob(stem + '.*')
+                      if path.name.startswith((stem + '.ref', stem + '.t.'))
+                      or path.name in (stem + '.flags', stem + '.expect')]
     paths += [root / 'dev',
               root / '.cargo', root / 'dev/.cargo', root / 'rust-toolchain.toml']
     paths += [path for path in control.glob('*.py')]
