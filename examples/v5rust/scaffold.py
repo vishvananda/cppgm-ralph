@@ -173,7 +173,7 @@ def controls():
                 "artifacts": str(PRIVATE / "artifacts/clone"), "revision": REVISION,
                 "assignment_revision": ASSIGNMENT_REVISION, "assignment_tag": ASSIGNMENT_TAG,
                 "course_workers": 8,
-                "validation_path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "validation_path": str(Path.home() / ".cargo/bin") + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "state_dir": str(BASE / ".ralph/v5rust-gpt-6.1-sol-high")}
     (PRIVATE / "artifacts/clone").mkdir(parents=True, exist_ok=True)
     for directory in (CONTROL, ROOT / "scripts/clone"):
