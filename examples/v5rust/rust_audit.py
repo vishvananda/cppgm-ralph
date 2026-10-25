@@ -104,7 +104,9 @@ def inspect_file(path, root, roles):
             if depth > 6:
                 severity = "hard limit 8 exceeded" if depth > 8 else "warning threshold 6 exceeded"
                 errors.append(f"line {node.start_point.row + 1}: nesting {depth}; {severity}")
-        if node.type == "macro_invocation" and re.match(r"(?:include|include_str|include_bytes)\s*!", content):
+        reviewed_host_bytes = relative == "dev/bin/builtin_host_configuration.rs" and re.fullmatch(
+            r'include_bytes!\s*\(\s*concat!\s*\(\s*env!\s*\(\s*"OUT_DIR"\s*\)\s*,\s*"/cppgm-host-(?:macros|strict|includes|target|version|search|command|flags)"\s*\)\s*\)', content)
+        if node.type == "macro_invocation" and re.match(r"(?:include|include_str|include_bytes)\s*!", content) and not reviewed_host_bytes:
             errors.append(f"line {node.start_point.row + 1}: include macro requires reviewed vocabulary provenance")
         if node.type in {"attribute_item", "inner_attribute_item"}:
             if re.search(r"\b(?:allow|expect)\s*\(\s*(?:warnings|clippy::(?:all|pedantic))\b", content):

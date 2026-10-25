@@ -32,6 +32,15 @@ existing run, including both copies of clone settings and the protected manifest
 The oracle revision is not a field in `v5rust.config.json`; its
 `assignmentLayout: "v5"` remains correct for v5.1.
 
+The scaffold ships a protected `dev/build.rs` and safe Rust host-configuration
+capture module. It probes only empty host inputs at build time and embeds data
+bytes for GNU/strict macros, include paths and driver queries. The runtime
+frontend consumes those bytes without probing a host compiler. Both environment
+inputs trigger Cargo rebuilds. Protected hashes cover the hook, capture logic
+and data-import module; alternate build scripts and arbitrary include macros
+remain rejected. Existing runs require an owner-reviewed installation of all
+three files and the corresponding manifest/audit update before using the hook.
+
 For an additional audit probe, set `V5RUST_TRACE` to a writable JSONL path and
 invoke `python3 scripts/clone/clone_adapter.py cppgm++ --emit-ast -o OUT INPUT`.
 Inspect the receipt's `match` and `stack_qualification`: the CLI keeps the

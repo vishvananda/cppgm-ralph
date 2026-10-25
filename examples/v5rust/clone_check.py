@@ -44,9 +44,8 @@ def preflight():
     for name, expected in frozen["oracle_sources"].items():
         if file_digest(REFERENCE / name) != expected:
             raise RuntimeError(f"oracle source changed: {name}")
-    if (ROOT / "dev/build.rs").exists():
-        raise RuntimeError("compiler build.rs needs a reviewed scaffold update")
     cargo = tomllib.loads((ROOT / "dev/Cargo.toml").read_text())
+    build_script_policy(frozen, cargo)
     if cargo.get("workspace", {}).get("lints") != frozen["workspace_lints"]:
         raise RuntimeError("workspace lint policy changed")
     if cargo.get("lints", {}).get("workspace") is not True:
@@ -58,6 +57,16 @@ def preflight():
         if path.resolve().is_relative_to(REFERENCE):
             raise RuntimeError("candidate tool resolves to the C++ oracle")
     print("Clone input, tool routing and oracle integrity: PASS")
+
+
+def build_script_policy(frozen, cargo):
+    if cargo.get("package", {}).get("build") not in (None, False, "build.rs"):
+        raise RuntimeError("alternate compiler build script needs a reviewed scaffold update")
+    if (ROOT / "dev/build.rs").exists():
+        reviewed = ("dev/build.rs", "dev/build_support/host_configuration.rs",
+                    "dev/bin/builtin_host_configuration.rs")
+        if any(name not in frozen["protected"] for name in reviewed):
+            raise RuntimeError("compiler build.rs needs a reviewed scaffold update")
 
 
 def routes(stage):

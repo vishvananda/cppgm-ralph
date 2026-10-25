@@ -111,6 +111,10 @@ components = ["clippy", "rustfmt"]
 ''')
     write(ROOT / ".cargo/config.toml", '''[build]
 target-dir = "obj/rust"
+
+[env]
+CPPGM_BUILD_HOST_CXX = "g++"
+CPPGM_STDLIB_FLAGS = ""
 ''')
     json_file(ROOT / "scripts/rust-module-roles.json", {})
     write(ROOT / "dev/Makefile", '''TOOLS = pptoken posttoken ppexpr preproc cppgm++ abimangle lowir lowiropt lowir2native
@@ -169,6 +173,12 @@ PA35 is reference material, not an optimization objective for this port.
 
 
 def controls():
+    for source, destination in [("build.rs", "dev/build.rs"),
+                                ("host_configuration.rs", "dev/build_support/host_configuration.rs"),
+                                ("builtin_host_configuration.rs", "dev/bin/builtin_host_configuration.rs")]:
+        destination = ROOT / destination
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(HERE / "build_support" / source, destination)
     settings = {"checkout": str(ROOT), "reference": str(REFERENCE),
                 "artifacts": str(PRIVATE / "artifacts/clone"), "revision": REVISION,
                 "assignment_revision": ASSIGNMENT_REVISION, "assignment_tag": ASSIGNMENT_TAG,
@@ -179,6 +189,7 @@ def controls():
     for directory in (CONTROL, ROOT / "scripts/clone"):
         directory.mkdir(parents=True, exist_ok=True)
         json_file(directory / "settings.json", settings)
+        shutil.copytree(HERE / "build_support", directory / "build_support", dirs_exist_ok=True)
         for source in HERE.glob("*.py"):
             if source.name != "scaffold.py":
                 shutil.copyfile(source, directory / source.name)
@@ -293,9 +304,14 @@ def freeze(tracked):
             protected[name] = sha(ROOT / name)
     for path in [ROOT / "Makefile", ROOT / "AGENTS.md", ROOT / "CLONE_CONTRACT.md",
                  ROOT / "rust-toolchain.toml", ROOT / "dev/frontend_source_sets.mk",
+                 ROOT / ".cargo/config.toml",
                  ROOT / "dev/clippy.toml", *list((ROOT / "scripts/clone").glob("*.py")),
+                 *list((ROOT / "scripts/clone/build_support").glob("*.rs")),
                  ROOT / "scripts/clone_check.py", ROOT / "scripts/clone_evidence.py"]:
         protected[path.relative_to(ROOT).as_posix()] = sha(path)
+    for name in ["dev/build.rs", "dev/build_support/host_configuration.rs",
+                 "dev/bin/builtin_host_configuration.rs"]:
+        protected[name] = sha(ROOT / name)
     stages = {}
     for number in range(1, 34):
         stage = f"pa{number}"

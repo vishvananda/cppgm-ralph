@@ -29,6 +29,14 @@ class RustAuditTests(unittest.TestCase):
         text = '/* outer /* fn hidden() { */ inner */\nfn visible() {\n let _s = r###"fn fake() { }"###;\n}\n'
         self.assertEqual(self.inspect(text), [])
 
+    def test_reviewed_host_bytes_allow_data_only_in_the_protected_module(self):
+        text = 'pub const DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cppgm-host-macros"));\n'
+        name = "dev/bin/builtin_host_configuration.rs"
+        self.assertEqual(self.inspect(text, name), [])
+        self.assertTrue(self.inspect(text, "dev/bin/other.rs"))
+        self.assertTrue(self.inspect(text.replace("cppgm-host-macros", "arbitrary.rs"), name))
+        self.assertTrue(self.inspect(text.replace("include_bytes!", "include!"), name))
+
     def test_function_limit_counts_code_and_excludes_comments(self):
         self.assertEqual(self.inspect("fn f() {\n" + "// comment\n" * 300 + "}\n"), [])
         findings = self.inspect("fn f() {\n" + "let _x = 1;\n" * 239 + "}\n")
@@ -61,6 +69,22 @@ class RustAuditTests(unittest.TestCase):
 
 
 class StageInventoryTests(unittest.TestCase):
+    def test_build_hook_requires_all_reviewed_inputs_and_default_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dev").mkdir()
+            (root / "dev/build.rs").touch()
+            reviewed = {name: "hash" for name in ("dev/build.rs",
+                        "dev/build_support/host_configuration.rs",
+                        "dev/bin/builtin_host_configuration.rs")}
+            with patch.object(clone_check, "ROOT", root):
+                clone_check.build_script_policy({"protected": reviewed}, {})
+                for name in reviewed:
+                    with self.assertRaises(RuntimeError):
+                        clone_check.build_script_policy({"protected": {k: v for k, v in reviewed.items() if k != name}}, {})
+                with self.assertRaises(RuntimeError):
+                    clone_check.build_script_policy({"protected": reviewed}, {"package": {"build": "other.rs"}})
+
     def test_discovery_adds_cases_once_and_keeps_missing_frozen_anchors(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

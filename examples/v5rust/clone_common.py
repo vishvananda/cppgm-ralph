@@ -28,6 +28,8 @@ def clean_env():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("CPPGM_", "V5RUST_", "MAKE", "WRAPPED_"))}
     env.update(LC_ALL="C", TZ="UTC", NO_COLOR="1", CPPGM_HOST_CXX="/usr/bin/g++",
+               CPPGM_BUILD_HOST_CXX=SETTINGS.get("build_host_cxx", "g++"),
+               CPPGM_STDLIB_FLAGS=SETTINGS.get("build_stdlib_flags", ""),
                CPPGM_TEST_JOBS="1", CPPGM_BATCH_TESTS="0",
                CPPGM_LOWIR_DIRECT_TEXT_COMPARE="1", KEEP_GOING="1",
                CARGO_HOME=str(ROOT.parent / "cache/cargo"),

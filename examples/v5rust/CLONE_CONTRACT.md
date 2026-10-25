@@ -132,6 +132,10 @@ Do not move logic into macros or generated files to evade it.
 Keep environment/configuration reads in `dev/bin/` or build/test boundaries,
 outside `dev/src/`, matching the inherited audit. The driver receives typed
 options and may perform the documented host-link/environment-query operations.
+The reviewed protected build hook captures empty-input host macros, include
+paths and driver-query data at build time. Its protected data-import module
+embeds bytes only; runtime frontend work must not require host configuration
+probes. Alternate hooks or generated implementation code remain prohibited.
 Compiler phases receive typed options. File I/O is legitimate at
 source and object boundaries; process execution to implement a phase is not.
 Measure hot-path compile time, memory and scaling on fixed supported inputs.
