@@ -265,9 +265,10 @@ include the PA33/PA34 instruction gate, fixtures and qualification tools.
 The [V5 Sol scaffold](examples/v5sol/README.md) uses the V5 assignments' own
 file audit and PA35 optimization gates, native goals, and scoped performance
 measurement with explicit evidence reuse.
-The [V5 Opus scaffold](examples/v5opus/README.md) uses Claude Code's native
-goals, revised semantic-reuse guidance and the current student assignments,
-with the same course checks through PA35.
+The [V6 Opus scaffold](examples/v6opus/README.md) uses Claude Code's native
+goals, revised semantic-reuse and generated-code guidance and V6 student
+assignments, with course checks through PA35 and a PA35
+restructure phase in place of the checkpoint audit.
 The [V5 exact Rust port](examples/v5rust/README.md) uses a pinned C++ oracle
 and protected differential gates. Its [baseline update guide](examples/v5rust/BASELINE_UPDATES.md)
 covers synchronized oracle, fixture, manifest and clone configuration updates.
@@ -429,7 +430,9 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
   pass, which is useful for planning, audit, and cleanup phases.
   `checkpointOnRequiredChecks` can accept a partial checkpoint when required
   checks pass but the primary check is still incomplete. Set `checkpointPhase`
-  to send that checkpoint through a named audit/review phase first. A
+  to send that checkpoint through a named audit/review phase first;
+  `checkpointPhases`, a map keyed by PA stage, names another phase for selected
+  stages (a PA35 restructure phase instead of the checkpoint audit). A
   `checkpointPhaseEvery` value greater than one makes that review sparse: Ralph
   persists accepted checkpoints for the current phase/stage/subset and enters
   the review phase only after that many checkpoints. Its default is `1`, which

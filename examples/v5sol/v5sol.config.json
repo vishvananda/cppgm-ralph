@@ -206,6 +206,9 @@
       },
       "checkpointOnRequiredChecks": true,
       "checkpointPhase": "checkpointAudit",
+      "checkpointPhases": {
+        "pa35": "restructure"
+      },
       "checkpointPhaseEvery": 3,
       "checks": [
         "priorThroughTests",
@@ -245,6 +248,22 @@
       "goalTemplates": {
         "pa35": "pa35-checkpointAudit-goal"
       }
+    },
+    {
+      "name": "restructure",
+      "promptTemplate": "pa35-restructure",
+      "goalTemplate": "pa35-restructure-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "fileAudit",
+        "pa35PriorThrough33",
+        "pa35Smoke",
+        "pa35Progress",
+        "pa35ProgressPreserved",
+        "pa35Inception"
+      ]
     },
     {
       "name": "audit",

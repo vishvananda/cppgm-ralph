@@ -1,0 +1,23 @@
+V6 Opus scaffold verified 2026-10-25; compiler worker remains unstarted.
+
+Assignments: 20df0087fc72097316d9ac319b1aaad52593fa1b.
+Extended source: aef30fb44c0659452af90f57cb68d81b4f2fce0f.
+Preparation commit: ba03d50e; only spec.md differs from the assignments base.
+Includes semantic-reuse handouts, PA33 dynamic kernels and PA35 owner reports.
+
+PASS: 18 prompt/goal sidecars, required-check placeholders and native /goal;
+      representative rendered goals fit the 4000-character limit.
+PASS: stage-specific checkpoint selection, including PA35 -> restructure,
+      invalid-target rejection, Claude compaction/resume and Rust config parsing.
+PASS: all 350 Ralph tests (node --test --test-concurrency=4 tests/*.test.js).
+PASS: initial PA1 local/through reports fail as expected (0/58); file audit
+      passes for 19 files; student scaffolds build and the worktree is clean.
+PASS: instructions/cycles both at 100% running and perf sampling inside the
+      renamed Bubblewrap volume and 64 GiB/no-swap scope.
+PASS: default Claude credentials, Opus/high, native READY goal graded complete
+      in the session transcript; no separate credential profile.
+PASS: renamed checkout, filesystem/LV, fstab UUID mount, remote and sidecars;
+      shell/JavaScript syntax checks and git diff --check.
+
+Evidence: ~/work/private/v6opus/artifacts/scaffold-verification/
+No Ralph state.json exists. No compiler worker or tmux pane was started.

@@ -26,7 +26,7 @@ const context = vm.createContext({
 });
 for (const name of ['normalizeCheckConfig', 'normalizeCheckDefinition', 'normalizePhaseConfig',
   'normalizePhaseDefinition', 'normalizePhaseAgentOverride', 'validatePhaseControlTargets',
-  'normalizeStageTemplateMap', 'normalizeOptionalStageConfig', 'sanitizeIdentifier',
+  'normalizeStageTemplateMap', 'normalizeStagePhaseMap', 'normalizeOptionalStageConfig', 'sanitizeIdentifier',
   'sanitizeOptionalTemplateName', 'sanitizeOptionalIdentifier', 'normalizeCheckDependencyList',
   'normalizeStageList', 'normalizeStageName', 'normalizeTestSubset', 'parseBoolean', 'parsePositiveInt']) {
   const declaration = source.match(new RegExp(`^function ${name}\\([^]*?^}`, 'm'));

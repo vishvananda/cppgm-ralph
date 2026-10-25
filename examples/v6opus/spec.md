@@ -3,7 +3,7 @@
 ## Purpose
 
 This specification defines the production architecture for a self-contained
-Linux x86-64 C++11 compiler developed cumulatively through V5 PA1–PA35.
+Linux x86-64 C++11 compiler developed cumulatively through V6 PA1–PA35.
 It is normative for this run; the assignment handouts define the language, ABI,
 fixtures and canonical exit commands. Apply architecture requirements to the
 capabilities introduced so far; preserve later boundaries without implementing
@@ -261,6 +261,17 @@ object compiler to build a representation that only a tool reads.
   policy separate from instruction selection, so that a better allocator
   replaces the policy and not the selector. Machine-IR passes run between
   selection and encoding.
+- Generated code is judged dynamically from PA33 on. A value SHOULD keep one
+  register over its whole range, across blocks, calls and exception regions;
+  a frame home answers a constraint on one value over one range (a handler
+  that reads it, pressure at a point), never a kind of function wholesale.
+  Transfers and clobbers MUST be modeled where emission needs them, no
+  earlier and no wider.
+- Admission and exclusion rules (inlining, promotion in functions with
+  cleanups, allocation across calls in loops) MUST be justified by what they
+  exclude on real programs. When the largest remaining excess comes from a
+  model's constraint rather than its thresholds, replace the model instead of
+  tuning around it or rewriting its output locally.
 - The default level (-O0) MUST run a small backend: selection, a bounded
   placement policy, and encoding. Each optimizing pass SHOULD document its
   scope and complexity bound.
@@ -388,35 +399,31 @@ variants. Personal controls live in `student.tests/` and run explicitly.
   linear growth alone is insufficient. Inspect counters or profile demonstrated
   excess, including expensive linear work. Shared helpers need representative
   consumer smokes, not every historical benchmark.
-- Measure affected families after a coherent change is stable. Record the
-  hypothesis, frozen binary/input hashes, flags, machine/toolchain, environment,
-  affinity, output qualification, raw observations and a compact result link.
-  A new or changed matrix must qualify all its inputs before any timing begins;
-  nonportable/reference-only controls stay outside host-comparable matrices.
-- Measurement tools must reuse valid qualification and unchanged host/baseline
-  results by those keys. Invalidate only results whose binary, input, protocol
-  or conditions changed. Documentation edits do not invalidate binaries. Do not
-  rebuild or remeasure an identical variant merely to rename a report. Retain
-  failures and provenance; never treat an unavailable observation as zero.
-- For focused native diagnostics, use a warmup and three interleaved runs per
-  variant on the same allowed CPU. Group `instructions:u,cycles:u` with perf;
-  retain IPC, latency, user/system time, RSS and relevant text size. Check 100%
-  event running inside Bubblewrap and the memory scope. Extra repetitions or
-  branch/cache/sampling passes require a stated uncertainty or owner question.
-  Small timing/cycle claims need fresh paired observations and noise calibration.
-  Do not multiply ABBA blocks by default. These defaults never replace a course
-  script's fixed protocol, repeat count, simulation or acceptance limit.
+- Measure affected families once, after a coherent change is stable, and
+  record the question, the answer and where the raw result lives. A result
+  stays valid while its binary, input and protocol are unchanged; the course
+  scripts' caches keyed by binary hash and toolchain are that record. Do not
+  build a parallel manifest, receipt, archive or audit system, and do not
+  remeasure an identical variant to rename or re-seal a report.
+- Iterate on deterministic counts (hardware instruction counters or callgrind
+  without simulation, cached). Time only to confirm a milestone or to resolve a
+  counts-versus-time disagreement, with grouped `instructions:u,cycles:u` at
+  100% running and three interleaved runs per variant on one CPU; a difference
+  inside the A/A noise is no finding to retain or explain. Simulation, sampling
+  and extra repetitions need a question that cheaper evidence cannot answer.
+  Course scripts keep their own fixed protocols and limits.
 - Compare equivalent stage-supported work. Host preprocessing and a typed token
   dump have different output costs; state that boundary rather than demanding
   parity on unlike work. A high rank alone is not a defect. Fix demonstrated
   repeated work, disproportionate cost or a required gate failure; otherwise
   record the result and continue implementation. Deferred later-stage code
   quality belongs to its owning assignment.
-- Separate compiler speed from generated-code quality. Use V5's supplied PA35
-  speed/scaling/profile, cached quick checks and constant-work A/B tools before
-  designing custom measurement infrastructure. For a codegen claim, compile one
-  frozen source with old/new compilers; rewriting that source changes the work.
-  Keep host/seed/self flags, allocator, link lines and workloads comparable.
+- Separate compiler speed from generated-code quality with the supplied tools:
+  `ab.pl` (one frozen source built by old and new compilers) attributes a
+  codegen change, `identity` shows a speed change left generated code untouched,
+  and the canonical gates mix both. Do not add a third measurement to split
+  them unless those two disagree materially. Keep host/seed/self flags,
+  allocator, link lines and workloads comparable.
 - Final audits review complete stage-supported architecture and correctness,
   but run only missing or invalidated focused measurements. A change in binary
   hash does not justify rerunning unrelated host data or expanding coverage.
@@ -427,19 +434,23 @@ PA1–PA33 finish with the root through report and the shipped file audit over
 `dev`. PA34 finishes with its self-test ladder and canonical inception, with
 focused divergence diagnosis during iteration. PA35 follows its handout's order:
 correctness and workload support, compiler speed/scaling, generated code, then
-compiler-speed improvements with unchanged generated code. Run its smoke check
-following optimizer/backend changes and its prescribed generated-seed checks
-for allocator/MIR changes. Full cache simulation is a final-gate or specifically
-justified diagnostic, not a routine handoff task.
+compiler-speed improvements with unchanged generated code. After a batch
+stabilizes, run each validation once: the smoke check, the generated-seed check
+when the allocator or MIR changed, inception when emission changed. The changed
+gate group's refresh is the batch's one simulation.
 
 PA35 completion is the unmodified `make -C pa35 test` (17 gates), with earlier
 through-PA33 and inception checks still passing. `test-progress` reads saved
 rungs; it runs no measurements and cannot certify a changed compiler. Partial
-handoffs refresh the changed gate group and record current binary/source hashes;
-unchanged group measurements may be retained only with valid provenance. Do not
-edit gate limits, workload manifests, fixtures, timestamps or measurements to
-manufacture progress. The V4 supplemental PA33/PA34 instruction checker is not
-part of this V5 run; V5 owns its optimization and kernel limits in PA35.
+handoffs refresh the changed gate group once on the final tree; unchanged groups
+keep their cached results. Required checks run once; Ralph repeats them. Keep a
+mechanism ledger: each remaining excess class, its owning model, and whether its
+fix is a batch or a restructure. A restructure handoff replaces one owner's
+model completely; it ends when correctness holds and no saved rung is lost, and
+need not gain. Do not edit gate limits, workload manifests, fixtures, timestamps
+or measurements to manufacture progress. The V4 supplemental PA33/PA34
+instruction checker is not part of this V6 run; V6 owns its optimization and
+kernel limits in PA35.
 
 ## Architecture review
 

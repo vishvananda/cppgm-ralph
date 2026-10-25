@@ -576,7 +576,10 @@ async function main() {
           turnNumber,
         });
         state.checkpointReview = checkpointReview;
-        const checkpointPhase = getPhaseByName(phase.checkpointPhase);
+        const checkpointPhase = getPhaseByName(resolveCheckpointPhaseName(
+          phase,
+          normalizeStageName(testStatus.targetStage) ?? getStateActiveStageAfterTest(testStatus),
+        ));
         const reviewDue = checkpointPhase &&
           checkpointReviewDue(checkpointReview, phase.checkpointPhaseEvery);
         if (reviewDue && phaseAppliesToCurrentTarget(checkpointPhase, {
@@ -4890,6 +4893,11 @@ function getPhaseByName(name) {
     return null;
   }
   return CONFIG.phases.find((phase) => phase.name === name) ?? null;
+}
+
+function resolveCheckpointPhaseName(phase, stage) {
+  const normalizedStage = normalizeStageName(stage);
+  return (normalizedStage && phase?.checkpointPhases?.[normalizedStage]) || phase?.checkpointPhase || null;
 }
 
 function phaseAppliesToCurrentTarget(phase, state = null) {
@@ -9494,6 +9502,7 @@ function normalizePhaseDefinition(phase, checks) {
     checkpointOnRequiredChecks: parseBoolean(phase.checkpointOnRequiredChecks, false),
     checkpointOnly: parseBoolean(phase.checkpointOnly, false),
     checkpointPhase: sanitizeOptionalIdentifier(phase.checkpointPhase, `phases.${name}.checkpointPhase`),
+    checkpointPhases: normalizeStagePhaseMap(phase.checkpointPhases, `phases.${name}.checkpointPhases`),
     checkpointPhaseEvery: parsePositiveInt(
       phase.checkpointPhaseEvery,
       1,
@@ -9543,12 +9552,34 @@ function validatePhaseControlTargets(phases) {
     for (const [field, target] of [
       ["checkpointPhase", phase.checkpointPhase],
       ["returnPhaseOnIncompletePrimary", phase.returnPhaseOnIncompletePrimary],
+      ...Object.entries(phase.checkpointPhases ?? {}).map(([stage, target]) => [`checkpointPhases.${stage}`, target]),
     ]) {
       if (target && !names.has(target)) {
         throw new Error(`Config phase ${phase.name} ${field} references unknown phase ${target}`);
       }
     }
   }
+}
+
+function normalizeStagePhaseMap(value, label) {
+  if (value == null || value === "") {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Config ${label} must be an object keyed by pa stage`);
+  }
+  const normalized = {};
+  for (const [rawStage, rawPhaseName] of Object.entries(value)) {
+    const stage = normalizeOptionalStageConfig(rawStage, `${label} stage`);
+    if (!stage) {
+      throw new Error(`Config ${label} stage key must be a pa stage: ${rawStage}`);
+    }
+    const phaseName = sanitizeOptionalIdentifier(rawPhaseName, `${label}.${stage}`);
+    if (phaseName) {
+      normalized[stage] = phaseName;
+    }
+  }
+  return normalized;
 }
 
 function normalizeStageTemplateMap(value, label) {

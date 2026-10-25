@@ -31,17 +31,17 @@ for (const phase of config.phases) {
       .filter(check => check.required && !check.excludeStages?.includes(stage)
         && (!check.onlyStages || check.onlyStages.includes(stage)));
     const template = phase.goalTemplates?.[stage] ?? phase.goalTemplate;
-    const goal = fs.readFileSync(path.join(path.dirname(configPath), `v5opus.${template}.md`), 'utf8');
+    const goal = fs.readFileSync(path.join(path.dirname(configPath), `v6opus.${template}.md`), 'utf8');
     const rendered = goal.replaceAll('{{modelValidation}}', checks.map(check =>
       `- ${check.name} [BLOCKER]: ${check.command}`).join('\n'))
       .replaceAll('{{testStage}}', stage).replaceAll('{{stageNumber}}', stage.slice(2))
-      .replaceAll('{{runName}}', 'v5opus-opus-high').replaceAll('{{turnNumber}}', '500');
+      .replaceAll('{{runName}}', 'v6opus-opus-high').replaceAll('{{turnNumber}}', '500');
     assert(rendered.length + 700 < 4000, `Native goal must fit without truncation: ${stage}/${phase.name}`);
   }
 }
-assert.equal(templates.size, 16);
+assert.equal(templates.size, 18);
 for (const template of templates) {
-  const text = fs.readFileSync(path.join(path.dirname(configPath), `v5opus.${template}.md`), 'utf8');
+  const text = fs.readFileSync(path.join(path.dirname(configPath), `v6opus.${template}.md`), 'utf8');
   assert(text.includes('{{modelValidation}}'));
   assert(text.includes('native `/goal`'));
   assert(!text.includes('update_goal'));

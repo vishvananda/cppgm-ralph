@@ -272,6 +272,17 @@ object compiler to build a representation that only a tool reads.
   policy separate from instruction selection, so that a better allocator
   replaces the policy and not the selector. Machine-IR passes run between
   selection and encoding.
+- Generated code is judged dynamically from PA33 on. A value SHOULD keep one
+  register over its whole range, across blocks, calls and exception regions;
+  a frame home answers a constraint on one value over one range (a handler
+  that reads it, pressure at a point), never a kind of function wholesale.
+  Transfers and clobbers MUST be modeled where emission needs them, no
+  earlier and no wider.
+- Admission and exclusion rules (inlining, promotion in functions with
+  cleanups, allocation across calls in loops) MUST be justified by what they
+  exclude on real programs. When the largest remaining excess comes from a
+  model's constraint rather than its thresholds, replace the model instead of
+  tuning around it or rewriting its output locally.
 - The default level (-O0) MUST run a small backend: selection, a bounded
   placement policy, and encoding. Each optimizing pass SHOULD document its
   scope and complexity bound.
@@ -398,24 +409,19 @@ variants. Personal controls live in `student.tests/` and run explicitly.
   linear growth alone is insufficient. Inspect counters or profile demonstrated
   excess, including expensive linear work. Shared helpers need representative
   consumer smokes, not every historical benchmark.
-- Measure affected families after a coherent change is stable. Record the
-  hypothesis, frozen binary/input hashes, flags, machine/toolchain, environment,
-  affinity, output qualification, raw observations and a compact result link.
-  A new or changed matrix must qualify all its inputs before any timing begins;
-  nonportable/reference-only controls stay outside host-comparable matrices.
-- Measurement tools must reuse valid qualification and unchanged host/baseline
-  results by those keys. Invalidate only results whose binary, input, protocol
-  or conditions changed. Documentation edits do not invalidate binaries. Do not
-  rebuild or remeasure an identical variant merely to rename a report. Retain
-  failures and provenance; never treat an unavailable observation as zero.
-- For focused native diagnostics, use a warmup and three interleaved runs per
-  variant on the same allowed CPU. Group `instructions:u,cycles:u` with perf;
-  retain IPC, latency, user/system time, RSS and relevant text size. Check 100%
-  event running inside Bubblewrap and the memory scope. Extra repetitions or
-  branch/cache/sampling passes require a stated uncertainty or owner question.
-  Small timing/cycle claims need fresh paired observations and noise calibration.
-  Do not multiply ABBA blocks by default. These defaults never replace a course
-  script's fixed protocol, repeat count, simulation or acceptance limit.
+- Measure affected families once, after a coherent change is stable, and
+  record the question, the answer and where the raw result lives. A result
+  stays valid while its binary, input and protocol are unchanged; the course
+  scripts' caches keyed by binary hash and toolchain are that record. Do not
+  build a parallel manifest, receipt, archive or audit system, and do not
+  remeasure an identical variant to rename or re-seal a report.
+- Iterate on deterministic counts (hardware instruction counters or callgrind
+  without simulation, cached). Time only to confirm a milestone or to resolve a
+  counts-versus-time disagreement, with grouped `instructions:u,cycles:u` at
+  100% running and three interleaved runs per variant on one CPU; a difference
+  inside the A/A noise is no finding to retain or explain. Simulation, sampling
+  and extra repetitions need a question that cheaper evidence cannot answer.
+  Course scripts keep their own fixed protocols and limits.
 - Compare equivalent stage-supported work. Host preprocessing and a typed token
   dump have different output costs; state that boundary rather than demanding
   parity on unlike work. A high rank alone is not a defect. Fix demonstrated

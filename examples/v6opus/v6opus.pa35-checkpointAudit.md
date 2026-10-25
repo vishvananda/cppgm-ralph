@@ -10,12 +10,11 @@ architecture, transformation legality, reducers and required generated controls.
 Separate compiler work from generated-code effects and verify constant-source
 A/B attribution, identical output, build/link flags and allocator assumptions.
 
-Preserve measured rung progress. `test-progress` is a read-only summary: verify
-that affected group results correspond to current code and unchanged results
-have valid provenance. Refresh only invalidated groups; use smoke/quick and
-bounded owner diagnostics rather than repeating full simulation. Do not change
-limits, inputs, measurements or timestamps. Earlier through-PA33 and the file
-audit pass; run inception when the changed surface can affect self-compilation.
+Preserve measured rung progress. Do not rerun validation the handoff checks
+already passed; run a check only to confirm a fix you made, and refresh a
+canonical group only if that fix changed the compiler. Do not change limits,
+inputs, measurements or timestamps. Earlier through-PA33 and the file audit
+pass; run inception when the changed surface can affect self-compilation.
 Record the reviewed code tip, compact findings/evidence deltas and ledger.
 
 Preserve course contracts and reference outputs. Corrections require a reduced

@@ -10,7 +10,7 @@ const repo = path.resolve(import.meta.dirname, '..');
 const ralph = fs.readFileSync(path.join(repo, 'ralph.js'), 'utf8');
 const functions = ['normalizeCheckConfig', 'normalizeCheckDefinition', 'normalizePhaseConfig',
   'normalizePhaseDefinition', 'normalizePhaseAgentOverride', 'validatePhaseControlTargets',
-  'normalizeStageTemplateMap', 'normalizeOptionalStageConfig', 'sanitizeIdentifier',
+  'normalizeStageTemplateMap', 'normalizeStagePhaseMap', 'normalizeOptionalStageConfig', 'sanitizeIdentifier',
   'sanitizeOptionalTemplateName', 'sanitizeOptionalIdentifier', 'normalizeCheckDependencyList',
   'normalizeStageList', 'normalizeStageName', 'normalizeTestSubset', 'parseBoolean', 'parsePositiveInt'];
 

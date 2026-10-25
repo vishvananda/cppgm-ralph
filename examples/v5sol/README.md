@@ -6,7 +6,7 @@ native Codex `gpt-6.1-sol` with `high` reasoning, native phase goals, a fresh
 thread per turn, and checkpoint review every third incomplete handoff.
 No compiler implementation, stage plans/audits or Ralph state is inherited.
 
-The scaffold includes its config, 16 prompt/goal sidecars, specification,
+The scaffold includes its config, 18 prompt/goal sidecars, specification,
 installer and setup verifier. The architecture spec follows
 `cppgm-extended/spec.md` at `72181d97`, with a shorter review checklist and a
 run-specific performance policy. It treats named structures as examples of
@@ -35,6 +35,10 @@ PA35 has separate implementation, checkpoint and final-audit templates:
   smoke check, and require improved/preserved rungs from `test-progress`.
   The model must refresh affected gate-group measurements and record valid
   hashes/provenance; the rung reader itself performs no measurements.
+- Every third accepted PA35 batch enters the `restructure` phase instead of
+  the checkpoint audit: one owner's limiting model is replaced completely,
+  and the turn ends on correctness, smoke, inception and preserved rungs
+  without a required gain.
 - Final acceptance requires `make -C pa35 test` (all 17 unmodified gates),
   the through-PA33 report, canonical inception and file audit.
 - Supplied cached quick checks and focused group measurements support iteration.

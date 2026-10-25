@@ -15,13 +15,15 @@ Apply the spec to supported capabilities from their first implementation.
 Validate affected correctness, required reuse and bounded work; reuse valid
 qualified evidence under section 11. Investigate demonstrated excess, including
 repeated linear work, without expanding unrelated checks. Generated-code
-acceptance belongs to its owning assignment.
+limits belong to their owning assignment; spec section 7's code-quality
+properties apply from the first backend owner.
 
 Before editing, record HEAD as `Stage base commit` and `Last reviewed commit`
 in the compact stage plan. Keep decisions, remaining behavior groups, evidence
 links and a handoff ledger; old plans do not override current instructions.
 Earlier PAs and the shipped file audit pass; current failures decrease without
-reduced coverage. For a partial handoff finish a coherent group and explain why
+reduced coverage. Run each required check once on the final tree; Ralph repeats
+them after handoff. For a partial handoff finish a coherent group and explain why
 further related work is impractical. Ralph reviews every third incomplete
 handoff and independently audits a passing stage.
 

@@ -18,7 +18,8 @@ and architecture defects without opening unrelated optimization investigations.
 Apply the spec from the first supported version. Validate affected correctness,
 required reuse and bounded work; reuse valid qualified evidence under section
 11. Investigate demonstrated excess, including repeated linear work, without
-expanding unrelated checks. PA34/PA35 are deferred.
+expanding unrelated checks. PA34/PA35 are deferred; spec section 7's
+code-quality properties still apply from the first backend owner.
 
 Run required checks once on final code and tests with unchanged options.
 Make/direct aliases share one result. A through report covers earlier PAs;
