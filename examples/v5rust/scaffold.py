@@ -13,9 +13,9 @@ PRIVATE = BASE / "private/v5rust"
 ROOT = PRIVATE / "checkout"
 REFERENCE = BASE / "references/v5rust-cpp"
 CONTROL = BASE / "v5rust-control"
-REVISION = "3438f5aea24d8fcc9a0113316f7e27c890cd5ac6"
-ASSIGNMENT_REVISION = "0bf28e39bca37f7e4173ae1e9ca557659ada7523"
-ASSIGNMENT_TAG = "v5.1"
+REVISION = "b43173ec8d98b27eecf02bccabf973a4083a389f"
+ASSIGNMENT_REVISION = "22e677f46ffa27a8e003c0b53331c9188d151071"
+ASSIGNMENT_TAG = "main"
 TOOLS = ("pptoken", "posttoken", "ppexpr", "preproc", "cppgm++", "abimangle", "lowir", "lowiropt", "lowir2native")
 MODULES = ("lex", "preprocess", "syntax", "sema", "types", "abi", "lower", "lowir", "opt", "native", "driver", "support")
 

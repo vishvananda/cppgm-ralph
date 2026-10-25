@@ -19,18 +19,17 @@ The comparator keeps ordinary results exact. Native stack-guard exhaustion
 uses a bounded larger-stack qualification that requires identical successful
 results and retains raw evidence; it never accepts a crash or a timeout.
 
-The example oracle pin is `3438f5aea24d8fcc9a0113316f7e27c890cd5ac6` (v5.1),
-with matching assignment export `0bf28e39bca37f7e4173ae1e9ca557659ada7523`.
-It retains the earlier compiler fixes and adds corrected control placement,
-numbering and ordinary counted `control_t` `.t` inputs. The frozen manifest
-contains 7,090 case anchors: PA7 has 214, PA9 123, PA10 167, PA11 409 and PA12
-361. Compiler sources and all nine live oracle binaries are unchanged from
-ee3596b2; earlier receipts from before its compiler fixes remain historical.
+The example oracle pin is `b43173ec8d98b27eecf02bccabf973a4083a389f` (main),
+with matching assignment export `22e677f46ffa27a8e003c0b53331c9188d151071`.
+It includes the earlier reference/control fixes, corrected optimization-test
+placement, the matching GCC O3 PA35 baseline, and converted vector lane builtin
+lowering (extended PR #83). The scaffold builds and freezes all nine tools and
+all source/case anchors at this revision; it does not reuse old oracle hashes.
 
 [Baseline updates](BASELINE_UPDATES.md) describes the owner procedure for an
 existing run, including both copies of clone settings and the protected manifest.
 The oracle revision is not a field in `v5rust.config.json`; its
-`assignmentLayout: "v5"` remains correct for v5.1.
+`assignmentLayout: "v5"` remains correct for these v5 course updates.
 
 The scaffold ships a protected `dev/build.rs` and safe Rust host-configuration
 capture module. It probes only empty host inputs at build time and embeds data
