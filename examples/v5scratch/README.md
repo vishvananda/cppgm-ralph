@@ -22,7 +22,7 @@ The six prompt/goal templates follow v5sol's implementation, checkpoint and
 final-audit workflow. Native Codex `gpt-6.1-sol`, high reasoning, fresh threads,
 and checkpoint review every third partial handoff match v5sol. Safe Rust,
 rustfmt, Clippy, Cargo tests and a syntax-aware Rust file audit are required.
-The architecture/performance spec preserves typed phase boundaries and bounded,
+The spec preserves typed phase boundaries, semantic reuse and bounded,
 question-driven measurements, translating C++ ownership rules into Rust.
 Validation shares results between equivalent Make/direct check commands on
 unchanged inputs and options, with focused controls and compact evidence updates.

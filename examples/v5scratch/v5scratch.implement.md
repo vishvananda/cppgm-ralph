@@ -15,10 +15,10 @@ consumers together; continue while the same understanding enables progress.
 A commit or minimum test gain is not a handoff boundary. Fix known correctness
 and architecture defects without opening unrelated optimization investigations.
 
-Apply spec architecture from the first supported version. Use representative
-positive, negative and boundary controls for changed owners; add modes and
-consumers only when affected. Follow spec section 11: qualify inputs before
-measuring stable, affected work; reuse valid evidence. PA34/PA35 are deferred.
+Apply the spec from the first supported version. Validate affected correctness,
+required reuse and bounded work; reuse valid qualified evidence under section
+11. Investigate demonstrated excess, including repeated linear work, without
+expanding unrelated checks. PA34/PA35 are deferred.
 
 Run required checks once on final code and tests with unchanged options.
 Make/direct aliases share one result. A through report covers earlier PAs;

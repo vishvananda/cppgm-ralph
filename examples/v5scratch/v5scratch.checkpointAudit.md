@@ -15,9 +15,9 @@ boundary from history. Review interactions and supported architecture across
 that range, not just the latest commit. Fix violations at their owning paths
 and use focused language/reference comparisons beyond fixtures.
 
-Follow spec section 11. Use focused correctness/boundary controls for changed
-owners; add modes/consumers only when affected. Reuse valid measurements;
-profile demonstrated excess. Preserve stage progress and earlier PAs.
+Trace affected results through producers and consumers: show reused and new
+work. Proportional growth alone does not establish efficient reuse. Under spec
+section 11, reuse valid evidence. Preserve stage progress and earlier PAs.
 
 Run required checks once on final code and tests with unchanged options.
 Make/direct aliases share one result. A through report covers earlier PAs;

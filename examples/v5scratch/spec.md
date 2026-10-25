@@ -177,14 +177,14 @@ object compiler to build a representation that only a tool reads.
 - Template environments MUST be immutable parent-linked frames or compact
   overlays. Instantiation MUST NOT copy a vector or map of every visible
   binding at each nesting level.
-- Instantiation MUST NOT re-parse the pattern or replay it from text. It MAY
-  copy the pattern's nodes that carry analysis facts and analyze the copy in
-  an environment that binds the template parameters, or it MAY share
-  non-dependent parts with the pattern. Parts that carry no facts (names,
-  specifiers) SHOULD be shared. Either way, reading a node of an instantiated
-  body MUST cost the same as reading an ordinary node: no indirection through
-  the pattern on each read, and no hash lookup per node or edge to find an
-  instantiation's version of a fact.
+- Substitution MUST operate on checked semantic types, values and dependent
+  expressions, preserving required deferred checks. Facts independent of
+  arguments and instantiation context MUST be reused, not reconstructed by
+  copying and reanalyzing syntax. A demanded body MAY need distinct nodes and
+  facts; type and declaration queries MUST NOT force body analysis. Preserve
+  definition-time bindings, specialization-specific identities and checks not
+  represented in the resulting type. Reads MUST reach instance facts through
+  stable identities without per-read searches.
 - Only language-required declarations, definitions, layouts, initializers,
   support objects, and bodies may be demanded. Completing a class MUST NOT
   eagerly instantiate unrelated member bodies.
@@ -364,8 +364,8 @@ object compiler to build a representation that only a tool reads.
   placement outcomes).
 - Telemetry MUST observe existing work rather than introduce alternate semantic
   behavior. Its overhead MUST be separable from ordinary compilation.
-- Performance-sensitive subsystems SHOULD expose work counters that allow an
-  audit to distinguish expensive required work from accidental repeated work.
+- Work counters SHOULD distinguish shared pattern work, newly demanded facts
+  and reuse. Proportional growth alone does not establish necessary work.
 
 ## 10. Self-contained implementation
 
@@ -393,11 +393,11 @@ campaign. Maintain a small fixed set of checked, representative inputs for
 supported capabilities, replacing redundant cases rather than accumulating
 variants. Personal controls live in `student.tests/` and run explicitly.
 
-- During implementation and checkpoints, validate the changed ownership path
-  with focused correctness tests and two useful input scales. Inspect work
-  counters or profile when scaling, memory, or latency indicates excess work.
-  Use the smallest input that exposes it. A shared helper change warrants a
-  smoke case per affected consumer, not every historical benchmark.
+- Validate changed owners with focused correctness and work/reuse controls.
+  Choose scales that distinguish new required work from repeated shared work;
+  linear growth alone is insufficient. Inspect counters or profile demonstrated
+  excess, including expensive linear work. Shared helpers need representative
+  consumer smokes, not every historical benchmark.
 - Measure affected families after a coherent change is stable. Record the
   hypothesis, frozen binary/input hashes, flags, machine/toolchain, environment,
   affinity, output qualification, raw observations and a compact result link.
@@ -444,12 +444,10 @@ inception nor PA35's self-build gates are exit criteria for this run.
 
 ## Architecture review
 
-Trace a nontrivial declaration and, when supported, a demanded template through
-the existing typed phases. Cite the owner and lifetime of each representation,
-identity, fact, cache and worklist. Check direct fact reads, complete keys,
-precise invalidation, editable per-function IR, bounded iteration and release
-at the last consumer. Fix unexplained text round trips, global retries,
-re-decisions, hot per-node allocation and fallback lookups. Review unsupported
-later phases as planned interfaces, not as implemented capabilities. Keep the
-plan/audit short: decisions, unresolved groups, evidence links and one handoff
-ledger; previous reports are evidence, not additional instructions.
+Trace a supported declaration or demanded template through its typed consumers.
+Cite owners, lifetimes, complete keys and what is reused across distinct demands;
+justify newly computed facts. Check direct reads, precise invalidation, editable
+per-function IR and release at the last consumer. Fix repeated analysis, text
+round trips, global retries and hot per-node allocation. Review later phases as
+interfaces, not implemented capabilities. Keep decisions, unresolved groups and
+evidence in one compact ledger; old reports are evidence, not instructions.

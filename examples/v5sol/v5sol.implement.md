@@ -11,13 +11,11 @@ consumers together; continue while the same understanding enables progress.
 A commit or minimum test gain is not a handoff boundary. Fix known correctness
 and architecture defects without opening unrelated optimization investigations.
 
-Apply spec architecture to supported capabilities from their first version.
-Validate changed owners with focused correctness and scaling controls. Follow
-spec section 11: state a measurement question, qualify the whole selected set
-first, measure affected inputs after code stabilizes and reuse valid evidence.
-No routine whole-stage/host matrix refresh; expand only for a demonstrated
-regression or an uncovered affected consumer. Generated-code acceptance is
-owned by the later assignments, especially PA35.
+Apply the spec to supported capabilities from their first implementation.
+Validate affected correctness, required reuse and bounded work; reuse valid
+qualified evidence under section 11. Investigate demonstrated excess, including
+repeated linear work, without expanding unrelated checks. Generated-code
+acceptance belongs to its owning assignment.
 
 Before editing, record HEAD as `Stage base commit` and `Last reviewed commit`
 in the compact stage plan. Keep decisions, remaining behavior groups, evidence

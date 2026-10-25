@@ -11,12 +11,12 @@ interactions. Cite concrete owners for the spec's supported invariants; fix
 violations and correctness defects rather than treating fixtures as proof.
 Do not audit later capabilities as though they already exist.
 
-Follow spec section 11. Review the fixed evidence set for missing or invalidated
-results; measure those after fixes stabilize and reuse unchanged qualification,
-host and baseline data. Complete coverage means relevant supported capabilities,
-not every historical input. Profile demonstrated excessive work; a slow rank
-alone is not a defect. Refresh canonical course acceptance on final code.
-Do not turn final review into repeated exploratory benchmark campaigns.
+Trace supported results through producers and consumers. Show what is reused
+and what requires new work; proportional growth alone does not establish
+efficient reuse. Under spec section 11, refresh only missing or invalidated
+evidence after fixes stabilize; reuse valid qualification and host/baseline data.
+Review supported capabilities, not every historical input. Refresh canonical
+course acceptance on final code.
 
 Consolidate plan/audit once: alignment, findings, changes, evidence links,
 validation and handoff ledger. Earlier stages and the shipped file audit pass.

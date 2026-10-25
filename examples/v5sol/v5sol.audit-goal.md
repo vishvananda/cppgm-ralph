@@ -1,7 +1,7 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
 Independently close completed `{{testStage}}`.
-- Required capability interactions and supported architecture are reviewed in code.
+- Required interactions, supported architecture and reuse are demonstrated in code.
 - Known stage defects are fixed; canonical course acceptance passes on final code.
 - Missing/invalidated focused evidence is filled; unchanged results are reused.
 - Plan/audit consolidate alignment, findings, evidence, validation and ledger.

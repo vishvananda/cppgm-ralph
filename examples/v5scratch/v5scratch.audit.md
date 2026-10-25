@@ -15,9 +15,10 @@ interactions. Cite concrete owners for the spec's supported invariants; fix
 violations and correctness defects rather than treating fixtures as proof.
 Do not audit later capabilities as though they already exist.
 
-Follow spec section 11. Review complete supported coverage; refresh only missing
-or invalidated evidence after fixes stabilize. Reuse host/baseline data and
-qualification; profile demonstrated excess. Avoid historical matrix expansion.
+Trace supported results through producers and consumers: show reused and new
+work. Proportional growth alone does not establish efficient reuse. Under spec
+section 11, refresh only missing or invalidated evidence; reuse qualification
+and host/baseline data.
 
 Run required checks once on final code and tests with unchanged options.
 Make/direct aliases share one result. A through report covers earlier PAs;

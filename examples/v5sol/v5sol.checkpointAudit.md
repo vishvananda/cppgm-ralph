@@ -11,12 +11,11 @@ boundary from history. Review interactions and supported architecture across
 that range, not just the latest commit. Fix violations at their owning paths
 and use focused language/reference comparisons beyond fixtures.
 
-Use existing evidence and spec section 11. Refresh only affected correctness,
-scaling and performance controls. A shared change requires representative
-consumer smokes; it does not authorize a historical matrix rerun. Profile a
-measured excess before optimizing. Record unresolved uncertainty rather than
-expanding measurements without a question. Preserve the checkpoint's course
-progress and earlier-stage behavior.
+Trace affected results through producers and consumers. Show what is reused
+and what requires new work; proportional growth alone does not establish
+efficient reuse. Under spec section 11, refresh only missing or invalidated
+affected evidence. Shared changes need representative consumer smokes.
+Record uncertainty; preserve checkpoint progress and earlier-stage behavior.
 
 After code fixes and validation, record that code tip as `Last reviewed commit`.
 Commit a compact plan/audit delta and one ledger row without further code edits.

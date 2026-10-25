@@ -1,7 +1,7 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
 Complete a coherent implementation handoff for `{{testStage}}`.
-- Changed owners meet current-stage correctness and architecture requirements.
+- Changed owners meet supported architecture, required reuse and correctness.
 - Focused scaling/performance evidence answers a question; reuse is valid and
   no unjustified matrix refresh or late input qualification remains.
 - Earlier PAs pass; current failures decrease without reduced coverage.

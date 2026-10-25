@@ -1,7 +1,7 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
 Review all accumulated `{{testStage}}` changes since the reviewed boundary.
-- Supported architecture, interactions and legality are checked; violations fixed.
+- Supported architecture, interactions and required reuse are checked; violations fixed.
 - Checkpoint progress is preserved; affected controls pass with scoped evidence.
 - Valid results are reused and uncertainty is distinguished from demonstrated defects.
 - The reviewed code tip, findings and ledger are recorded without subsequent code edits.

@@ -20,7 +20,7 @@ changes stabilize; shared changes get representative consumer smokes.
 Routine diagnostics use three interleaved measurements per variant, with
 additional repeats, profiling or full simulation justified by a concrete
 uncertainty. Canonical course scripts retain their own protocols and limits.
-Final reviews fill evidence gaps rather than repeat historical matrices.
+Reviews check semantic reuse as well as growth, filling only missing evidence.
 
 V5's shipped `scripts/cppgm_file_audit.pl` is a required check over `dev` in
 every phase. The course treats it as advisory; this run makes it mandatory.
