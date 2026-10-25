@@ -1,0 +1,19 @@
+V6 Sol scaffold verified 2026-10-25; compiler worker remains unstarted.
+
+Assignments tag v6: 20df0087fc72097316d9ac319b1aaad52593fa1b.
+Preparation commit: 3066ffe6; only spec.md differs from that base.
+Private run repository: vishvananda/cppgm-run-v6sol (main pushed).
+
+PASS: config matches V6 Opus apart from identity/provider/model settings;
+      spec is byte-identical and all 18 sidecars differ only in goal handling.
+PASS: same four phases, PA35 restructure routing, checkpoint cadence, all course
+      checks, 500-turn limit, PA35 endpoint, 100 GiB storage and 64 GiB/no-swap.
+PASS: initial PA1 local/through failures, scaffold build and 19-file audit.
+PASS: grouped instructions/cycles at 100% running and sampling inside Bubblewrap.
+PASS: Codex 0.164.0, gpt-6.1-sol/high inference with the default Codex profile;
+      native phase goal marked complete and verified through thread/goal/get.
+PASS: installed sidecars/spec, clean worktree and no Ralph state.json.
+PASS: JavaScript/shell syntax and git diff --check.
+
+Evidence: ~/work/private/v6sol/artifacts/scaffold-verification/
+Native-goal smoke probe is separate from Ralph; no tmux pane was started.
