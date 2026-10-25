@@ -54,6 +54,7 @@ import {
 import { readResumableCodexGoal } from "./codex-goal-resume.js";
 import { interruptedCodexAuthentication, isCodexAuthenticationError } from "./codex-auth-recovery.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
+import { createClaudeResponseWatchdog } from "./claude-response-watchdog.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
 import { StrandsAgentEventConverter } from "./strands-agent-events.js";
 import {
@@ -7081,9 +7082,20 @@ class ClaudeExec {
     child.stdin.write(args.input ?? "");
     child.stdin.end();
 
+    const watchdog = createClaudeResponseWatchdog({
+      rootPid: child.pid,
+      graceMs: Number(process.env.RALPH_CLAUDE_RESPONSE_GRACE_MS ?? 60_000),
+      onStatus: (status) => {
+        if (status.status === "waiting") log("Claude response finished; waiting on background tasks (process still open).");
+        else if (status.status === "self-wait-stopped") log(`Stopped verified self-matching Claude polling shell ${status.pid}; waiting for goal completion and validation.`);
+        else log(`Claude background-task inspection failed: ${status.message}`);
+      },
+    });
+    child.once("exit", () => watchdog.close());
     try {
       for await (const line of rl) {
         if (line.trim()) {
+          try { watchdog.observe(JSON.parse(line)); } catch { /* Existing parser reports malformed events. */ }
           yield line;
         }
       }
@@ -7096,6 +7108,7 @@ class ClaudeExec {
         throw agentExitError(`Claude exec exited with ${detail}: ${Buffer.concat(stderrChunks).toString("utf8")}`, signal, code);
       }
     } finally {
+      watchdog.close();
       rl.close();
       terminateChildProcess(child);
       await cleanupChildResourceScope(child);

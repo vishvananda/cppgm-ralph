@@ -58,7 +58,17 @@ reinstalls the same goal in the same Ralph turn. Ralph only records
 `claude.compaction_completed` after Claude emits a `compact_boundary`; the
 initial incomplete sentinel emitted while installing `/goal` is ignored. Set
 `claudeCompactOnIncompleteGoal` to `false` to retain Claude's native immediate
-continuation behavior. If Claude or Codex reports a usage/session limit
+continuation behavior.
+
+After a successful Claude response, 60 seconds without further model activity
+while its process remains open produces a background-task warning. On Linux,
+Ralph stops only a verified `until ! pgrep -f ...; do sleep ...; done` loop
+whose sole match is its own shell, including Claude's shell wrapper. Other
+workers and ambiguous waits remain untouched. Recovery still requires the goal
+completion path and external checks; a response alone never advances the run.
+`RALPH_CLAUDE_RESPONSE_GRACE_MS` adjusts the diagnostic grace period.
+
+If Claude or Codex reports a usage/session limit
 mid-turn, Ralph persists the reset deadline, waits for the limit window to
 reset (using the provider reset time when available, 15 minutes otherwise),
 and resumes the same session and turn. The wait is excluded from run timing.
