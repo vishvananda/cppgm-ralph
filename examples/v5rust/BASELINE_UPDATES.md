@@ -169,6 +169,14 @@ state and raw evidence, record the corrected baseline from a fresh full check,
 and retry the audit with a fresh goal. Retain the former blocked goal and history;
 the count correction does not complete a stage or waive its remaining work.
 
+PA34's primary bootstrap checks depend on prior-stage validation, so a new
+baseline's earlier failures are repaired before an expensive bootstrap begins.
+Its final audit also requires PA33's release/debug checks and current source
+ownership census. Mark changed C++ source responsibilities pending until their
+Rust owners have been reviewed against the new baseline. Archive `obj/bootstrap`
+when the oracle changes: its copied course lanes and saved generations belong
+to the previous baseline, even if the new compiler binary happens to match.
+
 Ralph reads `stopAfterStage` / `RALPH_STOP_AFTER_STAGE` at process startup.
 For an active run, request its ordinary `stop-after-turn`, let its checks and
 handoff finish, then restart with a temporary stage stop if needed. For the

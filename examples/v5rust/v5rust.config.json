@@ -24,7 +24,8 @@
       "primary": true,
       "kind": "test",
       "dependsOn": [
-        "preflight"
+        "preflight",
+        "priorThroughTests"
       ]
     },
     "rustQuality": {
@@ -65,7 +66,8 @@
       "primary": true,
       "kind": "test",
       "dependsOn": [
-        "preflight"
+        "preflight",
+        "priorThroughTests"
       ]
     },
     "courseSuite": {
@@ -82,7 +84,8 @@
       "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py release {{testStage}}",
       "required": true,
       "onlyStages": [
-        "pa33"
+        "pa33",
+        "pa34"
       ],
       "dependsOn": [
         "stageComplete"
