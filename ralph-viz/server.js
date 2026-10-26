@@ -56,7 +56,7 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 28;
+const RUN_USAGE_CACHE_VERSION = 29;
 const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 2;
@@ -1696,7 +1696,7 @@ export function attributeShapeUsageModels(shapeUsage, events, rootModel = null) 
       threadUsages,
       unthreadedUsage,
       turnUsages,
-      usage: pricedUsageCoveringAggregate(run.usage, attributedRunUsage, rootModel, true),
+      usage: pricedUsageCoveringAggregate(run.usage, attributedRunUsage, rootModel, true, false),
     };
   });
   let attributedRunTotal = null;
@@ -1711,6 +1711,7 @@ export function attributeShapeUsageModels(shapeUsage, events, rootModel = null) 
       hasTokenUsage(attributedRunTotal) ? attributedRunTotal : attributedShapeThreads,
       rootModel,
       true,
+      false,
     ),
   };
 }
@@ -1777,7 +1778,7 @@ function dominantUsageThreadTurn(meta) {
   return selected;
 }
 
-function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = null, preferAttributed = false) {
+function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = null, preferAttributed = false, providerCostCoversAggregate = true) {
   const normalizedAggregate = normalizeUsage(aggregate);
   let normalizedAttributed = normalizeUsage(attributed);
   if (
@@ -1792,7 +1793,11 @@ function pricedUsageCoveringAggregate(aggregate, attributed, fallbackModel = nul
     hasTokenUsage(normalizedAttributed) &&
     (!hasTokenUsage(normalizedAggregate) || usageMagnitude(normalizedAttributed) <= usageMagnitude(normalizedAggregate))
   ) {
-    return usageWithProviderCost(normalizedAttributed, normalizedAggregate);
+    // A run's raw cost may cover only completed turns while its tokens include
+    // a live turn. Keep the sum of individually priced turns/threads there.
+    return providerCostCoversAggregate
+      ? usageWithProviderCost(normalizedAttributed, normalizedAggregate)
+      : normalizedAttributed;
   }
   const embedded = usageFromModelComponents(normalizedAggregate);
   if (hasTokenUsage(embedded)) {

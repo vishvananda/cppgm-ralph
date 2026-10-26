@@ -58,6 +58,44 @@ test("tail detail prices historical root turns with their phase models", async (
   );
 });
 
+test("combined fast usage keeps completed Opus dollars and estimates the live alias turn", async (t) => {
+  const originalCwd = process.cwd();
+  const originalCodexHome = process.env.CODEX_HOME;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-opus-alias-price-"));
+  t.after(async () => {
+    process.chdir(originalCwd);
+    if (originalCodexHome == null) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const runName = "fixture-opus-high";
+  await fs.writeFile(path.join(root, "fixture.config.json"), JSON.stringify({
+    name: "fixture", provider: "claude", model: "opus", reasoningEffort: "high",
+    workdir: path.join(root, "work"),
+  }));
+  const eventsDir = path.join(root, ".ralph", runName, "events");
+  await fs.mkdir(eventsDir, { recursive: true });
+  await writeJsonl(path.join(eventsDir, "run.jsonl"), [
+    ...turnEvents(1, FABLE_THREAD_2, "opus", "2026-10-25T14:00", 0.01234),
+    ...turnEvents(2, FABLE_THREAD_3, "opus", "2026-10-25T14:01", null).slice(0, 2),
+  ]);
+  process.chdir(root);
+  process.env.CODEX_HOME = path.join(root, "codex");
+  const serverUrl = pathToFileURL(path.join(originalCwd, "ralph-viz", "server.js"));
+  serverUrl.searchParams.set("opus-alias-price-test", String(Date.now()));
+  const { requestHandler } = await import(serverUrl.href);
+  const url = `/api/run/${encodeURIComponent(`${runName}/run`)}?codex=tail&tailTurns=1&maxEventsPerTurn=50&usage=fast`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await requestJson(requestHandler, url);
+    assert.equal(response.status, 200);
+    const shape = response.body.shapeUsage;
+    assert.equal(shape.usage.total_tokens, 2200);
+    assert.ok(Math.abs(shape.usage.cost_usd - 0.01644) < 1e-12, JSON.stringify(shape));
+    assert.equal(shape.runs[0].turnUsages.find(entry => entry.turnNumber === 1).usage.cost_usd, 0.01234);
+    assert.ok(Math.abs(shape.runs[0].turnUsages.find(entry => entry.turnNumber === 2).usage.cost_usd - 0.0041) < 1e-12);
+  }
+});
+
 function turnEvents(turnNumber, threadId, model, minutePrefix, totalCostUsd) {
   const usage = {
     input_tokens: 1000,

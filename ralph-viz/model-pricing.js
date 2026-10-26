@@ -3,6 +3,9 @@
   // else reaching Claude Code (an OpenRouter slug, a stealth model) is priced
   // from Claude's generic fallback card and cannot be relied on.
   const ANTHROPIC_MODEL_PATTERN = /^(claude-|anthropic[/-])/i;
+  // The run's short Claude Code alias resolves to Opus 5.5. Use its existing
+  // card for live estimates; completed provider accounting still takes priority.
+  const MODEL_ALIASES = Object.freeze({ opus: "claude-opus-5-5" });
   const rates = Object.freeze({
     // Standard short-context API-equivalent estimate (USD per 1M tokens).
     // gpt-6.1-sol rates supplied by the user (2026-09-29).
@@ -113,7 +116,8 @@
   // magnitude. Trust provider accounting only for Anthropic models; price
   // everything else from our own rate card.
   function isAnthropicModel(model) {
-    return ANTHROPIC_MODEL_PATTERN.test(String(model ?? "").trim());
+    const name = String(model ?? "").trim();
+    return ANTHROPIC_MODEL_PATTERN.test(MODEL_ALIASES[name] ?? name);
   }
 
   function providerCost(usage, model) {
@@ -131,7 +135,7 @@
     if (!normalized) return null;
     const trusted = providerCost(normalized, model);
     if (trusted != null) return trusted;
-    const rate = model ? rates[model] : null;
+    const rate = model ? rates[MODEL_ALIASES[model] ?? model] : null;
     // Without a rate card the provider number is the only signal available, so
     // keep it as a last resort rather than reporting no cost at all.
     if (!rate) return normalized.cost_usd > 0 ? normalized.cost_usd : null;

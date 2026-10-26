@@ -20,6 +20,15 @@ test("new Sol, Luna, and Opus rates use the standard short-context cards", () =>
   assert.equal(pricing.estimateCost(usage, "claude-opus-5-5"), 4.1);
 });
 
+test("the Opus CLI alias preserves provider cost and estimates live usage", () => {
+  const usage = { input_tokens: 1000, cached_input_tokens: 500, output_tokens: 100 };
+  assert.equal(pricing.isAnthropicModel("opus"), true);
+  assert.equal(pricing.providerCost({ ...usage, total_cost_usd: 0.01234 }, "opus"), 0.01234);
+  assert.equal(pricing.estimateCost({ ...usage, total_cost_usd: 0.01234 }, "opus"), 0.01234);
+  assert.ok(Math.abs(pricing.estimateCost(usage, "opus") - 0.0041) < 1e-12);
+  assert.equal(pricing.providerCost({ ...usage, total_cost_usd: 0.01234 }, "custom-opus-route"), null);
+});
+
 test("Astra usage keeps its own pricing when combined with a Luna worker", () => {
   const astra = pricing.attributeUsage({
     input_tokens: 1_000_000,
