@@ -148,6 +148,10 @@ For an existing run, install the corrected comparator, tests and contract in
 the protected control bundle and checkout, update only their protected hashes,
 and record the revision and revalidation evidence before restarting its audit.
 
+The PA32 correction recognizes the reference optimizer’s `pa32_opt_stats`
+format alongside `lowiropt_stats`. It applies the same measurement-field rule;
+optimizer work counters and raw statistics receipts remain exact and retained.
+
 The private filesystem is mounted `nosuid,nodev`, owned by the runner with mode
 0700. Bubblewrap exposes the host read-only and binds only private run storage
 and provider state writable. The C++ reference, control bundle and Ralph state

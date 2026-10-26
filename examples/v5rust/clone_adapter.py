@@ -56,7 +56,7 @@ def append_receipt(record):
 
 
 def is_stats_line(line):
-    return line.startswith((b"lowir2native_stats ", b"lowiropt_stats ",
+    return line.startswith((b"lowir2native_stats ", b"lowiropt_stats ", b"pa32_opt_stats ",
                             b"preproc stats ", b"lowir stats: ", b"abimangle stats: ")) or (
         line.startswith(b"cppgm++ ") and (b" stats " in line or b" stats:" in line))
 

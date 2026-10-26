@@ -300,6 +300,39 @@ class ComparisonTests(unittest.TestCase):
         self.assertNotEqual(clone_adapter.comparable_stderr(left), clone_adapter.comparable_stderr(right.replace(b"=19", b"=20")))
         self.assertEqual(clone_adapter.comparable_stderr(b"ERROR select_ms=0.1\n"), b"ERROR select_ms=0.1\n")
 
+    def test_optimizer_stats_preserve_counters_and_normalize_only_measurements(self):
+        for prefix in (b"pa32_opt_stats ", b"lowiropt_stats "):
+            with self.subTest(prefix=prefix):
+                left = prefix + b"functions=1 folded=2 optimize_ms=0.079 parse_ms=1e-3 peak_rss_kb=100\n"
+                right = prefix + b"functions=1 folded=2 optimize_ms=0.473 parse_ms=0.4 peak_rss_kb=200\n"
+                self.assertEqual(clone_adapter.invocation_differences(
+                    (0, b"", left), (0, b"", right), {"out": b"ir"}, {"out": b"ir"}), [])
+                for changed in (right.replace(b"folded=2", b"folded=3"),
+                                right.replace(b"parse_ms", b"read_ms"),
+                                right.replace(b"=0.473", b"=unknown"),
+                                right.replace(b"=0.473", b"=0.473oops")):
+                    self.assertEqual(clone_adapter.invocation_differences(
+                        (0, b"", left), (0, b"", changed), {}, {}), ["stderr"])
+                self.assertEqual(clone_adapter.invocation_differences(
+                    (0, b"", left), (0, b"", right), {"out": b"ir"}, {"out": b"wrong"}), ["out"])
+        for diagnostic in (b"ERROR pa32_opt_stats optimize_ms=0.1\n",
+                           b"pa32_opt_stats: optimize_ms=0.1\n"):
+            self.assertEqual(clone_adapter.comparable_stderr(diagnostic), diagnostic)
+
+    def test_optimizer_stats_receipt_keeps_raw_measurements(self):
+        expected = b"pa32_opt_stats functions=1 folded=2 optimize_ms=0.1 peak_rss_kb=100\n"
+        actual = expected.replace(b"=0.1", b"=0.9").replace(b"=100", b"=200")
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict("os.environ", {"V5RUST_TRACE": str(trace)}), \
+                    patch.object(clone_adapter, "run", side_effect=[(0, b"", expected), (0, b"", actual)]):
+                result = clone_adapter.compare_invocation("lowiropt", ["-O1", "--stats"], b"", {})
+            receipt = json.loads(trace.read_text())
+        self.assertTrue(receipt["match"])
+        self.assertEqual(result[2], actual)
+        self.assertEqual(receipt["statistics"], {
+            "oracle": [expected.decode().strip()], "candidate": [actual.decode().strip()]})
+
     def test_complete_bytes_exit_and_stderr_are_required(self):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
