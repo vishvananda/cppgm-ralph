@@ -165,6 +165,8 @@ const state = {
   latestLayoutScrollSnapshot: null,
   stickToBottomAfterLayout: false,
   followLiveTail: false,
+  liveTailDetached: false,
+  lastTouchY: null,
   preferScrollTopAfterLayout: false,
   progressDockSpacePx: 0,
   scrollDebugEnabled: initialScrollDebugEnabled(),
@@ -1551,12 +1553,17 @@ function updateProgressDockSpace() {
     return;
   }
   const wasSticky = shouldFollowLiveTail(getScrollMetrics());
+  const userScrollVersion = state.userScrollVersion;
   const height = Math.ceil(progressDock.getBoundingClientRect().height || 0);
   const space = Math.max(56, height + PROGRESS_DOCK_EXTRA_SPACE_PX);
   state.progressDockSpacePx = space;
   document.documentElement.style.setProperty("--progress-dock-space", `${space}px`);
   if (wasSticky) {
-    afterNextPaint(scrollToBottomNow);
+    afterNextPaint(() => {
+      if (userScrollVersion === state.userScrollVersion && shouldFollowLiveTail()) {
+        scrollToBottomNow();
+      }
+    });
   }
 }
 
@@ -9103,6 +9110,7 @@ function applyScrollRestoration(snapshot) {
   }
   scrollDebug("restore-scroll-apply", { restoreSnapshot });
   if (restoreSnapshot.stickToBottom) {
+    if (state.liveTailDetached) return false;
     scrollToBottomNow();
     return true;
   }
@@ -9211,6 +9219,7 @@ function afterNextPaint(callback) {
 }
 
 function scrollToBottomNow() {
+  if (state.liveTailDetached) return;
   const root = scrollingRoot();
   const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
   state.followLiveTail = true;
@@ -9267,6 +9276,7 @@ function getScrollMetrics() {
 }
 
 function shouldFollowLiveTail(metrics = getScrollMetrics()) {
+  if (state.liveTailDetached) return false;
   if (metrics.distanceFromBottom <= bottomStickyThresholdPx()) {
     return true;
   }
@@ -9451,10 +9461,20 @@ function handleObservedScroll() {
   const recentProgrammatic = now - state.lastProgrammaticScrollAt < 300;
   const recentUserIntent = now - state.lastUserScrollAt < 1000 &&
     state.lastUserScrollAt > state.lastProgrammaticScrollAt;
+  const previous = state.lastObservedScrollTop;
+  state.lastObservedScrollTop = metrics.scrollTop;
+  const delta = previous == null ? 0 : metrics.scrollTop - previous;
+  if (recentUserIntent && delta !== 0) {
+    // Inertial scrolling also cancels delayed restorations after touchend.
+    markUserScrollIntent("scroll", delta);
+    if (delta > 0 && metrics.distanceFromBottom <= BOTTOM_STICKY_PX) {
+      state.liveTailDetached = false;
+    }
+  }
   if (isMobileScrollViewport() && recentUserIntent && !recentProgrammatic) {
     markMobileScrollPause("scroll");
   }
-  if (metrics.distanceFromBottom <= bottomStickyThresholdPx()) {
+  if (!state.liveTailDetached && metrics.distanceFromBottom <= bottomStickyThresholdPx()) {
     state.followLiveTail = true;
   } else if (recentUserIntent && !recentProgrammatic) {
     state.followLiveTail = false;
@@ -9463,13 +9483,10 @@ function handleObservedScroll() {
   if (!state.scrollDebugEnabled) {
     return;
   }
-  const previous = state.lastObservedScrollTop;
-  state.lastObservedScrollTop = metrics.scrollTop;
   if (previous == null) {
     scrollDebug("scroll-observed-initial", { metrics });
     return;
   }
-  const delta = metrics.scrollTop - previous;
   if (Math.abs(delta) >= SCROLL_JUMP_LOG_PX) {
     scrollDebug("scroll-observed-jump", {
       previous,
@@ -9497,7 +9514,11 @@ function stopAutoRefresh() {
   }
 }
 
-function markUserScrollIntent(source = "unknown") {
+function markUserScrollIntent(source = "unknown", direction = 0) {
+  if (direction < 0) {
+    state.liveTailDetached = true;
+    state.followLiveTail = false;
+  }
   state.lastUserScrollAt = performance.now();
   state.userScrollVersion += 1;
   state.latestLayoutScrollSnapshot = null;
@@ -9507,6 +9528,14 @@ function markUserScrollIntent(source = "unknown") {
     markMobileScrollPause(source);
   }
   scrollDebug("user-scroll-intent", { source });
+}
+
+function handleTouchScrollIntent(event) {
+  const y = event.touches?.[0]?.clientY ?? null;
+  const direction = event.type === "touchmove" && y != null && state.lastTouchY != null
+    ? state.lastTouchY - y : 0;
+  state.lastTouchY = y;
+  markUserScrollIntent(event.type, direction);
 }
 
 function markLayoutScrollIntent(preLayoutSnapshot = null) {
@@ -9708,9 +9737,9 @@ document.addEventListener("selectionchange", () => {
 window.addEventListener("selectstart", () => {
   markInteractionRefreshPause("selectstart", TEXT_SELECTION_REFRESH_PAUSE_MS);
 }, { passive: true });
-window.addEventListener("wheel", () => markUserScrollIntent("wheel"), { passive: true });
-window.addEventListener("touchstart", () => markUserScrollIntent("touchstart"), { passive: true });
-window.addEventListener("touchmove", () => markUserScrollIntent("touchmove"), { passive: true });
+window.addEventListener("wheel", (event) => markUserScrollIntent("wheel", event.deltaY), { passive: true });
+window.addEventListener("touchstart", handleTouchScrollIntent, { passive: true });
+window.addEventListener("touchmove", handleTouchScrollIntent, { passive: true });
 window.addEventListener("touchend", () => markMobileScrollPause("touchend"), { passive: true });
 window.addEventListener("touchcancel", () => markMobileScrollPause("touchcancel"), { passive: true });
 window.addEventListener("pointerdown", (event) => {
@@ -9724,7 +9753,9 @@ window.addEventListener("keydown", (event) => {
     markInteractionRefreshPause(`dropdown-keydown:${event.key}`, DROPDOWN_REFRESH_PAUSE_MS);
   }
   if (SCROLL_KEYS.has(event.key)) {
-    markUserScrollIntent(`keydown:${event.key}`);
+    const upward = event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home" ||
+      ((event.key === " " || event.key === "Spacebar") && event.shiftKey);
+    markUserScrollIntent(`keydown:${event.key}`, upward ? -1 : 1);
   }
 });
 if (autoRefreshToggle) {
