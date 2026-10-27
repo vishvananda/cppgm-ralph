@@ -1,11 +1,12 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
-Complete a coherent implementation handoff for `{{testStage}}`.
+Complete the largest practical implementation batch for `{{testStage}}`.
 - Changed owners meet supported architecture, required reuse and correctness.
 - Focused scaling/performance evidence answers a question; reuse is valid and
   no unjustified matrix refresh or late input qualification remains.
 - Earlier PAs pass; current failures decrease without reduced coverage.
-- A partial handoff records remaining groups and why related work cannot continue.
+- A partial handoff records remaining groups and a concrete continuation obstacle;
+  changing owners alone is insufficient.
 - Plan markers, evidence links and ledger are current.
 
 Required checks:

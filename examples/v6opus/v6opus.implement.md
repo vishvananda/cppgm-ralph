@@ -6,10 +6,13 @@ State:
 - primary log: `{{lastTestLogPath}}`
 
 Read `AGENTS.md`, `TESTING_AND_REFERENCES.md`, `spec.md` and the owning
-handout, including its design/scale guidance. Implement related facts and their
-consumers together; continue while the same understanding enables progress.
-A commit or minimum test gain is not a handoff boundary. Fix known correctness
-and architecture defects without opening unrelated optimization investigations.
+handout, including its design/scale guidance. Work toward completing the
+assignment. Group failures by shared semantic ownership; implement related
+facts and their consumers together. Extend the initial scope while the same
+understanding supports further fixes. Commit coherent increments throughout
+the turn. The initial plan, a commit, minimum test gain or change of owner is
+not a stopping boundary. Fix known correctness and architecture defects without
+opening unrelated optimization investigations.
 
 Apply the spec to supported capabilities from their first implementation.
 Validate affected correctness, required reuse and bounded work; reuse valid
