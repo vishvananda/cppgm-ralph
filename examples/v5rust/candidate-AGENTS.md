@@ -29,10 +29,12 @@ reads under `dev/src/`; collect them in `dev/bin/` and pass typed options.
 The companion file audit is authoritative for source
 limits; passing Clippy alone is insufficient.
 
-Keep one compact current ledger; replace historical handoffs rather than append
-them. Use the protected evidence index and valid prior/quality receipts; refresh
-only invalidated evidence after stabilization. Raw cases stay in artifacts and
-previous plans in Git. Add broad probes/resource studies only for a changed
+Use up to three read-only subagents for disjoint owner reviews; the parent owns
+edits and source-map certification. While a broad audit is open, use focused
+tests, clone_quality.py --review and clone_evidence.py checkpoint. Run full
+prior/quality checks at substantial milestones and final acceptance; the strict
+snapshot still requires valid receipts. Keep one compact ledger. Raw cases stay
+in artifacts and previous plans in Git. Add broad probes/resource studies only for a changed
 invariant or stated question. For each stage record its base and audited tip, C++/Rust owners,
 completed behavior groups, exact failing case IDs, next dependency boundary,
 validation commands/artifact paths and measured resource costs. Do not claim a

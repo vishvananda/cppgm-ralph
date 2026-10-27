@@ -178,6 +178,101 @@ class EvidenceTests(unittest.TestCase):
             self.assertTrue(reuse.call_args.kwargs['fresh'])
 
 
+class AuditCheckpointTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def workspace(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            root = Path(directory)
+            (root/'manifest.json').write_text('{}')
+            binary = root/'compiler';binary.write_bytes(b'compiler')
+            binaries = {'cppgm++': clone_common.file_digest(binary)}
+            stack.enter_context(patch.object(clone_common, 'ARTIFACTS', root))
+            stack.enter_context(patch.object(clone_common, 'CONTROL', root))
+            stack.enter_context(patch.object(clone_common, 'TOOLS', ('cppgm++',)))
+            stack.enter_context(patch.object(clone_common, 'candidate_path', return_value=binary))
+            stack.enter_context(patch.object(evidence, 'inputs', side_effect=lambda context:
+                {'context': context, 'source': 'current', 'binaries': binaries}))
+            stack.enter_context(patch.object(clone_check, 'stage_cases', return_value=['tests/a.t']))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            yield root, binaries
+
+    def report(self, root, binaries):
+        path = root/'results/pa33.json';path.parent.mkdir(exist_ok=True)
+        clone_common.write_json(path, {
+            'binaries': binaries,
+            'manifest_sha256': clone_common.file_digest(root/'manifest.json'),
+            'results': [{'case':'tests/a.t','passed':True}],
+        })
+
+    def test_open_audit_indexes_focused_evidence_without_running_acceptance(self):
+        with self.workspace() as (root, _), patch.object(evidence, 'cached_gate') as gate:
+            raw = root/'focused.jsonl';raw.write_text('{"match":true}')
+            output = root/'checkpoint.json'
+            evidence.checkpoint('pa33', output, [raw])
+            value = json.loads(output.read_text())
+            self.assertFalse(value['acceptance_claim'])
+            self.assertTrue(value['final_acceptance_required'])
+            self.assertFalse(value['prior']['reused_success'])
+            self.assertFalse(value['quality']['reused_success'])
+            self.assertFalse(value['stage_report']['current'])
+            self.assertEqual(value['focused_evidence'][str(raw)], clone_common.file_digest(raw))
+            self.assertFalse((root/'validation').exists())
+            gate.assert_not_called()
+
+    def test_checkpoint_preserves_stale_receipts_and_detects_damaged_evidence(self):
+        with self.workspace() as (root, _):
+            raw = root/'raw.log';raw.write_text('original')
+            directory = root/'validation/quality';directory.mkdir(parents=True)
+            receipt = directory/'receipt.json'
+            saved = {'version':evidence.VERSION,
+                'identity':common_key('quality'), 'exit':0,
+                'evidence':{str(raw):clone_common.file_digest(raw)}}
+            clone_common.write_json(receipt, saved)
+            original = receipt.read_bytes()
+            output = root/'checkpoint.json'
+            evidence.checkpoint('pa33', output)
+            self.assertTrue(json.loads(output.read_text())['quality']['reused_success'])
+            raw.write_text('changed')
+            evidence.checkpoint('pa33', output)
+            self.assertFalse(json.loads(output.read_text())['quality']['reused_success'])
+            self.assertEqual(receipt.read_bytes(), original)
+
+    def test_current_and_stale_stage_reports_never_establish_acceptance(self):
+        with self.workspace() as (root, binaries):
+            self.report(root, binaries)
+            output = root/'checkpoint.json'
+            evidence.checkpoint('pa33', output)
+            value = json.loads(output.read_text())
+            self.assertTrue(value['stage_report']['current'])
+            self.assertFalse(value['acceptance_claim'])
+            with patch.object(clone_check, 'stage_cases', return_value=['tests/a.t','tests/new.t']):
+                evidence.checkpoint('pa33', output)
+            self.assertFalse(json.loads(output.read_text())['stage_report']['current'])
+            self.report(root, {'cppgm++':'old'})
+            evidence.checkpoint('pa33', output)
+            self.assertFalse(json.loads(output.read_text())['stage_report']['current'])
+
+    def test_strict_snapshot_still_requires_successful_final_receipts(self):
+        with self.workspace() as (root, binaries):
+            self.report(root, binaries)
+            evidence.checkpoint('pa33', root/'checkpoint.json')
+            with self.assertRaises(FileNotFoundError):
+                evidence.snapshot('pa33', root/'final.json')
+            self.assertFalse((root/'final.json').exists())
+
+    def test_quality_review_does_not_produce_an_acceptance_receipt(self):
+        with patch.object(evidence, 'cached_gate') as gate, \
+                patch.object(clone_quality, 'run', return_value=(0,b'',b'')) as run, \
+                patch.object(sys,'argv',['clone_quality.py','--review']), \
+                contextlib.redirect_stdout(io.TextIOWrapper(io.BytesIO())):
+            self.assertEqual(clone_quality.main(), 0)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(len(commands), 3)
+            self.assertTrue(any(command[1]=='clippy' for command in commands))
+            self.assertFalse(any(command[:2]==['cargo','test'] for command in commands))
+            gate.assert_not_called()
+
+
 def common_key(context):
     return clone_common.digest(evidence.encoded(evidence.inputs(context)))
 

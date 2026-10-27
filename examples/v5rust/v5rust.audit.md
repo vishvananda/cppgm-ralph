@@ -11,6 +11,11 @@ diagnostics, order/tie-breaks and externally visible bytes. Do not certify a
 stage only because fixtures pass. Check that due compiler work runs in Rust;
 oracle tools may only perform the documented harness/evaluation roles.
 
+Use up to three read-only subagents on disjoint C++/Rust owner families.
+Require source ranges, concrete findings and minimal controls; keep edits,
+source-map certification and gate execution with the parent. Review substantial
+related groups, following shared producers and consumers before switching scope.
+
 Apply CLONE_CONTRACT.md's protected stack qualification to resource-limited
 audit probes. Require exact successful larger-stack results; native exhaustion
 cutoffs and diagnostic positions are not defects to reproduce or calibrate.
@@ -22,21 +27,22 @@ Enforce source/function/nesting limits, safe code, rustfmt and strict Clippy.
 Avoid fixture tailoring and blanket allowances. Fix findings and validate the
 fixes before accepting the stage; retain every previously passing case.
 
-Run the exact stage gate, its original full course suite and all earlier
-stages. For PA33 also complete release/debug checks and ensure every C++
-implementation responsibility has a Rust owner and no unfinished production
-path remains. PA32 and PA33 preserve existing optimizer/backend policies;
-PA35 optimization objectives are excluded. Record resource observations for
-affected hot paths separately from generated-code equality.
+While the audit remains open, use focused regressions and
+python3 scripts/clone_quality.py --review. Index partial work with
+python3 scripts/clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE.
+This records current/stale evidence without acceptance or full-suite receipts.
+Do not freeze implementation for a full prior/quality run after each owner or
+small fix. Reserve broad checks for substantial audit milestones and final closure.
+Measure two supported scales only when allocation, repeated work or scaling
+changes; ordinary byte-parity fixes need focused equality controls.
 
-Use focused controls while fixing findings; refresh invalidated gates once
-after stabilization. Protected successful prior/quality receipts may be reused
-only with identical inputs and intact raw evidence; --fresh forces execution.
-Current-stage/course/release/bootstrap acceptance still runs. Index evidence
-with python3 scripts/clone_evidence.py; do not copy every prior receipt or
-write count-specific validators. Keep historical reports in Git and replace
-the compact current ledger with reviewed commits, completeness, findings and
-evidence links. Commit the audit/fixes and leave a clean checkout.
+Before acceptance, run the exact stage gate, original course, all prior stages,
+full quality and applicable release/debug/bootstrap checks; then use the strict
+snapshot evidence command. Reuse success only with identical protected inputs
+and intact raw evidence. For PA33 close every implementation responsibility and
+unfinished production path. Preserve optimizer/backend policy; PA35 is excluded.
+Keep the current ledger compact: reviewed tip/owners, findings, evidence and next
+boundary. Retain history/raw logs, commit coherent fixes and leave clean.
 Complete Ralph's existing phase goal and return an evidence-backed handoff.
 Do not create/reset the goal, change acceptance policy or edit Ralph state.
 

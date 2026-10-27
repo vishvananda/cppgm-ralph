@@ -249,15 +249,63 @@ def snapshot(stage, destination):
     print(f"Evidence index: {destination}; {index['passed']}/{index['total']}; raw receipts retained in place")
 
 
+def receipt_status(context, current):
+    """Describe evidence without running a gate or promoting stale success."""
+    path = common.ARTIFACTS / 'validation' / context / 'receipt.json'
+    result = {'path': str(path), 'reused_success': False}
+    if path.exists():
+        result['sha256'] = common.file_digest(path)
+        try:
+            saved = json.loads(path.read_text())
+            identity = common.digest(encoded({**current, 'context': context}))
+            result['reused_success'] = valid_receipt(saved, identity)
+        except (OSError, ValueError, TypeError):
+            pass
+    return result
+
+
+def checkpoint(stage, destination, focused=()):
+    """Index an open audit; final acceptance still requires the strict snapshot."""
+    current = inputs('checkpoint')
+    report_path = common.ARTIFACTS / 'results' / f'{stage}.json'
+    report = {'path': str(report_path), 'current': False}
+    if report_path.exists():
+        report['sha256'] = common.file_digest(report_path)
+        saved = json.loads(report_path.read_text())
+        from clone_check import stage_cases
+        report['current'] = (
+            saved.get('binaries') == current['binaries']
+            and saved.get('manifest_sha256') == common.file_digest(common.CONTROL / 'manifest.json')
+            and [row['case'] for row in saved['results']] == stage_cases(stage))
+        report.update(passed=sum(row['passed'] for row in saved['results']), total=len(saved['results']))
+    index = {
+        'kind': 'audit-review-checkpoint', 'acceptance_claim': False,
+        'final_acceptance_required': True, 'stage': stage,
+        'input_identity': common.digest(encoded(current)), 'binaries': current['binaries'],
+        'manifest_sha256': common.file_digest(common.CONTROL / 'manifest.json'),
+        'stage_report': report, 'prior': receipt_status(f'prior-{stage}', current),
+        'quality': receipt_status('quality', current),
+        'focused_evidence': file_inventory(Path(path).resolve() for path in focused),
+    }
+    common.write_json(destination, index)
+    print(f'Audit review checkpoint: {destination}; final acceptance checks remain required')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['snapshot'])
+    parser.add_argument('mode', choices=['snapshot', 'checkpoint'])
     parser.add_argument('stage')
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--evidence', action='append', default=[], type=Path)
     args = parser.parse_args()
     if not __import__('re').fullmatch(r'pa(?:[1-9]|[12][0-9]|3[0-3])', args.stage):
         parser.error('stage must be pa1 through pa33')
-    snapshot(args.stage, args.out)
+    if args.mode == 'checkpoint':
+        checkpoint(args.stage, args.out, args.evidence)
+    else:
+        if args.evidence:
+            parser.error('--evidence is only for an audit checkpoint')
+        snapshot(args.stage, args.out)
 
 
 if __name__ == '__main__':

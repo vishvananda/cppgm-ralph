@@ -8,7 +8,7 @@ Read the current spec/contract, handout and compact ledger. Review every change
 since its last-audited tip against the frozen C++ owners and Rust source map.
 Historical reports supply evidence, not new checklists. Trace typed ownership,
 failure/rollback, exact numbers/diagnostics, demand and emission order. Check
-algorithmic completeness, lifetimes and bounded work; no delegation, shortcuts,
+algorithmic completeness, lifetimes and bounded work; no compiler fallback, shortcuts,
 unsafe, needless cloning, global scans or lint/file-limit evasion.
 
 Resolve concrete findings in the completed scope, adding required regressions
@@ -18,7 +18,11 @@ mode matrices, scaling studies, round trips or native-stack campaigns. Relevant
 stack probes use the protected match/stack_qualification receipt. Do not demand
 future unimplemented groups pass or waive findings because counts are unchanged.
 
-Refresh invalidated checks once after fixes stabilize. Protected successful
+Use up to three read-only reviewers on disjoint owners; the parent owns edits
+and certification. Use focused controls and clone_quality.py --review while
+findings remain. Record open review work with clone_evidence.py checkpoint
+{{testStage}} --out PATH; it neither requires nor replaces final acceptance.
+Refresh full invalidated checks once at the handoff. Protected successful
 prior/quality receipts may be reused only with identical keys and intact raw
 logs. Current-stage and case-preservation checks still execute; --fresh forces
 new observations. Do not repeat unchanged suites solely to review a handoff.

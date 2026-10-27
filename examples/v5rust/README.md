@@ -108,6 +108,22 @@ retains its hash. Failures are never cached. Changed/missing evidence reruns the
 gate; `clone_check.py prior paN --fresh` or `clone_quality.py --fresh` forces it.
 Current-stage tests, preservation, course and release/bootstrap checks still run.
 No case, comparison, lint or acceptance requirement is removed.
+
+During an open audit, use up to three read-only reviewers on disjoint owner
+families; the parent integrates fixes and certifies the source map. Focused
+tests and `python3 scripts/clone_quality.py --review` cover iteration without
+creating a full-quality receipt. Record partial progress with:
+
+```sh
+python3 scripts/clone_evidence.py checkpoint pa33 --out review.json \
+  --evidence focused-results.jsonl
+```
+
+This command labels missing/stale stage and prior/quality evidence, hashes the
+referenced focused files, and never runs acceptance gates or modifies their
+receipts. Use substantial milestones for full-suite refreshes while work remains;
+final acceptance still requires every normal gate and the strict snapshot below.
+Scaling studies are due when allocation or repeated-work behavior changes.
 Validation subprocesses use `validation_path` from the protected settings when
 configured. Pin the owner's existing tool path at installation; temporary agent
 PATH entries then neither change the selected tools nor prevent evidence reuse.
@@ -130,10 +146,11 @@ expand matrices, stack probes or resource measurements only for a concrete
 changed invariant or unresolved question. Run full required checks once after
 the related batch stabilizes and let Ralph reuse their unchanged evidence.
 
-Install tool and prompt changes together at a clean stopped turn boundary.
+Install tool and prompt changes together while stopped, preserving an authorized
+interruption's unfinished edits in a checkpoint commit.
 Update only the reviewed protected file hashes in both manifests, retain the
 oracle and all test identities, run harness regressions and real prior/quality
-checks, then restart with a fresh goal. Preserve successful cache receipts and
+checks, then restart with refreshed instructions. Preserve successful cache receipts and
 their raw files; never rewrite timestamps or outcomes to make them reusable.
 
 The 2026-10-11 harness correction recognizes standalone `preproc`, `lowir` and

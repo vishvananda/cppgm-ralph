@@ -215,6 +215,11 @@ import os
 import sys
 os.execv(sys.executable, [sys.executable, "{CONTROL}/clone_evidence.py", *sys.argv[1:]])
 ''')
+    write(ROOT / "scripts/clone_quality.py", f'''#!/usr/bin/env python3
+import os
+import sys
+os.execv(sys.executable, [sys.executable, "{CONTROL}/clone_quality.py", *sys.argv[1:]])
+''')
     makefile = f'''# Exact Rust clone: the assignment Makefiles remain the owning course harness.
 EXPERIMENTAL_PAS ?= pa34 pa35
 CHECK = python3 {CONTROL}/clone_check.py
@@ -307,7 +312,8 @@ def freeze(tracked):
                  ROOT / ".cargo/config.toml",
                  ROOT / "dev/clippy.toml", *list((ROOT / "scripts/clone").glob("*.py")),
                  *list((ROOT / "scripts/clone/build_support").glob("*.rs")),
-                 ROOT / "scripts/clone_check.py", ROOT / "scripts/clone_evidence.py"]:
+                 ROOT / "scripts/clone_check.py", ROOT / "scripts/clone_evidence.py",
+                 ROOT / "scripts/clone_quality.py"]:
         protected[path.relative_to(ROOT).as_posix()] = sha(path)
     for name in ["dev/build.rs", "dev/build_support/host_configuration.rs",
                  "dev/bin/builtin_host_configuration.rs"]:

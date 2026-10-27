@@ -14,7 +14,7 @@ handoff boundary; document the next real dependency.
 
 Preserve exact observable behavior, emission/demand order, optimizer/backend
 policy, parse-once typed facts and bounded ownership in idiomatic safe Rust.
-No FFI/delegation, fixture recognition, speculative whole-program work, unsafe,
+No FFI/compiler fallback, fixture recognition, speculative whole-program work, unsafe,
 blanket lint suppression or mechanical splits. Preserve prior case identities.
 
 Iterate with the smallest affected fixture and a few controls for the touched
@@ -26,8 +26,11 @@ reuse unchanged host/qualification evidence. PA35 codegen targets do not apply.
 Use the protected adapter's match/stack_qualification for actual exhaustion;
 status 86, crashes and timeouts never establish a matching rejection.
 
-After the batch stabilizes, run current stage/course, prior, lint and audit
-once. Protected prior/quality commands reuse only successful content-bound raw
+Use up to three read-only subagents for disjoint owner reviews; the parent owns
+edits and certification. During substantial open batches use focused controls,
+clone_quality.py --review and clone_evidence.py checkpoint {{testStage}} --out PATH.
+Run current stage/course, prior and full quality at the handoff, not each small fix.
+Protected prior/quality commands reuse only successful content-bound raw
 evidence; --fresh forces execution. Source/binary, fixture, protocol, toolchain
 or evidence changes invalidate reuse. Current-stage and preservation checks
 still execute. Do not repeat these checks solely for a commit or report rewrite.
