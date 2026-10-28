@@ -32,11 +32,14 @@ export function pollingPattern(argv) {
     if (!word || !/^\s*< \/dev\/null && pwd -P >\| \/tmp\/claude-[\w-]+-cwd\s*$/.test(word.rest)) return null;
     script = word.value;
   }
-  // Only a pure negative wait and optional read-only output follow-up. No
-  // loop body mutations, pipelines, arbitrary predicates or cleanup commands.
-  const match = /^\s*until\s+!\s+pgrep\s+-f\s+'([\w./-]+)'\s*>\s*\/dev\/null;\s*do\s+sleep\s+([1-9]\d*);\s*done\s*(?:;\s*cat\s+[\w./${}"' -]+)?\s*$/.exec(script);
+  // Only a negative process wait, optionally guarded by a literal read-only
+  // grep, with a sleep-only body and read-only output. Never evaluate the shell.
+  const grep = String.raw`(?:grep\s+-q\s+(?:"[\w .|\\:-]+"|'[\w .|\\:-]+')\s+[\w./-]+\s+2>\s*/dev/null\s*&&\s*)?`;
+  const wait = String.raw`!\s+pgrep\s+-f\s+(?:'([\w./-]+)'|"([\w./-]+)")\s*>\s*/dev/null;\s*do\s+sleep\s+[1-9]\d*;\s*done`;
+  const output = String.raw`(?:;\s*(?:cat\s+[\w./\${}"' -]+|tail\s+(?:-[1-9]\d*|-n\s+[1-9]\d*)\s+[\w./-]+))?`;
+  const match = new RegExp(String.raw`^\s*until\s+${grep}${wait}\s*${output}\s*$`).exec(script);
   if (!match) return null;
-  try { return new RegExp(match[1]); } catch { return null; }
+  try { return new RegExp(match[1] ?? match[2]); } catch { return null; }
 }
 
 export async function readProcesses() {

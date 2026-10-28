@@ -32,6 +32,23 @@ test('requires a sole self match and harmless children within the actual process
   assert.deepEqual(findSelfWaits([root, poll, sleeper, row(4, 99, ['sh', 'watchdog/example.sh'], { namespace: 'other' })], 1), [poll]);
 });
 
+test('recognizes literal report guards, double-quoted process patterns and read-only tails', () => {
+  const command = 'until grep -q "TESTS PASSED\\|FAIL\\|Error" /tmp/final-through.log 2>/dev/null && ! pgrep -f "test-report-through-pa31" >/dev/null; do sleep 5; done; tail -1 /tmp/final-through.log';
+  assert(pollingPattern(['/bin/bash', '-c', command]));
+  const quoted = "'" + command.replaceAll("'", "'\"'\"'") + "'";
+  const wrapped = `source snapshot || true && eval ${quoted} < /dev/null && pwd -P >| /tmp/claude-79f1-cwd`;
+  const waiter = row(2, 1, ['/bin/bash', '-c', wrapped]);
+  assert.deepEqual(findSelfWaits([root, waiter, sleeper], 1), [waiter]);
+  assert.deepEqual(findSelfWaits([root, waiter, sleeper,
+    row(4, 99, ['make', 'test-report-through-pa31'])], 1), []);
+  for (const unsafe of [
+    command.replace('grep -q', 'touch marker && grep -q'),
+    command.replace('TESTS PASSED', '$(touch marker)'),
+    command.replace('do sleep 5;', 'do make build; sleep 5;'),
+    command + '; rm /tmp/marker',
+  ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
+});
+
 test('successful result warns, rechecks, and cancels only the proven loop and its sleep', async () => {
   const events = [], signals = [];
   const guard = createClaudeResponseWatchdog({ rootPid: 1, graceMs: 5,

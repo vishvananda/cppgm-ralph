@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-test('a successful response with a self-wait returns to goal verification and external checks',
+for (const guarded of [false, true]) test(`a successful response with a ${guarded ? 'report-guarded' : 'simple'} self-wait returns to goal verification and external checks`,
   { skip: process.platform !== 'linux' }, t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-response-watchdog-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -20,6 +20,12 @@ test('a successful response with a self-wait returns to goal verification and ex
     git('add', '.'); git('commit', '-qm', 'fixture');
     execFileSync('git', ['init', '--bare', '-q', path.join(root, 'remote.git')]);
     git('remote', 'add', 'origin', path.join(root, 'remote.git')); git('push', '-qu', 'origin', 'HEAD');
+    const marker = `unique-watchdog-${path.basename(root)}/sweep.sh`;
+    const report = path.join(root, 'through.log');
+    fs.writeFileSync(report, '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) =====\n');
+    const pollCommand = guarded
+      ? `until grep -q "TESTS PASSED\\|FAIL\\|Error" ${report} 2>/dev/null && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -1 ${report}`
+      : `until ! pgrep -f '${marker}' >/dev/null; do sleep 30; done`;
     fs.writeFileSync(check, `#!/bin/sh
 if test -f '${complete}'; then
   echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='; exit 0
@@ -35,7 +41,7 @@ const emit=e=>process.stdout.write(JSON.stringify({session_id:'watchdog-fixture'
 if (input==='/goal clear') { console.log(JSON.stringify({result:'cleared'})); process.exit(0); }
 emit({type:'system',subtype:'init'});
 emit({type:'assistant',message:{content:[{type:'text',text:'Ready to hand off.'}]}});
-const poll=spawn('/bin/bash',['-c',"until ! pgrep -f 'unique-watchdog-${path.basename(root)}/sweep.sh' >/dev/null; do sleep 30; done"],{stdio:'ignore'});
+const poll=spawn('/bin/bash',['-c',${JSON.stringify(pollCommand)}],{stdio:'ignore'});
 setTimeout(()=>emit({type:'result',subtype:'success',is_error:false,result:'Work complete'}),100);
 poll.on('exit',()=>{
   fs.writeFileSync(${JSON.stringify(complete)},'complete');
