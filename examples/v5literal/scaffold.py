@@ -149,6 +149,7 @@ pub mod translated;
     for directory in (control, root / 'scripts/clone'):
         settings = json.loads((directory / 'settings.json').read_text())
         settings['source_map_path'] = 'port/source-map.tsv'
+        settings['state_dir'] = str(base / '.ralph' / (NAME + '-gpt-6.1-sol-high'))
         module.json_file(directory / 'settings.json', settings)
     module.write(root / 'scripts/port_check.py', f'''#!/usr/bin/env python3
 import os

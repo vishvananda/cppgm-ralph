@@ -63,6 +63,11 @@ def main():
     root = base / 'v5literal'; control = base / 'v5literal-control'
     python = control / 'venv/bin/python'; report = base / 'private/v5literal/artifacts/setup-verification'
     report.mkdir(parents=True, exist_ok=True)
+    expected_state = str(Path(config['stateBaseDir']) / (config['name'] + '-' + config['model'] + '-' + config['reasoningEffort']))
+    for directory in (control, root / 'scripts/clone'):
+        settings = json.loads((directory / 'settings.json').read_text())
+        if settings['state_dir'] != expected_state:
+            raise RuntimeError(f'{directory}: preservation must use this run\'s own state')
     if 'CODEX_HOME' in (control / 'codex-v5literal').read_text():
         raise RuntimeError('launcher must use normal shared Codex authentication')
     command([python, '-m', 'unittest', 'discover', '-s', control, '-p', 'test_*.py'], cwd=root, log=report / 'harness.log')
