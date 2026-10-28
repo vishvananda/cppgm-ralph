@@ -32,11 +32,13 @@ reads under `dev/src/`; collect them in `dev/bin/` and pass typed options.
 The companion file audit is authoritative for source
 limits; passing Clippy alone is insufficient.
 
-Select a finite substantial batch with closure criteria: a whole source owner,
-or several related mechanisms for a larger owner. Continue beyond isolated fixes.
+Use the next incomplete C++ file in the ledger as the goal boundary. Reconcile
+valid prior reviews and finish all remaining mechanisms, helpers and integration.
+Commit intermediate checkpoints without ending the goal; a partial file is not
+closure. Certify the whole owner only after honest review and affected checks pass.
 Up to three read-only reviewers cover disjoint ranges; the parent edits and
 certifies. Use focused tests, clone_quality.py --review and evidence checkpoints
-between repairs. Refresh full prior/quality once after batch stabilization; Ralph
+between repairs. Refresh full prior/quality once when the whole owner is ready; Ralph
 runs boundary gates. The final strict snapshot still requires valid receipts.
 Keep one compact ledger. Raw cases stay
 in artifacts and previous plans in Git. Add broad probes/resource studies only for a changed

@@ -125,10 +125,11 @@ receipts. Use substantial milestones for full-suite refreshes while work remains
 final acceptance still requires every normal gate and the strict snapshot below.
 Scaling studies are due when allocation or repeated-work behavior changes.
 Translate C++ algorithms, persistent state and execution order before optional
-Rust restructuring. Select a finite substantial batch with explicit closure
-criteria: normally a whole source owner, or several related mechanisms for a
-larger owner. Continue beyond isolated fixes, using focused checks between repairs
-and one broad prior/full-quality refresh after the batch stabilizes. Ralph runs
+Rust restructuring. The next incomplete C++ file in the ledger is the native
+goal boundary. Reconcile valid earlier reviews and finish every remaining
+mechanism, helper and integration contract. Intermediate commits keep the goal
+active; partial-file handoffs are insufficient. Use focused checks between repairs
+and one broad prior/full-quality refresh when the whole owner is ready. Ralph runs
 the boundary stage/course/preservation/release gates; workers should not duplicate
 them or repeat release/debug probes for known incomplete source ownership. A
 handoff may finish before stage acceptance; only full review certifies an owner.

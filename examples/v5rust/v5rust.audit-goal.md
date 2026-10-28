@@ -1,14 +1,13 @@
-Complete a substantial source-faithful parity handoff for {{testStage}}, following
-the current prompt, contract and ledger. Translate the selected C++ dependency
-group's algorithm, persistent state and execution order into safe Rust before
-optional redesign. Select a finite whole-owner batch, or several related mechanisms
-for a larger owner, with explicit closure criteria. Continue beyond isolated fixes;
-certify only fully reviewed responsibilities and queue unrelated discoveries.
-Use focused checks during iteration, one broad prior/full quality refresh after
-batch stabilization, and Ralph's boundary gates. Record bootstrap probes without
-claiming PA34 acceptance. Commit, leave clean and return the closure/evidence delta.
-This handoff can finish while the assignment remains open; all full-stage
-source, course, prior, quality, release/debug and bootstrap gates remain required
-for advancement. Do not reset goals, alter the oracle or weaken comparison policy.
+Close the next incomplete C++ source file identified by the {{testStage}} ledger.
+Translate/review its entire algorithm, persistent state, helpers and integration
+against the frozen reference. Reconcile valid previous reviews and finish all
+remaining mechanisms; do not end this goal for a subset, first fix or elapsed time.
+Commit intermediate checkpoints and continue. Use focused validation while the
+owner is open, one broad prior/full quality refresh when it is ready to close,
+and Ralph's boundary gates. Complete the goal only after the whole selected owner
+is honestly marked complete, affected checks pass and the checkout is committed
+and clean. Other owners may remain open; no partial-file handoff or unsupported
+certification. All stage/source/course/prior/quality/release/bootstrap gates remain
+required. Never reset goals, edit Ralph state or weaken frozen comparison policy.
 
 {{modelValidation}}

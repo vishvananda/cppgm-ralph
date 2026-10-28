@@ -5,8 +5,9 @@ Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
 Read the current spec/contract, handout and compact ledger. Review every change
-since its last-audited tip as one substantial dependency batch against the frozen
-C++ owners and Rust source map; do not split adjacent mechanisms into tiny handoffs.
+since its last-audited tip against the entire C++ owner and Rust source map.
+Verify whole-owner closure, including remaining helpers and integration; reconcile
+current prior reviews rather than restart them. A reviewed subset cannot end the goal.
 Historical reports supply evidence, not new checklists. Trace the reference algorithm and persistent-state lifecycle, then
 failure/rollback, exact numbers/diagnostics, demand and emission order. Check
 algorithmic completeness, lifetimes and bounded work; no compiler fallback, shortcuts,
@@ -23,7 +24,7 @@ Use up to three read-only reviewers on disjoint owners; the parent owns edits
 and certification. Use focused controls and clone_quality.py --review while
 findings remain. Record open review work with clone_evidence.py checkpoint
 {{testStage}} --out PATH; it neither requires nor replaces final acceptance.
-Refresh invalidated prior/full quality once after the whole batch stabilizes.
+Refresh invalidated prior/full quality once when the whole owner is ready to close.
 Ralph runs stage/course/preservation and release checks at the boundary; do not
 duplicate them or repeat release/debug probes for known source incompleteness.
 Protected successful
@@ -38,7 +39,8 @@ object/tool and fixed-path bootstrap proof; never substitute C++ objects.
 Replace the compact ledger with reviewed tip, findings/fixes, evidence delta
 and next groups; retain history in Git and raw artifacts. Advance last-audited
 tip only to reviewed implementation. Commit and leave clean, complete Ralph's
-existing native goal and return. This audit need not complete the assignment.
+existing native goal only after honest whole-owner closure and affected checks pass.
+Other source owners may remain open; partial-file closure is insufficient.
 Never create/reset goals or edit protected policy or Ralph state.
 
 {{modelValidation}}
