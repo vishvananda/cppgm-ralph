@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildSystemdScopeSpawn,
   buildSystemdScopeUnitName,
+  normalizeCpuQuota,
   stopSystemdScope,
 } from "../systemd-scope.js";
 
@@ -43,6 +44,18 @@ test("resource-limited commands use a uniquely addressable killable scope", () =
   assert.ok(wrapped.args.includes("SendSIGKILL=yes"));
   assert.ok(wrapped.args.includes("TimeoutStopSec=1.5s"));
   assert.deepEqual(wrapped.args.slice(-3), ["--", "agent", "--turn"]);
+});
+
+test("CPU quota is optional, validated and applies to the whole resource scope", () => {
+  assert.equal(normalizeCpuQuota(null), null);
+  assert.equal(normalizeCpuQuota('200%'), '200%');
+  assert.equal(normalizeCpuQuota('12.5%'), '12.5%');
+  for (const value of [0, 2, '0%', '-1%', '200', 'Infinity%', '200%;MemoryMax=infinity']) {
+    assert.throws(() => normalizeCpuQuota(value), /positive percentage/);
+  }
+  const config = { memoryMax: '1G', memorySwapMax: '0', cpuQuota: '200%' };
+  assert(buildSystemdScopeSpawn('true', [], config).args.includes('CPUQuota=200%'));
+  assert(!buildSystemdScopeSpawn('true', [], { ...config, cpuQuota: null }).args.some(arg => arg.startsWith('CPUQuota=')));
 });
 
 test("scope cleanup accepts an already-collected unit and rejects other failures", async () => {

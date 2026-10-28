@@ -15,6 +15,8 @@ export function buildSystemdScopeSpawn(command, args, config, options = {}) {
     "SendSIGKILL=yes",
     `TimeoutStopSec=${cleanupTimeoutSec}s`,
   ];
+  const cpuQuota = normalizeCpuQuota(config.cpuQuota);
+  if (cpuQuota) props.push(`CPUQuota=${cpuQuota}`);
   const scopeArgs = [
     "--user",
     "--scope",
@@ -28,6 +30,15 @@ export function buildSystemdScopeSpawn(command, args, config, options = {}) {
   }
   scopeArgs.push("--", command, ...args);
   return { command: "systemd-run", args: scopeArgs, unitName };
+}
+
+export function normalizeCpuQuota(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || !/^\d+(?:\.\d+)?%$/.test(value) ||
+      !Number.isFinite(Number(value.slice(0, -1))) || Number(value.slice(0, -1)) <= 0) {
+    throw new Error('resourceLimits.cpuQuota must be a positive percentage, such as "200%" for two CPUs');
+  }
+  return value;
 }
 
 export function buildSystemdScopeUnitName(options = {}) {

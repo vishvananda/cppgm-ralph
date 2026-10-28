@@ -235,6 +235,12 @@
     "memoryMax": "64G",
     "memorySwapMax": "0",
     "oomGroup": false,
-    "cleanupTimeoutSec": 2
+    "cleanupTimeoutSec": 2,
+    "cpuQuota": "200%"
+  },
+  "progressModel": {
+    "kind": "source-files",
+    "stage": "pa33",
+    "total": 408
   }
 }

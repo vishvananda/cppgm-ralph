@@ -543,6 +543,8 @@ RALPH_CONFIG=/path/to/cppgm-run.config.json npm run ralph
 - `resourceLimits`
   Default: enabled with the `systemd-run` backend, `memoryMax: "64G"`,
   `memorySwapMax: "0"`, `oomGroup: false`, and `cleanupTimeoutSec: 2`.
+  Optional `cpuQuota: "200%"` caps aggregate CPU time at two CPUs across all
+  descendants of each provider/check scope; the default has no CPU quota.
   Each limited provider or check process runs in a uniquely named transient
   user scope. Ralph explicitly stops that scope when the direct runner exits,
   so detached or session-leader descendants cannot outlive the attempt. Scope

@@ -25,6 +25,10 @@ passed. Source batches drive implementation/checkpoint reviews; all original
 PA1–PA33 differential/course/debug checks become mandatory for final closure.
 PA34 then proves clean C1==C2==CR==C3 and rebuilt suites. PA35 is excluded.
 
+The viewer uses a separate source-file completion chart rather than PA cost
+milestones. Provider/check scopes have a two-CPU quota (`200%`); Cargo and course
+checks use two jobs. Elapsed build times reflect that limit.
+
 The literal audit replaces safe/idiomatic-port style, file/function size and
 phase-dependency rules. It retains formatting, correctness lints, unsafe docs,
 source correspondence and the unchanged exact comparator/stack qualification.

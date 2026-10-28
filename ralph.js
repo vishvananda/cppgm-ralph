@@ -42,6 +42,7 @@ import {
 } from "./provider-limit-wait.js";
 import {
   buildSystemdScopeSpawn,
+  normalizeCpuQuota,
   stopSystemdScope,
 } from "./systemd-scope.js";
 import "./ralph-viz/test-progress-evidence.js";
@@ -222,6 +223,7 @@ const DEFAULT_CONFIG = {
     // while still tripping on a genuine runaway.
     memoryMax: "64G",
     memorySwapMax: "0",
+    cpuQuota: null,
     oomGroup: false,
     cleanupTimeoutSec: 2,
   },
@@ -383,6 +385,7 @@ async function main() {
     log(
       `Resource limits: ${active ? "active" : "requested but unavailable (running unbounded)"} ` +
         `(memoryMax=${CONFIG.resourceLimits.memoryMax}, ` +
+          (CONFIG.resourceLimits.cpuQuota ? `cpuQuota=${CONFIG.resourceLimits.cpuQuota}, ` : "") +
         `oomGroup=${CONFIG.resourceLimits.oomGroup ? "on" : "off"}, ` +
         `cleanupTimeout=${CONFIG.resourceLimits.cleanupTimeoutSec}s)`,
     );
@@ -9793,6 +9796,7 @@ function normalizeResourceLimits(value) {
     enabled: parseBoolean(value.enabled, defaults.enabled),
     backend: value.backend ? String(value.backend) : defaults.backend,
     memoryMax: value.memoryMax ? String(value.memoryMax) : defaults.memoryMax,
+    cpuQuota: normalizeCpuQuota(value.cpuQuota ?? defaults.cpuQuota),
     memorySwapMax:
       value.memorySwapMax != null
         ? String(value.memorySwapMax)

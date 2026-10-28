@@ -121,6 +121,8 @@ def main():
         else:
             shutil.copy2(source, target)
     module.workspace()
+    cargo_config = root / '.cargo/config.toml'
+    cargo_config.write_text(cargo_config.read_text().replace('[build]\n', '[build]\njobs = 2\n', 1))
     cargo = root / 'dev/Cargo.toml'
     text = cargo.read_text().replace('unsafe_code = "forbid"', 'unsafe_code = "allow"\nunsafe_op_in_unsafe_fn = "deny"')
     start = text.index('[workspace.lints.clippy]'); end = text.index('[[bin]]', start)
@@ -149,6 +151,7 @@ pub mod translated;
     for directory in (control, root / 'scripts/clone'):
         settings = json.loads((directory / 'settings.json').read_text())
         settings['source_map_path'] = 'port/source-map.tsv'
+        settings['course_workers'] = 2
         settings['state_dir'] = str(base / '.ralph' / (NAME + '-gpt-6.1-sol-high'))
         module.json_file(directory / 'settings.json', settings)
     module.write(root / 'scripts/port_check.py', f'''#!/usr/bin/env python3
@@ -246,9 +249,11 @@ course-pa%:
     config = json.loads((BASE_EXAMPLE / 'v5rust.config.json').read_text())
     config.update(baseDir=str(base), workdir=str(base / NAME), name=NAME,
                   initialStage='pa33', stopAfterStage='pa34', maxTurns=1000,
+                  progressModel={'kind': 'source-files', 'stage': 'pa33', 'total': len(source_inventory['sources'])},
                   testCommand=port + ' inventory', checks=checks,
                   codexPath=str(control / ('codex-' + NAME)), stateBaseDir=str(base / '.ralph'))
     config['sessionIsolation']['privateWriteDir'] = str(private)
+    config['resourceLimits']['cpuQuota'] = '200%'
     config['phases'] = [
         {'name': 'implement', 'promptTemplate': 'implement', 'goalTemplate': 'implement-goal',
          'promptTemplates': {'pa34': 'pa34-implement'}, 'goalTemplates': {'pa34': 'pa34-implement-goal'},
