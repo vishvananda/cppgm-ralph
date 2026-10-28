@@ -1,0 +1,240 @@
+{
+  "baseDir": "/home/vishvananda/work",
+  "workdir": "/home/vishvananda/work/v5literal",
+  "useExistingWorkdir": true,
+  "name": "v5literal",
+  "assignmentLayout": "v5",
+  "provider": "codex",
+  "testCommand": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py inventory",
+  "checks": {
+    "preflight": {
+      "command": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py preflight",
+      "required": true
+    },
+    "sourceFiles": {
+      "command": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py inventory",
+      "required": false,
+      "primary": true,
+      "kind": "test",
+      "targetStage": "pa33",
+      "dependsOn": [
+        "preflight"
+      ],
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "rustQuality": {
+      "command": "python3 /home/vishvananda/work/v5literal-control/clone_quality.py --review",
+      "required": true,
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "sourceProgress": {
+      "command": "ralph:current-stage-progress sourceFiles {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "rustQuality"
+      ],
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "sourceProgressPreserved": {
+      "command": "ralph:current-stage-progress sourceFiles {{testStage}} mode=preserve",
+      "required": true,
+      "dependsOn": [
+        "rustQuality"
+      ],
+      "excludeStages": [
+        "pa34"
+      ]
+    },
+    "sourceComplete": {
+      "command": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py inventory",
+      "required": true,
+      "primary": true,
+      "kind": "test",
+      "targetStage": "pa33",
+      "onlyStages": [
+        "pa33"
+      ],
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "fullParity": {
+      "command": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py final",
+      "required": true,
+      "onlyStages": [
+        "pa33"
+      ],
+      "dependsOn": [
+        "sourceComplete"
+      ]
+    },
+    "bootstrapProgress": {
+      "command": "python3 /home/vishvananda/work/v5literal-control/clone_check.py stage pa34",
+      "required": false,
+      "onlyStages": [
+        "pa34"
+      ],
+      "primary": true,
+      "kind": "test",
+      "targetStage": "pa34",
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "bootstrapRustQuality": {
+      "command": "python3 /home/vishvananda/work/v5literal-control/clone_quality.py",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "preflight"
+      ]
+    },
+    "bootstrapProof": {
+      "command": "python3 /home/vishvananda/work/v5literal-control/clone_bootstrap.py --final",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "bootstrapProgress",
+        "bootstrapRustQuality",
+        "bootstrapSourceReview"
+      ]
+    },
+    "bootstrapAdvance": {
+      "command": "ralph:current-stage-progress bootstrapProgress {{testStage}}",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "rustQuality"
+      ]
+    },
+    "bootstrapPreserved": {
+      "command": "ralph:current-stage-progress bootstrapProgress {{testStage}} mode=preserve",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "rustQuality"
+      ]
+    },
+    "bootstrapSourceReview": {
+      "command": "/home/vishvananda/work/v5literal-control/venv/bin/python /home/vishvananda/work/v5literal-control/port_check.py correspondence",
+      "required": true,
+      "onlyStages": [
+        "pa34"
+      ],
+      "dependsOn": [
+        "preflight"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "promptTemplates": {
+        "pa34": "pa34-implement"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-implement-goal"
+      },
+      "checkpointOnRequiredChecks": true,
+      "checkpointPhase": "checkpointAudit",
+      "checkpointPhaseEvery": 3,
+      "checks": [
+        "preflight",
+        "sourceFiles",
+        "bootstrapProgress",
+        "rustQuality",
+        "sourceProgress",
+        "bootstrapAdvance"
+      ]
+    },
+    {
+      "name": "checkpointAudit",
+      "promptTemplate": "checkpointAudit",
+      "goalTemplate": "checkpointAudit-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "preflight",
+        "sourceFiles",
+        "bootstrapProgress",
+        "rustQuality",
+        "sourceProgressPreserved",
+        "bootstrapPreserved"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "promptTemplates": {
+        "pa34": "pa34-audit"
+      },
+      "goalTemplates": {
+        "pa34": "pa34-audit-goal"
+      },
+      "runWhenChecksPass": true,
+      "checks": [
+        "preflight",
+        "sourceComplete",
+        "fullParity",
+        "bootstrapProgress",
+        "bootstrapRustQuality",
+        "bootstrapSourceReview",
+        "bootstrapProof"
+      ]
+    }
+  ],
+  "extraStages": [
+    "pa34"
+  ],
+  "initialStage": "pa33",
+  "stopAfterStage": "pa34",
+  "maxTurns": 1000,
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "high",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true,
+    "privateWriteDir": "/home/vishvananda/work/private/v5literal",
+    "privateWriteMaxBytes": 107374182400
+  },
+  "additionalDirectories": [],
+  "outputTailChars": 24000,
+  "codexPath": "/home/vishvananda/work/v5literal-control/codex-v5literal",
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run",
+  "resourceLimits": {
+    "enabled": true,
+    "backend": "systemd-run",
+    "memoryMax": "64G",
+    "memorySwapMax": "0",
+    "oomGroup": false,
+    "cleanupTimeoutSec": 2
+  }
+}

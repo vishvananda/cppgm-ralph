@@ -240,7 +240,7 @@ def course(stage, target="test"):
 
 
 def ownership_complete():
-    lines = (ROOT / "docs/port/source-map.tsv").read_text().splitlines()
+    lines = (ROOT / SETTINGS.get("source_map_path", "docs/port/source-map.tsv")).read_text().splitlines()
     pending = []
     for line in lines[1:]:
         fields = line.split("\t")
