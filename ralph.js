@@ -7014,9 +7014,11 @@ class ClaudeExec {
         commandArgs.push("--append-system-prompt-file", appendSystemPromptTempPath);
       }
     }
-    if (args.webSearchEnabled === false) {
-      commandArgs.push("--disallowed-tools", "WebSearch");
-    }
+    // Fallback alarms keep print mode alive after its final response, blocking
+    // Ralph's external checks. Ralph owns retry and turn scheduling.
+    const disallowedTools = ["ScheduleWakeup"];
+    if (args.webSearchEnabled === false) disallowedTools.push("WebSearch");
+    commandArgs.push("--disallowed-tools", disallowedTools.join(","));
 
     const child = spawnTracked(this.claudePath, commandArgs, {
       cwd: args.workingDirectory || process.cwd(),

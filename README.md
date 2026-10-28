@@ -60,6 +60,10 @@ initial incomplete sentinel emitted while installing `/goal` is ignored. Set
 `claudeCompactOnIncompleteGoal` to `false` to retain Claude's native immediate
 continuation behavior.
 
+Ralph disables Claude's `ScheduleWakeup` tool: fallback alarms can otherwise
+keep a completed print session open until they fire. Ralph owns turn scheduling
+and retries; background shell commands still finish through the normal task flow.
+
 After a successful Claude response, 60 seconds without further model activity
 while its process remains open produces a background-task warning. On Linux,
 Ralph stops only a verified `until ! pgrep -f ...; do sleep ...; done` loop
