@@ -92,10 +92,7 @@ def main():
     run(python, HERE / 'verify.py', '--base', base)
     if not args.no_remote:
         run('gh', 'repo', 'create', remote, '--private', '--source', root, '--remote', 'origin')
-        run('git', 'remote', 'set-url', 'origin', 'https://github.com/' + remote + '.git', cwd=root)
-        run('git', 'config', '--local', 'url.https://github.com/' + remote + '.git.insteadOf', 'https://github.com/' + remote + '.git', cwd=root)
-        run('git', 'config', '--local', '--add', 'credential.https://github.com.helper', '', cwd=root)
-        run('git', 'config', '--local', '--add', 'credential.https://github.com.helper', '!gh auth git-credential', cwd=root)
+        run('git', 'remote', 'set-url', 'origin', 'git@github.com:' + remote + '.git', cwd=root)
         run('git', 'push', '-u', 'origin', 'main', cwd=root)
     print('Scaffold complete, committed and unstarted:', root)
 

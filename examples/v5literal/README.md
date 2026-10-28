@@ -69,5 +69,5 @@ bounded source translation or independent source review, not an entire compiler.
 
 The GitHub Actions configuration is saved as `ci/rust.yml` in the run and
 `rust.yml` in this example. Local verification runs the checks. Enabling Actions
-requires copying the template into `.github/workflows/` with workflow-authorized
-credentials; the current GitHub OAuth credential cannot publish that path.
+requires copying the template into `.github/workflows/`. Git fetches and pushes
+use the host's default forwarded SSH agent without a per-run credential helper.
