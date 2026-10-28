@@ -285,7 +285,7 @@ def configuration():
     config = {"baseDir": str(BASE), "workdir": str(BASE / "v5rust"), "useExistingWorkdir": True,
               "name": "v5rust", "assignmentLayout": "v5", "provider": "codex",
               "testCommand": checker + " stage paX", "checks": checks, "phases": phases,
-              "extraStages": ["pa34"], "initialStage": "pa1", "stopAfterStage": "pa34", "maxTurns": 500,
+              "extraStages": ["pa34"], "initialStage": "pa1", "stopAfterStage": "pa34", "maxTurns": 600,
               "stateBaseDir": str(BASE / ".ralph"), "model": "gpt-6.1-sol", "reasoningEffort": "high",
               "sandboxMode": "danger-full-access", "approvalPolicy": "never", "networkAccessEnabled": True,
               "webSearchEnabled": True, "sessionIsolation": {"enabled": True, "backend": "bwrap",

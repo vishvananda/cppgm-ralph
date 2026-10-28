@@ -169,7 +169,7 @@
   ],
   "initialStage": "pa1",
   "stopAfterStage": "pa34",
-  "maxTurns": 500,
+  "maxTurns": 600,
   "stateBaseDir": "/home/vishvananda/work/.ralph",
   "model": "gpt-6.1-sol",
   "reasoningEffort": "high",

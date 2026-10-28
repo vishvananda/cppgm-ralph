@@ -1,4 +1,4 @@
-Translate one coherent frozen C++ mechanism for {{testStage}} into safe Rust.
+Translate a substantial frozen C++ dependency batch for {{testStage}} into safe Rust.
 
 {{briefState}}
 Results: {{testStatusSummary}}
@@ -12,11 +12,12 @@ IDs/owned stores; defer optional redesign. Temporary borrowing facades must not
 reset persistent state. Work from C++ source rather than reconstructing behavior
 from fixtures. Preserve the existing optimizer/backend policy and safe Rust rules.
 
-Select a finite dependency group, fix shared producers before consumers, and finish
-it before switching scope. Queue unrelated discoveries. Use up to three read-only
-reviewers on disjoint selected ranges; the parent edits and certifies. A first
-passing case is not a completed mechanism, and partial work is not a complete
-source-map responsibility.
+Select a finite batch with explicit closure criteria: normally a whole source
+owner, or several related mechanisms when the owner is larger. Fix shared
+producers before consumers; continue through the selected mechanisms after each
+repair. One passing case or isolated fix is not the default handoff boundary.
+Queue unrelated discoveries. Up to three read-only reviewers cover disjoint
+ranges; the parent edits and certifies only fully reviewed source responsibilities.
 
 Iterate with affected fixtures and a few controls for changed invariants, plus
 clone_quality.py --review. Do not routinely expand mode matrices, stack campaigns
@@ -26,11 +27,12 @@ During PA33, clone_bootstrap_probe.py --limit 4 is an isolated diagnostic, never
 PA34 acceptance; reuse recorded results and reduce the first divergent boundary.
 
 Use clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE during
-open work. Run stage/course/prior/full quality and preservation after a coherent
-handoff stabilizes, reusing only valid content-bound successes. Full assignment
-acceptance additionally requires release/debug/bootstrap and all source owners;
-the strict snapshot remains required. No per-fix full sweeps, copied receipt trees,
-hardcoded handoff validators or relaxed oracle/fixture/comparison policy.
+open work. Refresh broad prior/full quality once when the selected batch stabilizes,
+reusing valid content-bound successes. Ralph runs stage/course/preservation and
+release checks at the boundary; do not duplicate them or repeat release/debug
+probes while known source incompleteness blocks acceptance. Final acceptance still
+requires every stage/release/bootstrap gate, source owner and strict snapshot.
+No per-fix full sweeps, copied receipts, hardcoded validators or relaxed comparison.
 
 Replace the ledger with selected owners, state mapping, finite findings,
 closed/reopened responsibilities, evidence and the next dependency. Raw controls

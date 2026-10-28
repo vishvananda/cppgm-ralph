@@ -5,7 +5,8 @@ Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
 Read the current spec/contract, handout and compact ledger. Review every change
-since its last-audited tip against the frozen C++ owners and Rust source map.
+since its last-audited tip as one substantial dependency batch against the frozen
+C++ owners and Rust source map; do not split adjacent mechanisms into tiny handoffs.
 Historical reports supply evidence, not new checklists. Trace the reference algorithm and persistent-state lifecycle, then
 failure/rollback, exact numbers/diagnostics, demand and emission order. Check
 algorithmic completeness, lifetimes and bounded work; no compiler fallback, shortcuts,
@@ -22,7 +23,10 @@ Use up to three read-only reviewers on disjoint owners; the parent owns edits
 and certification. Use focused controls and clone_quality.py --review while
 findings remain. Record open review work with clone_evidence.py checkpoint
 {{testStage}} --out PATH; it neither requires nor replaces final acceptance.
-Refresh full invalidated checks once at the handoff. Protected successful
+Refresh invalidated prior/full quality once after the whole batch stabilizes.
+Ralph runs stage/course/preservation and release checks at the boundary; do not
+duplicate them or repeat release/debug probes for known source incompleteness.
+Protected successful
 prior/quality receipts may be reused only with identical keys and intact raw
 logs. Current-stage and case-preservation checks still execute; --fresh forces
 new observations. Do not repeat unchanged suites solely to review a handoff.

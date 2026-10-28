@@ -125,10 +125,13 @@ receipts. Use substantial milestones for full-suite refreshes while work remains
 final acceptance still requires every normal gate and the strict snapshot below.
 Scaling studies are due when allocation or repeated-work behavior changes.
 Translate C++ algorithms, persistent state and execution order before optional
-Rust restructuring. Use a finite owner/dependency group, map its state and
-branches, fix shared lifecycle producers before consumers, and queue unrelated
-discoveries. A bounded audit handoff may finish while full stage acceptance is
-still open; only full source review can certify a responsibility.
+Rust restructuring. Select a finite substantial batch with explicit closure
+criteria: normally a whole source owner, or several related mechanisms for a
+larger owner. Continue beyond isolated fixes, using focused checks between repairs
+and one broad prior/full-quality refresh after the batch stabilizes. Ralph runs
+the boundary stage/course/preservation/release gates; workers should not duplicate
+them or repeat release/debug probes for known incomplete source ownership. A
+handoff may finish before stage acceptance; only full review certifies an owner.
 
 During PA33, `python3 scripts/clone/clone_bootstrap_probe.py --limit 4` compares
 a bounded prefix of the frozen PA34 source inventory and stops at the first

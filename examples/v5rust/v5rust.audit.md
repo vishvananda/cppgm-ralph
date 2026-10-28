@@ -1,4 +1,4 @@
-Complete one bounded source-faithful parity batch for {{testStage}}.
+Complete a substantial source-faithful parity batch for {{testStage}}.
 
 {{briefState}}
 Results: {{testStatusSummary}}
@@ -10,11 +10,12 @@ phase transitions, query/short-circuit order, queue traversal and cache boundari
 Adapt pointers to safe Rust IDs/stores; defer optional redesign and optimization.
 A temporary borrowing facade must retain the C++ owner's persistent state.
 
-Select a finite dependency group from the ledger. Map its C++ functions, branches
-and state to Rust before editing. Start with shared lifecycle discrepancies before
-patching their consumers. Record the group's entry/exit state and concrete remaining
-findings; finish that group before starting another. Follow a dependency needed for
-its repair, but queue unrelated discoveries instead of expanding the current audit.
+Select a finite batch with explicit closure criteria: normally a whole source
+owner, or several related mechanisms when the owner is larger. Map C++ functions,
+branches and entry/exit state to Rust. Fix shared lifecycle producers before
+consumers; continue through the selected mechanisms after each repair. One isolated
+fix is not the default handoff boundary. Follow necessary dependencies and queue
+unrelated discoveries instead of expanding the audit indefinitely.
 Use up to three read-only reviewers on disjoint ranges within the selected group;
 the parent owns edits, integration and source-map certification.
 
@@ -32,8 +33,10 @@ objects are isolated and confer no PA34 acceptance; all normal gates remain due.
 
 Iterate with focused checks and python3 scripts/clone_quality.py --review. Index
 open work using clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE.
-Refresh broad prior/quality checks once after a substantial group stabilizes, not
-between related repairs. Reuse only valid content-bound successful receipts.
+Refresh broad prior/full quality once when the selected batch stabilizes; reuse
+valid content-bound successes. Ralph runs stage/course/preservation and release
+checks at the boundary; do not duplicate them or repeat release/debug probes while
+known source incompleteness blocks acceptance. Keep focused checks between repairs.
 
 Close a source-map responsibility only after its entire selected C++ contract is
 translated/reviewed and affected checks pass. Report newly closed/reopened owners,
