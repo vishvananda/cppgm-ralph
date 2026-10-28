@@ -9,6 +9,9 @@ Compiler code belongs in `dev/src/`; entry points in `dev/bin/`. Keep reusable
 algorithms in their owning phase. Preserve typed facts, parse-once ownership,
 compact IDs, explicit demand and per-function backend lifetimes. Keep
 `docs/port/source-map.tsv` current. No unsafe code or C++ implementation fallback.
+Preserve the reference algorithm, state lifetimes, demand/short-circuit order
+and cache boundaries before optional redesign. Safe Rust ownership adapts the
+representation, not the execution lifecycle.
 
 Use `make build`, `make lint`, `make audit-rust`, `make test-paN` and
 `make course-paN`. Run earlier completed stages after a coherent change.

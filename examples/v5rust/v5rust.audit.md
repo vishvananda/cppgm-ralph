@@ -1,49 +1,52 @@
-Audit {{testStage}} for full stage acceptance.
+Complete one bounded source-faithful parity batch for {{testStage}}.
 
 {{briefState}}
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read AGENTS.md, CLONE_CONTRACT.md, spec.md, the full handout, source map and
-stage ledger. Audit all stage-owned C++ responsibilities, including behavior
-not exercised by current tests. Compare control flow, numeric rules, failures,
-diagnostics, order/tie-breaks and externally visible bytes. Do not certify a
-stage only because fixtures pass. Check that due compiler work runs in Rust;
-oracle tools may only perform the documented harness/evaluation roles.
+Read AGENTS.md, CLONE_CONTRACT.md, the current ledger and selected frozen C++
+owners. This is a translation: preserve the reference algorithm, state lifetime,
+phase transitions, query/short-circuit order, queue traversal and cache boundaries.
+Adapt pointers to safe Rust IDs/stores; defer optional redesign and optimization.
+A temporary borrowing facade must retain the C++ owner's persistent state.
 
-Use up to three read-only subagents on disjoint C++/Rust owner families.
-Require source ranges, concrete findings and minimal controls; keep edits,
-source-map certification and gate execution with the parent. Review substantial
-related groups, following shared producers and consumers before switching scope.
+Select a finite dependency group from the ledger. Map its C++ functions, branches
+and state to Rust before editing. Start with shared lifecycle discrepancies before
+patching their consumers. Record the group's entry/exit state and concrete remaining
+findings; finish that group before starting another. Follow a dependency needed for
+its repair, but queue unrelated discoveries instead of expanding the current audit.
+Use up to three read-only reviewers on disjoint ranges within the selected group;
+the parent owns edits, integration and source-map certification.
 
-Apply CLONE_CONTRACT.md's protected stack qualification to resource-limited
-audit probes. Require exact successful larger-stack results; native exhaustion
-cutoffs and diagnostic positions are not defects to reproduce or calibrate.
+Translate the full mechanism, including failure restoration and lazy demands, then
+validate affected consumers. Reuse focused controls; add a regression only for an
+uncovered invariant. Do not multiply every input across dump modes or run routine
+resource studies. Measure supported scales only for a concrete changed work bound.
+Use the protected stack qualification for actual exhaustion, never cutoff matching.
 
-Review the architecture and Rust idioms: parse once, typed facts and IDs,
-bounded transactional parsing, explicit demand, complete cache keys, owned
-storage, per-function backend lifetimes and deliberate target arithmetic.
-Enforce source/function/nesting limits, safe code, rustfmt and strict Clippy.
-Avoid fixture tailoring and blanket allowances. Fix findings and validate the
-fixes before accepting the stage; retain every previously passing case.
+During PA33, use python3 scripts/clone/clone_bootstrap_probe.py --limit 4 for a
+bounded diagnostic against frozen compiler sources. Reuse its recorded result until
+relevant code changes; --source selects a unit and --start-after continues the
+inventory. Reduce the first mismatch at its earliest compiler boundary. Diagnostic
+objects are isolated and confer no PA34 acceptance; all normal gates remain due.
 
-While the audit remains open, use focused regressions and
-python3 scripts/clone_quality.py --review. Index partial work with
-python3 scripts/clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE.
-This records current/stale evidence without acceptance or full-suite receipts.
-Do not freeze implementation for a full prior/quality run after each owner or
-small fix. Reserve broad checks for substantial audit milestones and final closure.
-Measure two supported scales only when allocation, repeated work or scaling
-changes; ordinary byte-parity fixes need focused equality controls.
+Iterate with focused checks and python3 scripts/clone_quality.py --review. Index
+open work using clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE.
+Refresh broad prior/quality checks once after a substantial group stabilizes, not
+between related repairs. Reuse only valid content-bound successful receipts.
 
-Before acceptance, run the exact stage gate, original course, all prior stages,
-full quality and applicable release/debug/bootstrap checks; then use the strict
-snapshot evidence command. Reuse success only with identical protected inputs
-and intact raw evidence. For PA33 close every implementation responsibility and
-unfinished production path. Preserve optimizer/backend policy; PA35 is excluded.
-Keep the current ledger compact: reviewed tip/owners, findings, evidence and next
-boundary. Retain history/raw logs, commit coherent fixes and leave clean.
-Complete Ralph's existing phase goal and return an evidence-backed handoff.
-Do not create/reset the goal, change acceptance policy or edit Ralph state.
+Close a source-map responsibility only after its entire selected C++ contract is
+translated/reviewed and affected checks pass. Report newly closed/reopened owners,
+remaining findings and the next dependency in one compact ledger; raw evidence and
+old plans stay in artifacts/Git. Commit a coherent checkpoint and leave clean.
+Complete Ralph's existing native handoff goal and return; a bounded audit handoff
+need not complete the assignment. Do not report an outstanding defect as accepted.
+
+Final stage acceptance still requires the exact stage, original course, all prior,
+full Rust quality, preservation and applicable release/debug/bootstrap checks plus
+the strict evidence snapshot. PA33 requires all source responsibilities; PA34
+requires C1==C2==CR==C3. Preserve the frozen oracle, cases, architecture and codegen.
+No unsafe/compiler fallback, output normalization, gate change, goal reset or Ralph
+state edit. PA35 optimization is excluded.
 
 {{modelValidation}}

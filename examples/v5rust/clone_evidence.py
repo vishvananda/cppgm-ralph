@@ -9,13 +9,22 @@ import os
 from pathlib import Path
 import resource
 import shutil
+import shlex
 import subprocess
 import sys
 import time
 
 import clone_common as common
 
-VERSION = 1
+VERSION = 2
+HOST_TOOLS = ('g++', 'gcc', 'cc', 'c++', 'ld', 'as', 'ar', 'ranlib', 'nm',
+              'objcopy', 'objdump', 'readelf', 'strip', 'addr2line', 'c++filt',
+              'make', 'git', 'perl', 'python3', 'cargo', 'rustc', 'rustfmt',
+              'clippy-driver', 'cargo-clippy', 'cargo-fmt', 'rustup', 'timeout',
+              'gdb', 'valgrind', 'uname', 'getconf', 'nproc', 'cmp', 'diff',
+              'find', 'sort', 'sed', 'awk', 'grep', 'head', 'tail', 'wc', 'tr',
+              'cut', 'cat', 'cp', 'mv', 'rm', 'mkdir', 'ln', 'touch', 'date',
+              'sha256sum', 'xargs', 'sh', 'bash', 'pkg-config', 'install', 'which')
 ENV_KEYS = ('PATH', 'RUSTFLAGS', 'RUSTDOCFLAGS', 'RUSTUP_TOOLCHAIN',
             'CPPGM_BUILD_HOST_CXX', 'CPPGM_STDLIB_FLAGS',
             'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CARGO_ENCODED_RUSTFLAGS',
@@ -68,13 +77,24 @@ def metadata_identity(roots):
     return digest.hexdigest()
 
 
-def host_identity():
-    """System header/library metadata detects installation changes on this host."""
+def executable_identity(environment):
+    """Bind tools actually used by validation, including PATH resolution/shadowing."""
     executables = {}
-    environment = common.clean_env()
-    for name in ('g++', 'gcc', 'cc', 'ld', 'as', 'perl', 'python3', 'cargo', 'rustc', 'rustfmt', 'clippy-driver'):
+    names = set(HOST_TOOLS)
+    for key in ('CC', 'CXX', 'AR', 'AS', 'LD', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CPPGM_BUILD_HOST_CXX'):
+        words = shlex.split(environment.get(key, ''))
+        if words:
+            names.add(words[0])
+    for name in sorted(names):
         path = shutil.which(name, path=environment.get('PATH'))
         executables[name] = None if path is None else [path, str(Path(path).resolve()), common.file_digest(path)]
+    return executables
+
+
+def host_identity():
+    """Bind build tools and system inputs without unrelated PATH-directory churn."""
+    environment = common.clean_env()
+    executables = executable_identity(environment)
     versions = {}
     for tool in ('rustc', 'cargo'):
         result = subprocess.run([tool, '-vV'], env=environment, capture_output=True, timeout=30, check=True)
@@ -82,7 +102,6 @@ def host_identity():
     sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], env=environment, text=True).strip())
     cargo = Path(common.clean_env()['CARGO_HOME'])
     return {'system': list(os.uname()), 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-            'tool_directories': metadata_identity(tuple(directory for directory in environment['PATH'].split(os.pathsep) if directory)),
             'headers_libraries': metadata_identity(('/usr/include', '/usr/lib/x86_64-linux-gnu', '/lib/x86_64-linux-gnu')),
             'rust_dependencies': metadata_identity((sysroot / 'bin', sysroot / 'lib', cargo / 'registry/src', cargo / 'git/checkouts',
                                                     common.CONTROL / 'venv/bin', common.CONTROL / 'venv/lib')),

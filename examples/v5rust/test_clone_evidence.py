@@ -16,6 +16,31 @@ import clone_quality
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_host_tool_identity_ignores_unrelated_tools_but_detects_replacement_and_shadowing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / 'first', root / 'second'
+            first.mkdir(); second.mkdir()
+            compiler = second / 'g++'
+            compiler.write_text('compiler-v1'); compiler.chmod(0o755)
+            environment = {'PATH': str(first) + ':' + str(second)}
+            before = evidence.executable_identity(environment)
+            unrelated = second / 'claude'
+            unrelated.write_text('new unrelated installation'); unrelated.chmod(0o755)
+            self.assertEqual(evidence.executable_identity(environment), before)
+            compiler.write_text('compiler-v2')
+            changed = evidence.executable_identity(environment)
+            self.assertNotEqual(changed, before)
+            shadow = first / 'g++'
+            shadow.write_text('compiler-v2'); shadow.chmod(0o755)
+            self.assertNotEqual(evidence.executable_identity(environment), changed)
+            custom = second / 'custom-compiler'
+            custom.write_text('custom-v1'); custom.chmod(0o755)
+            environment['CXX'] = 'custom-compiler -O3'
+            selected = evidence.executable_identity(environment)
+            custom.write_text('custom-v2')
+            self.assertNotEqual(evidence.executable_identity(environment), selected)
+
     def test_validation_path_is_pinned_without_changing_other_environment(self):
         with patch.dict(clone_common.SETTINGS, {'validation_path':'/configured/tools'}), \
                 patch.dict('os.environ', {'PATH':'/temporary/agent/tools'}):

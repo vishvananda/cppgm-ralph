@@ -1,52 +1,41 @@
-Implement a coherent exact-clone behavior batch for {{testStage}}.
+Translate one coherent frozen C++ mechanism for {{testStage}} into safe Rust.
 
 {{briefState}}
 Results: {{testStatusSummary}}
 Primary log: {{lastTestLogPath}}
 
-Read the current handout, spec, CLONE_CONTRACT.md and compact stage ledger.
-Historical ledgers are evidence, not recurring instructions. Consult the frozen
-C++ owners directly: this is a translation, not a student rediscovery exercise.
-Cluster remaining failures by earliest divergence and shared owner. Rank shared
-dependencies, complete one substantial family and follow related producers and
-consumers while the understanding is useful. A first passing case is not the
-handoff boundary; document the next real dependency.
+Read the current handout, contract/spec, compact ledger and selected C++ owners.
+Map their functions, branches, persistent state and phase boundaries to Rust.
+Preserve algorithms, evaluation/short-circuit and emission order, live queue
+traversal, cache keys and state lifetimes. Adapt pointer representation to typed
+IDs/owned stores; defer optional redesign. Temporary borrowing facades must not
+reset persistent state. Work from C++ source rather than reconstructing behavior
+from fixtures. Preserve the existing optimizer/backend policy and safe Rust rules.
 
-Preserve exact observable behavior, emission/demand order, optimizer/backend
-policy, parse-once typed facts and bounded ownership in idiomatic safe Rust.
-No FFI/compiler fallback, fixture recognition, speculative whole-program work, unsafe,
-blanket lint suppression or mechanical splits. Preserve prior case identities.
+Select a finite dependency group, fix shared producers before consumers, and finish
+it before switching scope. Queue unrelated discoveries. Use up to three read-only
+reviewers on disjoint selected ranges; the parent edits and certifies. A first
+passing case is not a completed mechanism, and partial work is not a complete
+source-map responsibility.
 
-Iterate with the smallest affected fixture and a few controls for the touched
-invariants. Reuse existing probes; expand only for a specific unresolved failure
-or changed ownership contract. Do not multiply every case across every dump mode,
-repeat stack qualification without a stack question, or time each small feature.
-Measure two supported scales when allocation, repeated work or scaling changes;
-reuse unchanged host/qualification evidence. PA35 codegen targets do not apply.
-Use the protected adapter's match/stack_qualification for actual exhaustion;
-status 86, crashes and timeouts never establish a matching rejection.
+Iterate with affected fixtures and a few controls for changed invariants, plus
+clone_quality.py --review. Do not routinely expand mode matrices, stack campaigns
+or timings. Use protected stack qualification for actual exhaustion. Measure two
+supported scales only for a concrete changed allocation/repeated-work bound.
+During PA33, clone_bootstrap_probe.py --limit 4 is an isolated diagnostic, never
+PA34 acceptance; reuse recorded results and reduce the first divergent boundary.
 
-Use up to three read-only subagents for disjoint owner reviews; the parent owns
-edits and certification. During substantial open batches use focused controls,
-clone_quality.py --review and clone_evidence.py checkpoint {{testStage}} --out PATH.
-Run current stage/course, prior and full quality at the handoff, not each small fix.
-Protected prior/quality commands reuse only successful content-bound raw
-evidence; --fresh forces execution. Source/binary, fixture, protocol, toolchain
-or evidence changes invalidate reuse. Current-stage and preservation checks
-still execute. Do not repeat these checks solely for a commit or report rewrite.
-Use python3 scripts/clone_evidence.py snapshot {{testStage}} --out PATH after the required gates
-to index current evidence. Keep raw receipts in place; do not copy every prior
-case, write per-batch validators with hardcoded counts or repeatedly seal hashes.
+Use clone_evidence.py checkpoint {{testStage}} --out PATH --evidence FILE during
+open work. Run stage/course/prior/full quality and preservation after a coherent
+handoff stabilizes, reusing only valid content-bound successes. Full assignment
+acceptance additionally requires release/debug/bootstrap and all source owners;
+the strict snapshot remains required. No per-fix full sweeps, copied receipt trees,
+hardcoded handoff validators or relaxed oracle/fixture/comparison policy.
 
-Replace the current ledger with a compact handoff: stage base, last reviewed tip,
-C++/Rust owners, mechanism, current counts, evidence-index link and next groups.
-Keep detailed cases/raw outputs in artifacts and history in Git; update the source
-map without reproducing its inventory. Never change protected inputs, oracle,
-checker policy, measurements or Ralph state. Report reproducible baseline defects
-and continue independent work.
-
-Commit cohesive changes and leave clean. Finish Ralph's existing native phase
-goal with update_goal after this handoff and required checks. A partial handoff
-ends a turn, not the assignment; never create/reset goals or wait for Ralph.
+Replace the ledger with selected owners, state mapping, finite findings,
+closed/reopened responsibilities, evidence and the next dependency. Raw controls
+stay in artifacts and prior plans in Git. Commit coherent work, leave clean,
+complete Ralph's existing native handoff goal and return. Partial completion ends
+the handoff, not the assignment. Never reset goals or edit Ralph state.
 
 {{modelValidation}}

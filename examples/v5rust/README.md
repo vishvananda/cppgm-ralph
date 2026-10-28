@@ -124,6 +124,25 @@ referenced focused files, and never runs acceptance gates or modifies their
 receipts. Use substantial milestones for full-suite refreshes while work remains;
 final acceptance still requires every normal gate and the strict snapshot below.
 Scaling studies are due when allocation or repeated-work behavior changes.
+Translate C++ algorithms, persistent state and execution order before optional
+Rust restructuring. Use a finite owner/dependency group, map its state and
+branches, fix shared lifecycle producers before consumers, and queue unrelated
+discoveries. A bounded audit handoff may finish while full stage acceptance is
+still open; only full source review can certify a responsibility.
+
+During PA33, `python3 scripts/clone/clone_bootstrap_probe.py --limit 4` compares
+a bounded prefix of the frozen PA34 source inventory and stops at the first
+object mismatch. `--source dev/src/path.cpp` selects a unit; `--start-after`
+continues the inventory. Both compilers use the same frozen Makefile, logical
+paths and O3 flags, with clean isolated probe outputs. Logs, hashes and objects
+remain under `artifacts/clone/bootstrap-probes/`. This diagnostic neither
+advances the stage nor supplies objects or acceptance evidence to PA34.
+
+Validation identity fingerprints selected build/check tools (including PATH
+shadowing and configured wrappers), system headers/libraries and Rust dependencies.
+Installing an unrelated executable no longer invalidates an otherwise identical
+receipt. The versioned identity change makes old receipts nonreusable; final
+checks still require unchanged inputs and intact successful raw evidence.
 Validation subprocesses use `validation_path` from the protected settings when
 configured. Pin the owner's existing tool path at installation; temporary agent
 PATH entries then neither change the selected tools nor prevent evidence reuse.

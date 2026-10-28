@@ -35,7 +35,11 @@ stage plan and relevant C++ owners before implementing a behavior group. The
 handouts are cumulative coverage requirements, not permission to simplify
 the complete compiler. Record each translated responsibility in
 `docs/port/source-map.tsv`; one Rust module may replace multiple C++ files.
-Avoid mechanically translating one C++ class into one Rust file.
+Translate the reference's algorithms, control flow and persistent state before
+optional restructuring. Safe Rust IDs/stores may replace pointers, but must
+preserve state lifetimes, demand, traversal/short-circuit order and cache keys.
+Temporary borrowing facades must not reset persistent compiler state. Module
+names and file boundaries may differ; defer optional redesign until parity.
 
 ## Validation and progress
 

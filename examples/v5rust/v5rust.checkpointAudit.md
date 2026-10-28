@@ -6,7 +6,7 @@ Primary log: {{lastTestLogPath}}
 
 Read the current spec/contract, handout and compact ledger. Review every change
 since its last-audited tip against the frozen C++ owners and Rust source map.
-Historical reports supply evidence, not new checklists. Trace typed ownership,
+Historical reports supply evidence, not new checklists. Trace the reference algorithm and persistent-state lifecycle, then
 failure/rollback, exact numbers/diagnostics, demand and emission order. Check
 algorithmic completeness, lifetimes and bounded work; no compiler fallback, shortcuts,
 unsafe, needless cloning, global scans or lint/file-limit evasion.

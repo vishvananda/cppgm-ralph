@@ -1,14 +1,13 @@
-Complete the full exact-clone acceptance audit for {{testStage}}, following
-the accompanying prompt, CLONE_CONTRACT.md and the owning handout. Resolve
-all stage-owned defects and unported behavior, including gaps beyond fixtures.
-Use up to three read-only reviewers on disjoint owners; integrate substantial
-families with focused checks and non-acceptance review checkpoints.
-Before final closure require exact stage parity, full due course lanes, earlier-stage preservation,
-idiomatic safe Rust, Clippy and file/architecture checks. At PA33 complete
-release/debug checks and the implementation ownership census. Record concrete
-evidence, commit and leave a clean checkout. Do not weaken the frozen oracle
-or gate and do not impose PA35 code-generation optimization targets.
-Apply the contract's protected stack qualification; do not require identical
-native exhaustion cutoffs or diagnostic positions.
+Complete one bounded source-faithful parity handoff for {{testStage}}, following
+the current prompt, contract and ledger. Translate the selected C++ dependency
+group's algorithm, persistent state and execution order into safe Rust before
+optional redesign. Resolve its finite findings, validate affected consumers and
+certify only fully reviewed responsibilities; queue unrelated discoveries.
+Use focused checks and review checkpoints during iteration, broad validation
+after stabilization, and record the early bootstrap diagnostic without claiming
+PA34 acceptance. Commit, leave clean and return the closure/evidence delta.
+This handoff can finish while the assignment remains open; all full-stage
+source, course, prior, quality, release/debug and bootstrap gates remain required
+for advancement. Do not reset goals, alter the oracle or weaken comparison policy.
 
 {{modelValidation}}
