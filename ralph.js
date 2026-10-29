@@ -54,6 +54,7 @@ import {
 } from "./codex-goal-completion.js";
 import { readResumableCodexGoal } from "./codex-goal-resume.js";
 import { interruptedCodexAuthentication, isCodexAuthenticationError } from "./codex-auth-recovery.js";
+import { isCodexProviderInterruption, normalizeCodexProviderInterruption } from "./codex-provider-recovery.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
 import { createClaudeResponseWatchdog } from "./claude-response-watchdog.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
@@ -1004,6 +1005,15 @@ async function main() {
           ? `Codex authentication failed: ${formatErrorMessage(error)}`
           : formatErrorMessage(error);
         state.activeTurn = { ...state.activeTurn, status: "failed", endedAt: failedAt, error: failureMessage };
+        if (agentProfile.provider === "codex" && requiresCodexGoalCompletion(loopGoal, "codex") &&
+            isCodexProviderInterruption(error)) {
+          state.codexGoalInterruption = normalizeCodexProviderInterruption({
+            threadId: failedThreadId, failedAt, error: {
+              message: failureMessage, codexErrorInfo: error?.codexErrorInfo,
+              codexUsageLimit: error?.codexUsageLimit,
+            },
+          });
+        }
         await appendRalphEventRecord({
           recordedAt: failedAt,
           threadId: failedThreadId,
@@ -1071,7 +1081,7 @@ async function main() {
           activeThreadId = retryThreadId;
           if (activeThreadId && requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
             const resumed = await withCodexAppServer((client) =>
-              readResumableCodexGoal(client, activeThreadId));
+              readResumableCodexGoal(client, activeThreadId, { providerFailure: state.codexGoalInterruption }));
             if (resumed.reactivated) {
               log(`Reactivated usage-limited Codex goal for thread ${activeThreadId}`);
             }
@@ -1158,6 +1168,12 @@ async function main() {
             CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId &&
             !requiresCodexGoalCompletion(loopGoal, agentProfile.provider);
           activeThreadId = shouldStartFreshRetryThread ? null : retryThreadId;
+          if (activeThreadId && requiresCodexGoalCompletion(loopGoal, agentProfile.provider)) {
+            const resumed = await withCodexAppServer(client => readResumableCodexGoal(client, activeThreadId, {
+              providerFailure: state.codexGoalInterruption,
+            }));
+            if (resumed.reactivated) log(`Reactivated provider-interrupted Codex goal for thread ${activeThreadId}`);
+          }
           thread = null;
           backend = createAgentBackend(agentProfile.provider);
           thread = activeThreadId
@@ -4026,8 +4042,10 @@ async function prepareLoopGoalForTurn({
   if (preserveExistingGoal) {
     if (!threadId) throw new Error("Cannot preserve a Codex goal without its thread id");
     return withCodexAppServer(async (client) => {
+      const savedState = await loadState();
       const { goal, reactivated } = await readResumableCodexGoal(client, threadId, {
-        authenticationFailure: interruptedCodexAuthentication(await loadState()),
+        authenticationFailure: interruptedCodexAuthentication(savedState),
+        providerFailure: savedState.codexGoalInterruption,
       });
       if (reactivated) {
         log(`Reactivated interrupted Codex goal for thread ${threadId}`);
@@ -8882,6 +8900,7 @@ async function loadState() {
       pendingCheckpoint: normalizePendingCheckpoint(parsed.pendingCheckpoint),
       checkpointReview: normalizeCheckpointReviewState(parsed.checkpointReview),
       activeTurn: normalizeActiveTurnState(parsed.activeTurn),
+      codexGoalInterruption: normalizeCodexProviderInterruption(parsed.codexGoalInterruption),
     };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {

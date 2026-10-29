@@ -60,7 +60,7 @@ test("goal outputs support direct JSON and Code Mode text blocks, with thread va
   assert.equal(codexSessionTaskCompletion([event(1000,"task_complete",{error:{codex_error_info:"usage_limit_exceeded"}})],options).status,"usage_limit");
 });
 
-for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "blocked", "missing", "verify-error", "exhausted", "restart", "auth-restart", "reopened", "interactive-request"]) {
+for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "capacity-retry", "capacity-restart", "blocked", "missing", "verify-error", "exhausted", "restart", "auth-restart", "reopened", "interactive-request"]) {
   test(`native Codex goal subprocess: ${scenario}`, async (t) => {
     const privateWrite = scenario === "native-private-write";
     const isolated = scenario === "native-isolation" || privateWrite;
@@ -95,9 +95,10 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
       checks:{verify:{command:(["restart","auth-restart"].includes(scenario)?`printf check >> '${checkCounter}' && `:"")+(privateWrite?"printf check > /tmp/check-scratch && ":"")+"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
       phases:[{name:"audit",runWhenChecksPass:true,checks:["verify"]}]}));
     const runOptions={encoding:"utf8",timeout:25000,
-      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1"}};
+      env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1",
+        ...(scenario==='capacity-restart'?{RALPH_PROVIDER_TRANSIENT_RETRY_MAX:'1'}:{})}};
     const run=spawnSync(process.execPath,[path.resolve("ralph.js")],runOptions);
-    const succeeds=["active-exit","native-continuation","native-isolation","native-private-write","transport-retry"].includes(scenario);
+    const succeeds=["active-exit","native-continuation","native-isolation","native-private-write","transport-retry","capacity-retry"].includes(scenario);
     assert.equal(run.status,succeeds?0:1,run.stdout+"\n"+run.stderr);
     if (privateWrite) {
       assert.equal(await fs.readFile(path.join(privateRoot,"tmp","check-scratch"),"utf8"),"check");
@@ -106,10 +107,15 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     const traces=(await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
     const invocations=traces.filter(r=>r.kind==="exec");
     if (privateWrite) assert.match(invocations[0].input, /Storage: checkout and scratch share .*Ralph state is read-only\./s);
-    assert.equal(invocations.length,["active-exit","transport-retry"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
+    assert.equal(invocations.length,["active-exit","transport-retry","capacity-retry","capacity-restart"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
     assert.equal(traces.filter(r=>r.method==="thread/start").length,1,"incomplete work resumes even with freshThreadPerTurn");
     assert.equal(traces.filter(r=>r.method==="thread/goal/set" && r.params.objective != null).length,1,"never reset or forcibly complete the model's goal");
-    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,scenario==="auth-restart"?2:1);
+    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,["auth-restart","capacity-retry","capacity-restart"].includes(scenario)?2:1);
+    if(scenario==="capacity-retry") {
+      assert.equal(invocations[1].goal.status,'active');
+      assert.equal(invocations[1].goal.tokensUsed,423);
+      assert.equal(invocations[1].goal.timeUsedSeconds,17);
+    }
     if(scenario==="active-exit") {
       assert.match(invocations[1].input,/Continue the active loop goal/);
       assert.doesNotMatch(invocations[1].input,/Clean up `audit`/);
@@ -136,6 +142,23 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
       assert.ok(events.some(r=>r.event?.item?.text==='Audit done.'));
     }
     if (scenario === "interactive-request") assert.match(run.stderr,/requires host interaction/);
+    if (scenario === 'capacity-restart') {
+      const originalGoal=JSON.parse(await fs.readFile(goalFile,'utf8'));
+      assert.equal(originalGoal.status,'blocked');
+      assert.equal(state.codexGoalInterruption.threadId,threadId);
+      assert.match(state.codexGoalInterruption.error.message,/model is at capacity/);
+      const resumed=spawnSync(process.execPath,[path.resolve('ralph.js'),'--continue','--reuse-last-checks'],runOptions);
+      assert.equal(resumed.status,0,resumed.stdout+resumed.stderr);
+      const rows=(await fs.readFile(trace,'utf8')).trim().split('\n').map(JSON.parse);
+      assert.equal(rows.filter(r=>r.method==='thread/start').length,1);
+      assert.equal(rows.filter(r=>r.method==='thread/goal/clear').length,1);
+      assert.equal(rows.filter(r=>r.method==='thread/goal/set').length,3);
+      const resumedGoal=rows.filter(r=>r.kind==='exec').at(-1).goal;
+      for (const key of ['objective','tokensUsed','timeUsedSeconds','createdAt','tokenBudget']) {
+        assert.equal(resumedGoal[key],originalGoal[key],key);
+      }
+      assert.equal(resumedGoal.status,'active');
+    }
     if (scenario === "auth-restart") {
       assert.match(run.stderr, /Repair the default Codex login/);
       const originalGoal = JSON.parse(await fs.readFile(goalFile, "utf8"));
@@ -244,6 +267,10 @@ async function runTurn(r) {
  }
  if(scenario==='transport-retry'&&!attempt) {
   notify('error',{willRetry:false,error:{message:'request timed out'}});return;
+ }
+ if((scenario==='capacity-retry'&&!attempt)||(scenario==='capacity-restart'&&attempt<2)) {
+  saveGoal({...getGoal(),status:'blocked',tokensUsed:423,timeUsedSeconds:17,updatedAt:Date.now()/1000});
+  notify('error',{willRetry:false,error:{message:'Selected model is at capacity. Please try a different model.'}});return;
  }
  if(scenario==='auth-restart'&&!attempt) {
   saveGoal({...getGoal(),status:'blocked',tokensUsed:423,timeUsedSeconds:17,updatedAt:Date.now()/1000});

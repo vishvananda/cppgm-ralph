@@ -74,3 +74,29 @@ for (const status of ["paused", "blocked", "budgetLimited"]) {
     await assert.rejects(readResumableCodexGoal(client, threadId), new RegExp(`goal is ${status}`));
   });
 }
+
+test('only timestamp-matched provider outages can reactivate a blocked goal', async () => {
+  const failedAt = '2026-10-28T17:28:26.013Z';
+  const blocked = {...original, status:'blocked', updatedAt:Date.parse(failedAt)/1000};
+  for (const error of [
+    'Selected model is at capacity. Please try a different model.',
+    'Request timed out',
+    "You've hit your usage limit. Try again at Oct 29, 2026 1:00 AM",
+    {message:'Limit reached',codexErrorInfo:'usage_limit_exceeded'},
+  ]) {
+    const calls=[];
+    const client={async request(method,params) {
+      calls.push({method,params});
+      return {goal:method==='thread/goal/get'?blocked:{...blocked,status:'active'}};
+    }};
+    const providerFailure={threadId,failedAt,error};
+    const result=await readResumableCodexGoal(client,threadId,{providerFailure});
+    assert.equal(result.reactivated,true);
+    assert.deepEqual(calls[1],{method:'thread/goal/set',params:{threadId,status:'active'}});
+    for (const invalid of [
+      {...providerFailure,failedAt:'2026-10-28T18:55:02Z'},
+      {...providerFailure,threadId:'another-thread'},
+      {...providerFailure,error:'Pending compiler implementation'},
+    ]) await assert.rejects(readResumableCodexGoal(client,threadId,{providerFailure:invalid}),/goal is blocked/);
+  }
+});

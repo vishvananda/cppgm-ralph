@@ -31,7 +31,7 @@ its owning model, and whether the fix is a batch or a restructure. When a change
 loses on A/B because of another owner's model, or needs that model replaced,
 record it there for the scheduled restructure turn rather than reverting it
 silently or tuning thresholds. Preserve earlier through-PA33 behavior and run
-inception regularly. Complete implementation only after canonical
+inception regularly. Declare PA35 complete only after canonical
 `make -C pa35 test` passes on the final tree; the independent audit still
 remains. Do not rebuild measurement infrastructure already supplied by the
 assignment.
