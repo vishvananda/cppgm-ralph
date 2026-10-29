@@ -49,6 +49,30 @@ test('recognizes literal report guards, double-quoted process patterns and read-
   ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
 });
 
+test('recognizes file-size guards and space-containing patterns with multiple report reads', () => {
+  const commands = [
+    'until [ -s /tmp/pa35w/through33.log ] && ! pgrep -f "test-report-through" >/dev/null; do sleep 15; done; tail -6 /tmp/pa35w/through33.log',
+    'until ! pgrep -f "make inception" >/dev/null; do sleep 15; done; grep -c "MATCH" /tmp/pa35w/inception.log; grep -E "MISMATCH|DIFFER|rror" /tmp/pa35w/inception.log | head; tail -3 /tmp/pa35w/inception.log',
+  ];
+  for (const command of commands) {
+    const quoted = "'" + command.replaceAll("'", "'\"'\"'") + "'";
+    const wrapped = `source snapshot || true && eval ${quoted} < /dev/null && pwd -P >| /tmp/claude-79f1-cwd`;
+    const waiter = row(2, 1, ['/bin/bash', '-c', wrapped]);
+    assert(pollingPattern(waiter.argv));
+    assert.deepEqual(findSelfWaits([root, waiter, sleeper], 1), [waiter]);
+    const worker = command.includes('make inception')
+      ? ['make', 'inception'] : ['make', 'test-report-through-pa33'];
+    assert.deepEqual(findSelfWaits([root, waiter, sleeper, row(4, 99, worker)], 1), []);
+    for (const unsafe of [
+      command + '; touch marker',
+      command.replace('do sleep 15;', 'do make build; sleep 15;'),
+      command.replace('>/dev/null;', '>/tmp/marker;'),
+      command.replace('done;', 'done; echo $(touch marker);'),
+      command.replace(/pgrep -f "[^"]+"/, 'pgrep -f "$(touch marker)"'),
+    ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
+  }
+});
+
 test('successful result warns, rechecks, and cancels only the proven loop and its sleep', async () => {
   const events = [], signals = [];
   const guard = createClaudeResponseWatchdog({ rootPid: 1, graceMs: 5,

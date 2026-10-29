@@ -33,11 +33,14 @@ export function pollingPattern(argv) {
     script = word.value;
   }
   // Only a negative process wait, optionally guarded by a literal read-only
-  // grep, with a sleep-only body and read-only output. Never evaluate the shell.
-  const grep = String.raw`(?:grep\s+-q\s+(?:"[\w .|\\:-]+"|'[\w .|\\:-]+')\s+[\w./-]+\s+2>\s*/dev/null\s*&&\s*)?`;
-  const wait = String.raw`!\s+pgrep\s+-f\s+(?:'([\w./-]+)'|"([\w./-]+)")\s*>\s*/dev/null;\s*do\s+sleep\s+[1-9]\d*;\s*done`;
-  const output = String.raw`(?:;\s*(?:cat\s+[\w./\${}"' -]+|tail\s+(?:-[1-9]\d*|-n\s+[1-9]\d*)\s+[\w./-]+))?`;
-  const match = new RegExp(String.raw`^\s*until\s+${grep}${wait}\s*${output}\s*$`).exec(script);
+  // grep or file-size test, with a sleep-only body and read-only output.
+  // Patterns may contain literal spaces; never evaluate the shell.
+  const quoted = String.raw`(?:"[\w .|\\:-]+"|'[\w .|\\:-]+')`;
+  const guard = String.raw`(?:(?:grep\s+-q\s+${quoted}\s+[\w./-]+\s+2>\s*/dev/null|\[\s+-s\s+[\w./-]+\s+\])\s*&&\s*)?`;
+  const wait = String.raw`!\s+pgrep\s+-f\s+(?:'([\w./ -]+)'|"([\w./ -]+)")\s*>\s*/dev/null;\s*do\s+sleep\s+[1-9]\d*;\s*done`;
+  const report = String.raw`(?:cat\s+[\w./\${}"' -]+|tail\s+(?:-[1-9]\d*|-n\s+[1-9]\d*)\s+[\w./-]+|grep\s+-(?:c|E)\s+${quoted}\s+[\w./-]+(?:\s*\|\s*head(?:\s+-n\s+[1-9]\d*)?)?)`;
+  const output = String.raw`(?:;\s*${report})*`;
+  const match = new RegExp(String.raw`^\s*until\s+${guard}${wait}\s*${output}\s*$`).exec(script);
   if (!match) return null;
   try { return new RegExp(match[1] ?? match[2]); } catch { return null; }
 }

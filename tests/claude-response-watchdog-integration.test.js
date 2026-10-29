@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-for (const guarded of [false, true]) test(`a successful response with a ${guarded ? 'report-guarded' : 'simple'} self-wait returns to goal verification and external checks`,
+for (const variant of ['simple', 'report-guarded', 'file-guarded', 'inception']) test(`a successful response with a ${variant} self-wait returns to goal verification and external checks`,
   { skip: process.platform !== 'linux' }, t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-response-watchdog-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -20,12 +20,15 @@ for (const guarded of [false, true]) test(`a successful response with a ${guarde
     git('add', '.'); git('commit', '-qm', 'fixture');
     execFileSync('git', ['init', '--bare', '-q', path.join(root, 'remote.git')]);
     git('remote', 'add', 'origin', path.join(root, 'remote.git')); git('push', '-qu', 'origin', 'HEAD');
-    const marker = `unique-watchdog-${path.basename(root)}/sweep.sh`;
+    const marker = `unique-watchdog-${path.basename(root)}/${variant === 'inception' ? 'make inception' : 'sweep.sh'}`;
     const report = path.join(root, 'through.log');
     fs.writeFileSync(report, '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) =====\n');
-    const pollCommand = guarded
-      ? `until grep -q "TESTS PASSED\\|FAIL\\|Error" ${report} 2>/dev/null && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -1 ${report}`
-      : `until ! pgrep -f '${marker}' >/dev/null; do sleep 30; done`;
+    const pollCommand = {
+      simple: `until ! pgrep -f '${marker}' >/dev/null; do sleep 30; done`,
+      'report-guarded': `until grep -q "TESTS PASSED\\|FAIL\\|Error" ${report} 2>/dev/null && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -1 ${report}`,
+      'file-guarded': `until [ -s ${report} ] && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -6 ${report}`,
+      inception: `until ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; grep -c "MATCH" ${report}; grep -E "MISMATCH|DIFFER|rror" ${report} | head; tail -3 ${report}`,
+    }[variant];
     fs.writeFileSync(check, `#!/bin/sh
 if test -f '${complete}'; then
   echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='; exit 0
