@@ -5,21 +5,21 @@
   "name": "v5rust",
   "assignmentLayout": "v5",
   "provider": "codex",
-  "testCommand": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage paX",
+  "testCommand": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py stage paX",
   "checks": {
     "preflight": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py preflight {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py preflight {{testStage}}",
       "required": true
     },
     "priorThroughTests": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py prior {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py prior {{testStage}}",
       "required": true,
       "dependsOn": [
         "preflight"
       ]
     },
     "stageTests": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
       "required": false,
       "primary": true,
       "kind": "test",
@@ -29,14 +29,14 @@
       ]
     },
     "rustQuality": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_quality.py",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_quality.py",
       "required": true,
       "dependsOn": [
         "preflight"
       ]
     },
     "casePreservation": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py preserve {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py preserve {{testStage}}",
       "required": true,
       "dependsOn": [
         "priorThroughTests"
@@ -61,7 +61,7 @@
       ]
     },
     "stageComplete": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py stage {{testStage}}",
       "required": true,
       "primary": true,
       "kind": "test",
@@ -71,7 +71,7 @@
       ]
     },
     "courseSuite": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py course {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py course {{testStage}}",
       "required": true,
       "excludeStages": [
         "pa34"
@@ -81,7 +81,7 @@
       ]
     },
     "releaseChecks": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_check.py release {{testStage}}",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_check.py release {{testStage}}",
       "required": true,
       "onlyStages": [
         "pa33",
@@ -92,7 +92,7 @@
       ]
     },
     "bootstrapProof": {
-      "command": "python3 /home/vishvananda/work/v5rust-control/clone_bootstrap.py --final",
+      "command": "ulimit -S -s 16384 && python3 /home/vishvananda/work/v5rust-control/clone_bootstrap.py --final",
       "required": true,
       "onlyStages": [
         "pa34"
