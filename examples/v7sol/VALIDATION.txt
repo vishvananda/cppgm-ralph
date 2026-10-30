@@ -1,0 +1,15 @@
+V7 Sol scaffold templates verified 2026-10-30. Installation awaits assignments v7.
+
+PASS: config matches V6 Sol after excluding run name and checkout/private paths.
+      Same native Codex gpt-6.1-sol/high, default profile, checks, four phases,
+      checkpoint cadence, PA35 routing/endpoint, 500 turns and resource limits.
+PASS: all 18 prompt/goal sidecars resolve; rendered goals fit the native limit
+      for every PA1-PA35 phase with the verifier's reserved overhead.
+PASS: shell and JavaScript syntax; git diff --check.
+PASS: installer exits before provisioning when assignments tag v7 is absent.
+      No v7sol checkout, private volume, remote or Ralph worker was created.
+
+The installer records the resolved release commit and performs the actual
+scaffold build, initial PA1 failures, file audit, sandbox perf-counter/sampling
+and native-goal probes after the tag exists. Those runtime checks have not yet
+been run for V7; V6's results are not claimed as V7 evidence.

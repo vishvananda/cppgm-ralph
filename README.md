@@ -299,6 +299,9 @@ assignments, with course checks through PA35 and a PA35
 restructure phase in place of the checkpoint audit.
 The [V6 Sol scaffold](examples/v6sol/README.md) matches that setup with native
 Codex `gpt-6.1-sol` at high reasoning and the same assignments, spec and checks.
+The [V7 Sol scaffold](examples/v7sol/README.md) retains that configuration with
+brief compact-storage guidance in its prompts, goals and spec. Installation
+waits for the assignments `v7` tag rather than substituting an older base.
 The [V5 exact Rust port](examples/v5rust/README.md) uses a pinned C++ oracle
 and protected differential gates. Its [baseline update guide](examples/v5rust/BASELINE_UPDATES.md)
 covers synchronized oracle, fixture, manifest and clone configuration updates.
