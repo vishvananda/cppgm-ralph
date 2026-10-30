@@ -68,8 +68,9 @@ After a successful Claude response, 60 seconds without further model activity
 while its process remains open produces a background-task warning. On Linux,
 Ralph stops only a verified `until ! pgrep -f ...; do sleep ...; done` loop
 whose sole match is its own shell, including Claude's shell wrapper, literal
-report-`grep` or `[ -s file ]` guards, space-containing patterns, either quote
-style and read-only `cat`/`tail`/`grep` reports. Other
+report-`grep` or `[ -s file ]` guards before or after the process wait,
+space-containing patterns, either quote style and read-only `cat`/`tail`/`grep`
+reports or literal `echo` completion messages. Other
 workers and ambiguous waits remain untouched. Recovery still requires the goal
 completion path and external checks; a response alone never advances the run.
 `RALPH_CLAUDE_RESPONSE_GRACE_MS` adjusts the diagnostic grace period.

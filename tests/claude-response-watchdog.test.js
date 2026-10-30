@@ -73,6 +73,27 @@ test('recognizes file-size guards and space-containing patterns with multiple re
   }
 });
 
+test('recognizes report guards after the process wait and literal completion messages', () => {
+  const command = 'until ! pgrep -f "check.pl" >/dev/null && grep -q "exit=" /tmp/tasks/result.output; do sleep 15; done; echo done';
+  for (const script of [command, command.replace('grep -q "exit=" /tmp/tasks/result.output', '[ -s /tmp/tasks/result.output ]')]) {
+    const quoted = "'" + script.replaceAll("'", "'\"'\"'") + "'";
+    for (const body of [script, `source snapshot || true && eval ${quoted} < /dev/null && pwd -P >| /tmp/claude-79f1-cwd`]) {
+      const waiter = row(2, 1, ['/bin/bash', '-c', body]);
+      assert(pollingPattern(waiter.argv));
+      assert.deepEqual(findSelfWaits([root, waiter, sleeper], 1), [waiter]);
+      assert.deepEqual(findSelfWaits([root, waiter, sleeper, row(4, 99, ['perl', 'check.pl'])], 1), []);
+    }
+  }
+  for (const unsafe of [
+    command.replace('exit=', '$(touch marker)'),
+    command.replace('grep -q "exit="', 'touch marker && grep -q "exit="'),
+    command.replace('echo done', 'echo $(touch marker)'),
+    command.replace('echo done', 'echo done >/tmp/marker'),
+    command.replace('do sleep 15;', 'do make build; sleep 15;'),
+    command.replace('done; echo done', 'done; rm /tmp/marker'),
+  ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
+});
+
 test('successful result warns, rechecks, and cancels only the proven loop and its sleep', async () => {
   const events = [], signals = [];
   const guard = createClaudeResponseWatchdog({ rootPid: 1, graceMs: 5,
@@ -129,7 +150,7 @@ test('a changed matching set or reused PID cancels recovery, and observation rac
 test('recovers a real self-matching shell without leaving its sleep holding the process open',
   { skip: process.platform !== 'linux' }, async t => {
     const marker = `ralph-watchdog-${process.pid}-${Date.now()}/sweep.sh`;
-    const shell = spawn('/bin/bash', ['-c', `until ! pgrep -f '${marker}' >/dev/null; do sleep 30; done`],
+    const shell = spawn('/bin/bash', ['-c', `until ! pgrep -f '${marker}' >/dev/null && grep -q "exit=" /dev/null; do sleep 30; done; echo done`],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     const exited = once(shell, 'exit');
     t.after(() => { try { shell.kill('SIGTERM'); } catch {} });
