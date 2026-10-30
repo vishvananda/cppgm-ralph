@@ -112,6 +112,10 @@ gate; `clone_check.py prior paN --fresh` or `clone_quality.py --fresh` forces it
 Current-stage tests, preservation, course and release/bootstrap checks still run.
 No case, comparison, lint or acceptance requirement is removed.
 
+Clippy and Cargo debug/release tests build into `obj/rust-quality`. Their
+test-support features cannot replace the production compiler in `obj/rust`
+or invalidate an otherwise unchanged compiler receipt.
+
 During an open audit, use up to three read-only reviewers on disjoint owner
 families; the parent integrates fixes and certifies the source map. Focused
 tests and `python3 scripts/clone_quality.py --review` cover iteration without

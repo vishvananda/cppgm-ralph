@@ -6,12 +6,15 @@ from clone_common import CONTROL, ROOT, run
 
 
 def commands():
+    # Workspace test-support features differ from the production feature set.
+    # Keep their artifacts out of the candidate paths bound by gate receipts.
+    target = ["--target-dir", str(ROOT / "obj/rust-quality")]
     return [
         ["cargo", "fmt", "--manifest-path", "dev/Cargo.toml", "--all", "--", "--check"],
         ["cargo", "clippy", "--manifest-path", "dev/Cargo.toml", "--workspace",
-         "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"],
-        ["cargo", "test", "--manifest-path", "dev/Cargo.toml", "--workspace", "--locked"],
-        ["cargo", "test", "--manifest-path", "dev/Cargo.toml", "--workspace", "--release", "--locked"],
+         "--all-targets", "--all-features", "--locked", *target, "--", "-D", "warnings"],
+        ["cargo", "test", "--manifest-path", "dev/Cargo.toml", "--workspace", "--locked", *target],
+        ["cargo", "test", "--manifest-path", "dev/Cargo.toml", "--workspace", "--release", "--locked", *target],
         [str(CONTROL / "venv/bin/python"), str(CONTROL / "rust_audit.py"), "--root", str(ROOT)],
     ]
 
