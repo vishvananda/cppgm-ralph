@@ -1,9 +1,9 @@
 # V4 Luna run
 
 The installed working volume was archived and removed on 2026-09-29.
-Ralph history remains available. See the [V4.1 Sol 6.1 Strands setup](../v4sol61strands/README.md)
-for the archive location and replacement run. Restore the archived volume
-before restarting this run.
+Ralph history remains available. Restore the archived volume before restarting
+this run. See the [Sol 6.1 scaffold](../v4sol61/README.md) for a maintained
+native Codex example.
 
 This run compares native Codex with v4unreal and v4strands using `gpt-6-luna`
 at `max` reasoning effort. It starts from the same clean V4 scaffold commit,

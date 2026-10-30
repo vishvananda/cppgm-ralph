@@ -270,15 +270,19 @@ must match a test invocation observed in the same turn/thread; an arbitrary old
 log does not count as fresh progress. This works with batched commands and
 artifact-directory paths, and the association survives incremental refreshes.
 
+The combined view shows comparison graphs above the active runs and a progress
+bar below each run, with a stable run order. Graphs refresh automatically and
+default to one assignment beyond the furthest active run. Focused checks appear
+separately while the full-suite bar retains its last result; cumulative report
+totals do not replace individual assignment totals. Source-file translation runs
+show file completion by turn instead of PA cost milestones. PA33 Rust port
+progress combines its tests and source responsibilities in the standard bar.
+
 The [V4 Codex scaffold](examples/v4codex/README.md) contains an Astra/xhigh
 config and the complete spec-aware prompt/goal family, including PA34
-inception checks. The [V4 Strands scaffold](examples/v4strands/README.md) uses
-the same Luna/max Codex subscription model and V4 checks as v4unreal.
-The [V4 Luna scaffold](examples/v4luna/README.md) runs that model through the
-native Codex harness and its goal machinery, starting from the same V4 commit.
-The [V4.1 Sol 6.1 Strands scaffold](examples/v4sol61strands/README.md) uses
-`gpt-6.1-sol` at `high` reasoning effort with a dedicated 20 GiB write volume
-and the updated `cppgm-assignments` v4.1 base.
+inception checks.
+The [V4 Luna scaffold](examples/v4luna/README.md) runs `gpt-6-luna` at `max`
+through the native Codex harness and its goal machinery, starting from V4.
 The [V4.4 Sol 6.1 scaffold](examples/v4sol61/README.md) uses native Codex
 `gpt-6.1-sol` at `high` reasoning effort with hardware-counter performance
 evidence. The [V4.4 Svelte scaffold](examples/v4svelte/README.md) uses the same

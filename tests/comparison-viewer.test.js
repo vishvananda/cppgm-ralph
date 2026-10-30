@@ -9,10 +9,12 @@ const app = readFileSync(new URL("../ralph-viz/app.js", import.meta.url), "utf8"
 // Exercise the actual browser helpers without a DOM dependency or a provider.
 const names = ["comparisonCellHtml", "comparisonTotalForRows", "comparisonSummaryStarted",
   "comparisonChartTooltipHtml", "comparisonThroughOptions", "comparisonLayoutOptions",
-  "defaultRunComparisonThrough", "highlightedComparisonRunIndex", "comparisonCumulativeSeries",
+  "defaultRunComparisonThrough", "defaultCombinedComparisonThrough", "highlightedComparisonRunIndex", "comparisonCumulativeSeries",
   "comparisonAxisLabel", "comparisonEChartResponsiveLayout", "comparisonRunOrder",
-  "comparisonRunColor", "comparisonRunKey", "comparisonRunVisible", "comparisonRunDefaultVisible"];
+  "comparisonRunColor", "comparisonRunKey", "comparisonRunVisible", "comparisonRunDefaultVisible",
+  "loadComparison", "isActiveRunMeta"];
 const context = vm.createContext({
+  URLSearchParams,
   ASSIGNMENT_LAYOUT: layout,
   state: { comparisonLayout: "capabilities", comparisonRunVisibility: new Map() },
   cleanText: (value) => String(value ?? "").trim(),
@@ -24,12 +26,41 @@ const context = vm.createContext({
 });
 vm.runInContext(app.match(/const COMPARISON_CHART_PALETTE = \[[\s\S]*?\];/)[0], context);
 for (const name of names) {
-  const start = app.indexOf(`function ${name}(`);
+  const start = app.indexOf(`async function ${name}(`) >= 0
+    ? app.indexOf(`async function ${name}(`)
+    : app.indexOf(`function ${name}(`);
   assert.ok(start >= 0, name);
   const tail = app.slice(start);
   const end = tail.slice(1).search(/\n(?:async )?function /);
   vm.runInContext(end < 0 ? tail : tail.slice(0, end + 1), context);
 }
+
+test("compare page requests all current live runs while static exports use their own data", async () => {
+  const marker = { runs: [] };
+  let requested;
+  context.fetchJson = async (url) => { requested = url; return marker; };
+  context.loadStaticComparison = async () => marker;
+  context.state.runs = ["v5rust", "v5scratch", "v5sol"].map(name => ({
+    id: `${name}/run`, state: { active: true, matchesCurrent: true, recentlyUpdated: true },
+  })).concat([
+    { id: "stopped/run", state: { active: false } },
+    { id: "stale/run", state: { active: true, recentlyUpdated: false } },
+    { id: "old/thread", state: { active: true, matchesCurrent: false } },
+  ]);
+  try {
+    assert.equal(await context.loadComparison(), marker);
+    const url = new URL(requested, "http://viewer");
+    assert.equal(url.pathname, "/api/comparison");
+    assert.deepEqual(url.searchParams.getAll("run"), ["v5rust/run", "v5scratch/run", "v5sol/run"]);
+    context.state.staticMode = true;
+    requested = null;
+    assert.equal(await context.loadComparison(), marker);
+    assert.equal(requested, null);
+  } finally {
+    context.state.staticMode = false;
+    context.state.runs = [];
+  }
+});
 
 function fixture() {
   return {
@@ -133,4 +164,33 @@ test("mobile milestone labels are bounded without shortening tooltip titles", ()
   assert.equal(context.comparisonAxisLabel("AST", mobile.labelLimit), "AST");
   assert.ok(mobile.grid.containLabel);
   assert.ok(mobile.grid.bottom <= 20);
+});
+
+test("combined range follows the furthest current run, ignoring completed baselines", () => {
+  const comparison = { runs: [{ label: 'baseline' }, { label: 'current A' }, { label: 'current B' }],
+    localRunIndices: [1, 2] };
+  const rows = Array.from({ length: 35 }, (_, i) => ({ pa: `pa${i + 1}`,
+    runs: [
+      { status: 'complete', turns: [i] },
+      i < 7 ? { status: 'complete', turns: [i] } : null,
+      i < 13 ? { status: 'partial', turns: [i] } : null,
+    ] }));
+  assert.equal(context.defaultCombinedComparisonThrough(comparison, rows), 14);
+  rows[13].runs[2] = { status: 'partial', turns: [99] };
+  assert.equal(context.defaultCombinedComparisonThrough(comparison, rows), 15,
+    'the automatic default advances on fresh comparison evidence');
+  rows[34].runs[1] = { status: 'complete', turns: [100] };
+  assert.equal(context.defaultCombinedComparisonThrough(comparison, rows), 35);
+});
+
+test("combined default follows layout mapping and works for published-only data", () => {
+  const comparison = fixture();
+  comparison.localRunIndices = [1];
+  assert.equal(context.defaultCombinedComparisonThrough(comparison), 7);
+  assert.equal(context.defaultCombinedComparisonThrough(comparison, layout.comparisonRows(comparison, 'v3')), 11);
+  delete comparison.localRunIndices;
+  assert.equal(context.defaultCombinedComparisonThrough(comparison), 7, 'highlighted fallback');
+  comparison.runs[1].highlighted = false;
+  const rows = layout.comparisonRows(comparison, 'v4');
+  assert.equal(context.defaultCombinedComparisonThrough(comparison, rows), rows.length);
 });

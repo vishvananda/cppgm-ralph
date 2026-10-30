@@ -93,7 +93,7 @@ test("a passing focused subset does not displace an exact full-stage pass", () =
   }), fullPass);
 });
 
-test("a failing focused subset displaces an earlier full-stage pass", () => {
+test("a failing focused subset preserves the earlier full-stage snapshot", () => {
   const fullPass = { passed: 70, passedUpperBound: 70, total: 70 };
   const focusedFailure = { passed: 10, passedUpperBound: 69, total: 70 };
 
@@ -101,7 +101,24 @@ test("a failing focused subset displaces an earlier full-stage pass", () => {
     status: "fail",
     hasSubset: true,
     partialStage: true,
-  }), focusedFailure);
+  }), fullPass);
+});
+
+test("focused checks preserve a full-stage result with known failures", () => {
+  const full = { passed: 287, passedUpperBound: 287, total: 316 };
+  for (const status of ["pass", "fail"]) {
+    assert.equal(selectCurrentStageEvidence(full, {
+      passed: 2, passedUpperBound: 316, total: 316,
+    }, { hasSubset: true, status }), full);
+  }
+});
+
+test("a full-suite fail-fast rerun still replaces the previous snapshot", () => {
+  const full = { passed: 287, passedUpperBound: 287, total: 316 };
+  const failFast = { passed: 2, passedUpperBound: 315, total: 316 };
+  assert.equal(selectCurrentStageEvidence(full, failFast, {
+    hasSubset: false, partialStage: true, status: "fail",
+  }), failFast);
 });
 
 test("recognizes direct stage tests and their fail-fast semantics", () => {

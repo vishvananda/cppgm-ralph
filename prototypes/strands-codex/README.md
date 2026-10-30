@@ -14,7 +14,7 @@ STRANDS_CODEX_TOOLS=1 env -u OPENAI_API_KEY npm run smoke -- \
 
 The default model is `gpt-6-luna` at `max` reasoning effort; `STRANDS_CODEX_MODEL` and `STRANDS_CODEX_EFFORT` override them. The smoke harness disables memory, sessions, skills, and background tasks so that a test turn has no lasting side effects. Set `STRANDS_CODEX_TOOLS=1` to enable its shell tool. Set `STRANDS_CODEX_WEB_SEARCH=1` to enable native Codex web search, or `STRANDS_CODEX_DEBUG_EVENTS=1` to inspect Strands events.
 
-Ralph's `strands` provider runs `runner.js` inside its normal isolation and resource limits. The runner persists Strands sessions, enables the harness's file tools and shell, and streams JSONL events. Ralph groups each model response's reasoning and tool requests for the viewer, records shell output and failures, and sums token usage directly from Codex Responses events. See [`../../examples/v4strands/README.md`](../../examples/v4strands/README.md) for the comparable V4 run.
+Ralph's `strands` provider runs `runner.js` inside its normal isolation and resource limits. The runner persists Strands sessions, enables the harness's file tools and shell, and streams JSONL events. Ralph groups each model response's reasoning and tool requests for the viewer, records shell output and failures, and sums token usage directly from Codex Responses events. The experimental Strands run examples have been retired.
 
 The model gives Strands' automatic context manager a 140k effective context budget, leaving more room for max-effort output. If a response still reaches its output-token limit, the runner makes one short continuation in the same session; a second such failure stops the turn.
 

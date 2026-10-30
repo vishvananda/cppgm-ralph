@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergePublishedAndLocalComparison } from "../ralph-viz/server.js";
+import { mergePublishedAndLocalComparison, mergePublishedAndLocalComparisons } from "../ralph-viz/server.js";
 import "../ralph-viz/comparison-run-visibility.js";
 
 function summary(cost, status = "complete") {
@@ -13,6 +13,52 @@ function summary(cost, status = "complete") {
     status,
   };
 }
+
+test("all live runs replace their published duplicates and retain aligned stage columns", () => {
+  const published = {
+    through: "pa1",
+    runs: [
+      { spec: "baseline", comparisonComplete: true },
+      { spec: "v5sol" }, { spec: "v5rust" }, { spec: "v5scratch" },
+    ],
+    rows: [{ pa: "pa1", runs: [summary(1), summary(2), summary(3), summary(4)] }],
+  };
+  const before = structuredClone(published);
+  const locals = ["v5rust", "v5scratch", "v5sol"].map((shape, index) => ({
+    runRef: { shape, filePath: `/work/.ralph/${shape}/events/run.jsonl` },
+    localMtime: new Date(`2026-10-12T00:00:0${index}Z`),
+    comparison: {
+      through: "pa2",
+      runs: [{ spec: `${shape}/run`, layout: "v5" }],
+      rows: [
+        { pa: "pa1", runs: [summary(10 + index)] },
+        { pa: "pa2", runs: [index === 0 ? summary(20, "partial") : null] },
+      ],
+    },
+  }));
+  const merged = mergePublishedAndLocalComparisons(published, locals);
+  assert.deepEqual(merged.runs.map(run => run.label), [
+    "baseline", "v5rust (local)", "v5scratch (local)", "v5sol (local)",
+  ]);
+  assert.deepEqual(merged.rows[0].runs.map(run => run.cost), [1, 10, 11, 12]);
+  assert.deepEqual(merged.rows[1].runs.map(run => run.status), [
+    "not started", "partial", "not started", "not started",
+  ]);
+  assert.deepEqual(merged.localRunIndices, [1, 2, 3]);
+  assert.deepEqual(merged.runs.map(globalThis.RALPH_COMPARISON_RUN_VISIBILITY.defaultVisible), [true, true, true, true]);
+  assert.equal(merged.through, "pa2");
+  assert.equal(merged.localUpdatedAt, "2026-10-12T00:00:02.000Z");
+  assert.deepEqual(published, before);
+});
+
+test("live comparison remains usable when no current runs are active", () => {
+  const merged = mergePublishedAndLocalComparisons({
+    through: "pa1", runs: [{ spec: "baseline", comparisonComplete: true }],
+    rows: [{ pa: "pa1", runs: [summary(3)] }],
+  }, []);
+  assert.equal(merged.rows[0].runs[0].cost, 3);
+  assert.deepEqual(merged.localRunIndices, []);
+});
 
 test("live comparison replaces the matching published partial run", () => {
   const currentPath = "/work/.ralph/current-run/events/run.jsonl";

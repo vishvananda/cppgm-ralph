@@ -303,6 +303,26 @@ button:hover { background: var(--control-hover); }
   width: 100%;
 }
 .dock-progress-echart.dock-progress-single-row { height: 1.3rem; }
+.dock-progress-focused {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--accent);
+  font-size: 0.66rem;
+}
+.dock-progress-focused-track {
+  flex: 1;
+  min-width: 0;
+}
+.dock-progress-focused-track > span {
+  display: block;
+  min-width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.dock-progress-focused-fail { color: var(--bad); }
+.dock-progress-focused-fail .dock-progress-focused-track > span { background: var(--bad); }
 .dock-progress-fallback {
   display: grid;
   grid-template-rows: 1fr 1fr;
@@ -521,6 +541,24 @@ body.is-static-viz .combined-view-toggle {
   gap: 1px;
   padding-left: 0.75rem;
   border-left: 2px solid #252525;
+}
+
+.combined-run-progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  min-width: 0;
+  margin-top: 0.3rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--dock-bg);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 4px 4px;
+  font-size: 0.78rem;
+}
+
+.combined-run-progress .dock-progress-block {
+  max-width: none;
 }
 
 .combined-empty,
@@ -2093,3 +2131,11 @@ pre { margin: 0; }
     word-break: break-word;
   }
 }
+.source-translation-panel { margin: 10px 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+.source-translation-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.source-translation-panel svg { display: block; width: 100%; max-height: 180px; }
+.source-translation-panel svg text { fill: currentColor; font-size: 9px; }
+.source-chart-axis { fill: none; stroke: currentColor; opacity: .35; }
+.source-chart-line { fill: none; stroke: var(--progress-gain, #2f8f50); stroke-width: 2; }
+.source-chart-point { fill: var(--progress-gain, #2f8f50); }
+.source-translation-panel p { font-size: 11px; margin: 4px 0 0; }

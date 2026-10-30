@@ -312,3 +312,63 @@ test("a dedicated check log cannot replace a historical check from another time"
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+function countOnlyStatus(command, passed, total, allTestsPassed = passed === total) {
+  return { command, targetStage: "pa12", targetSubset: null, stageCount: 0,
+    testsPassed: passed, testsPassedUpperBound: passed, testsTotal: total,
+    allTestsPassed, reportSummaryHasCounts: true, stages: [] };
+}
+
+function statusRecord(testStatus, turnNumber = 60, phase = false) {
+  return { eventType: phase ? "ralph.phase-status" : "ralph.test-status", turnNumber,
+    recordedAt: new Date(Date.parse("2026-10-13T00:00:00Z") + turnNumber * 1000).toISOString(),
+    event: phase ? { action: "turn-start", phaseStatus: { stage: "pa12", testStatus } } : { testStatus } };
+}
+
+for (const command of ["make test-report-through-pa12",
+  "make test-report ACTIVE_TEST_REPORT_PAS='pa11 pa12'"]) {
+  test(`count-only cumulative summary keeps PA12's verified total: ${command}`, async () => {
+    const browser = await browserHelpers();
+    const stage = countOnlyStatus("make test-pa12", 316, 316);
+    stage.stages = [{ name: "pa12", status: "pass", total: 316, passed: 316 }];
+    const cumulative = countOnlyStatus(command, 1782, 1782);
+    const records = [statusRecord(stage, 59), statusRecord(cumulative, 60, true),
+      statusRecord(cumulative)];
+    const progress = browser.buildAgentTestProgressState(records).latest;
+    assert.equal(progress.turn, 60);
+    for (const name of ["current", "best", "start"]) {
+      assert.equal(progress[name].total, 316);
+      assert.equal(progress[name].passed, 316);
+    }
+    assert.equal(browser.buildAgentTestProgressState([statusRecord(cumulative)]).latest, null,
+      "an aggregate alone cannot establish an assignment's total");
+  });
+}
+
+test("failing cumulative summary cannot replace assignment evidence or pass bounds", async () => {
+  const browser = await browserHelpers();
+  const stage = countOnlyStatus("make test-pa12", 300, 316);
+  const records = [statusRecord(stage, 59),
+    statusRecord(countOnlyStatus("make test-report-through-pa12", 1766, 1782))];
+  const progress = browser.buildAgentTestProgressState(records).latest;
+  assert.equal(progress.current.total, 316);
+  assert.equal(progress.current.passed, 300);
+  assert.equal(progress.current.passedUpperBound, 300);
+});
+
+test("individual count-only reports remain assignment progress", async () => {
+  const browser = await browserHelpers();
+  const progress = browser.buildAgentTestProgressState([
+    statusRecord(countOnlyStatus("make test-pa12", 300, 316)),
+  ]).latest;
+  assert.equal(progress.current.total, 316);
+  assert.equal(progress.current.passed, 300);
+});
+
+test("prior-through summary cannot prove the next assignment passed", async () => {
+  const browser = await browserHelpers();
+  const status = countOnlyStatus("make test-report-through-pa11", 1466, 1466);
+  browser.status = status;
+  assert.equal(vm.runInContext(
+    "progressTargetFromTestStatus(status, 'pa12', new Map([['pa12', 316]]))", browser), null);
+});

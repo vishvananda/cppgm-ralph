@@ -115,6 +115,16 @@ function applyPrismTheme(theme) {
 
 function scheduleThemeChartRefresh() {
   window.requestAnimationFrame(() => {
+    if (isCombinedView()) {
+      hydrateCombinedProgressCharts();
+      const cached = state.combinedComparison;
+      if (cached?.data) {
+        delete runComparisonCard.dataset.renderKey;
+        renderCombinedComparisonPanel(cached)
+          .catch((error) => console.error("theme chart refresh failed", error));
+      }
+      return;
+    }
     if (isRunsPage() && !isCombinedView() && state.events.length) {
       renderProgressDock(buildSummary(state.events, state.shapeUsage, selectedRunMeta()));
     }
@@ -139,6 +149,8 @@ const state = {
   codexDetail: null,
   events: [],
   combinedRuns: [],
+  combinedComparison: null,
+  combinedComparisonThrough: null,
   raw: [],
   staticMode: false,
   staticManifest: null,
@@ -152,6 +164,7 @@ const state = {
   runComparisonRequestId: 0,
   loadRequestId: 0,
   compareThrough: null,
+  comparisonRequestId: 0,
   comparisonLayout: "capabilities",
   selectedDocName: null,
   autoRefreshTimer: null,
@@ -872,6 +885,7 @@ function buildSummary(events, shapeUsage = null, run = null) {
     latestTurn: latestTurnOverview(events, priceModel, normalizedShapeUsage, run),
     latestPhaseStatus: latestPhaseStatus(events),
     testProgress,
+    sourceProgressHistory: run?.sourceProgressHistory ?? [],
     latestTestStatus: latestTestStatus(events),
     subagents: buildSubagentStats(events, subagentEstimateModel),
     typeStats: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
@@ -1245,8 +1259,69 @@ function renderProgressDock(summary) {
   updateProgressDockSpace();
 }
 
+function isSourceTranslationRun(run) {
+  return run?.progressModel?.kind === "source-files";
+}
+
+function sourceTranslationProgress(summary, run) {
+  if (!isSourceTranslationRun(run)) return null;
+  const model = run.progressModel;
+  const byTurn = new Map();
+  const history = (summary?.sourceProgressHistory ?? []).filter(point =>
+    point.stage === model.stage && point.total === model.total &&
+    Number.isInteger(point.turn) && point.turn > 0 && Number.isInteger(point.passed) &&
+    point.passed >= 0 && point.passed <= model.total);
+  if (history[0]?.action === "turn-start") {
+    byTurn.set(history[0].turn - 1, { turn: history[0].turn - 1, passed: history[0].passed });
+  }
+  for (const point of history) byTurn.set(point.turn, { turn: point.turn, passed: point.passed });
+  for (const progress of summary?.testProgress?.byTurn?.values?.() ?? []) {
+    if (progress.stage !== model.stage || progress.current?.total !== model.total ||
+        !Number.isInteger(progress.turn) || !Number.isInteger(progress.current.passed) ||
+        progress.current.passed < 0 || progress.current.passed > model.total) continue;
+    byTurn.set(progress.turn, { turn: progress.turn, passed: progress.current.passed });
+  }
+  const points = [...byTurn.values()].sort((a, b) => a.turn - b.turn);
+  const latest = points.at(-1);
+  return { total: model.total, current: latest?.passed ?? null, points,
+    phase: summary?.latestPhaseStatus?.status?.stage === model.stage ? "Source translation" :
+      summary?.latestPhaseStatus?.status?.stage ? "Bootstrap proof" : "Source translation" };
+}
+
+function sourceTranslationChartHtml(summary, run) {
+  const progress = sourceTranslationProgress(summary, run);
+  if (!progress) return "";
+  const { points, total, current } = progress;
+  const firstTurn = points[0]?.turn ?? 0;
+  const lastTurn = Math.max(firstTurn + 1, points.at(-1)?.turn ?? 1);
+  const x = turn => 35 + (turn - firstTurn) / (lastTurn - firstTurn) * 310;
+  const peak = Math.max(0, ...points.map(point => point.passed));
+  const scaleMax = Math.min(total, Math.max(10, Math.ceil(peak / 10) * 10));
+  const y = passed => 108 - Math.max(0, Math.min(scaleMax, passed)) / scaleMax * 86;
+  const line = points.map(point => `${x(point.turn).toFixed(2)},${y(point.passed).toFixed(2)}`).join(" ");
+  const chart = points.length ? `<svg viewBox="0 0 365 140" role="img"
+      aria-label="Reviewed source files by turn: ${current} of ${total}">
+      <path class="source-chart-axis" d="M35 20V108H345"/>
+      <text x="30" y="25" text-anchor="end">${scaleMax}</text>
+      <text x="30" y="111" text-anchor="end">0</text>
+      <text x="35" y="128">${firstTurn === 0 ? "start" : `turn ${firstTurn}`}</text>
+      <text x="345" y="128" text-anchor="end">turn ${points.at(-1).turn}</text>
+      <polyline class="source-chart-line" points="${line}"/>
+      ${points.map(point => `<circle class="source-chart-point" cx="${x(point.turn).toFixed(2)}"
+        cy="${y(point.passed).toFixed(2)}" r="2"><title>${point.turn === 0 ? "Start" : `Turn ${point.turn}`}: ${point.passed}/${total} files</title></circle>`).join("")}
+    </svg>` : '<p class="muted">Waiting for the first source inventory check.</p>';
+  return `<div class="source-translation-panel">
+    <div class="source-translation-heading"><strong>${escapeHtml(progress.phase)}</strong>
+      <span>${current == null ? "—" : fmtInt(current)}/${fmtInt(total)} reviewed files</span></div>
+    ${chart}<p class="muted">Whole-file completion; functional parity and bootstrap are checked separately.</p>
+  </div>`;
+}
+
 function runDetailHtml(summary, run, options = {}) {
-  const progress = summary?.testProgress?.latest ?? null;
+  const originalProgress = summary?.testProgress?.latest ?? null;
+  const sourceRun = isSourceTranslationRun(run);
+  const progress = originalProgress && sourceRun ? { ...originalProgress,
+    displayContext: originalProgress.stage === run.progressModel.stage ? "Source translation" : "Bootstrap proof" } : originalProgress;
   const testStatus = summary?.latestTestStatus?.status ?? null;
   const phaseStatus = summary?.latestPhaseStatus?.status ?? null;
   const latestTurn = summary?.latestTurn ?? null;
@@ -1283,12 +1358,12 @@ function runDetailHtml(summary, run, options = {}) {
     return `${nameHtml}${turnHtml}${progressHtml}${priorFailureHtml}${usageHtml}${updatedHtml}`;
   }
   const phaseHtml = phaseStatus
-    ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(phaseStatusText(phaseStatus))}</span>`
+    ? `<span class="dock-phase${phaseStatus.allRequiredPassed ? " dock-phase-pass" : ""}">${escapeHtml(sourceRun ? `${phaseStatus.phase} / ${progress?.displayContext ?? 'Source translation'}` : phaseStatusText(phaseStatus))}</span>`
     : '<span class="muted">phase n/a</span>';
   const progressHtml = progress
-    ? `<span class="dock-main">${escapeHtml(dockProgressText(progress))}</span>`
+    ? `<span class="dock-main">${escapeHtml(sourceRun ? `${progress.displayContext}: ${progressRatioText(progress.current)}` : dockProgressText(progress))}</span>`
     : '<span class="muted">test progress n/a</span>';
-  const testHtml = testStatus
+  const testHtml = sourceRun ? "" : testStatus
     ? `<span class="dock-tests${testStatus.allTestsPassed ? " dock-tests-pass" : ""}">${escapeHtml(testStatusText(testStatus, { progress }))}</span>`
     : '<span class="muted">tests n/a</span>';
   const turnHtml = latestTurn
@@ -1311,7 +1386,7 @@ function runDetailHtml(summary, run, options = {}) {
 }
 
 function dockProgressBarHtml(phase, progress, model) {
-  const context = [phase?.phase, phaseTargetText(phase) || progress?.stage]
+  const context = [phase?.phase, progress?.displayContext || phaseTargetText(phase) || progress?.stage]
     .filter(Boolean)
     .join(" / ");
   const ariaLabel = dockProgressAriaLabel(context, model, progress);
@@ -1328,16 +1403,35 @@ function dockProgressBarHtml(phase, progress, model) {
   `).join("");
   const singleRowClass = model.rows.length === 1 ? " dock-progress-single-row" : "";
   return `
-    <div class="dock-progress-block${progress?.status === "pass" ? " dock-progress-pass" : ""}">
+    <div class="dock-progress-block${model.current === model.total ? " dock-progress-pass" : ""}">
       <span class="dock-progress-context">${escapeHtml(context || "test progress")}</span>
       <div class="dock-progress-meter">
         <div class="dock-progress-echart${singleRowClass}" role="img" aria-label="${escapeHtml(ariaLabel)}">
           <div class="dock-progress-fallback${singleRowClass}">${fallback}</div>
         </div>
+        ${dockFocusedProgressHtml(model, progress)}
         ${dockProgressLegendHtml(model, progress)}
       </div>
     </div>
   `;
+}
+
+function stageProgressLabel(progress) {
+  return progress?.latestFocused
+    ? progress.fullStageUnmeasured ? "full suite unmeasured" : "last full"
+    : "current";
+}
+
+function dockFocusedProgressHtml(model, progress) {
+  const focused = progress?.latestFocused;
+  if (!(focused?.total > 0)) return "";
+  const width = Math.min(100, focused.total / model.total * 100);
+  const text = focusedProgressText(progress, { plain: true });
+  return `<div class="dock-progress-focused${focused.status === "fail" ? " dock-progress-focused-fail" : ""}"
+      title="Focused subset; the full-suite bar retains its last result">
+    <div class="dock-progress-focused-track" aria-hidden="true"><span style="width:${width}%"></span></div>
+    <span>${escapeHtml(text)}</span>
+  </div>`;
 }
 
 function dockProgressLegendHtml(model, progress) {
@@ -1349,14 +1443,11 @@ function dockProgressLegendHtml(model, progress) {
     ? `${fmtInt(model.current)}-${fmtInt(model.currentUpper)}`
     : fmtInt(model.current);
   items.push(
-    { key: "current", text: `current ${currentText}` },
+    { key: "current", text: `${stageProgressLabel(progress)} ${currentText}` },
     ...(model.isBounded
-      ? [{ key: "unknown", text: `unrun ${fmtInt(model.unknown)}` }]
+      ? [{ key: "unknown", text: `${progress?.fullStageUnmeasured ? "unmeasured" : "unrun"} ${fmtInt(model.unknown)}` }]
       : []),
     { key: "best", text: `best ${fmtInt(model.best)}` },
-    ...(passingFocusedProgressText(progress, { plain: true })
-      ? [{ key: "focused", text: passingFocusedProgressText(progress, { plain: true }), noSwatch: true }]
-      : []),
     { key: "total", text: `${fmtInt(model.total)} total` },
   );
   return `<div class="dock-progress-legend">${items.map((item) => `
@@ -1374,11 +1465,13 @@ function dockProgressAriaLabel(context, model, progress = null) {
     parts.push(`reached a best of ${model.best}, ${model.bestDelta} above the start`);
   }
   parts.push(model.isBounded
-    ? `between ${model.current} and ${model.currentUpper} currently passing`
-    : `${model.current} currently passing`);
+    ? `${stageProgressLabel(progress)} result: between ${model.current} and ${model.currentUpper} passing`
+    : `${stageProgressLabel(progress)} result: ${model.current} passing`);
   if (model.isBounded) {
     parts.push(`${model.knownFailed} confirmed failing`);
-    parts.push(`${model.unknown} not run after the first failure`);
+    parts.push(progress?.fullStageUnmeasured
+      ? `${model.unknown} not measured in a full-suite run`
+      : `${model.unknown} not run after the first failure`);
   } else if (model.regression > 0) {
     parts.push(`${model.regression} below the best`);
   }
@@ -1386,7 +1479,7 @@ function dockProgressAriaLabel(context, model, progress = null) {
     parts.push(`${model.remaining} remaining`);
   }
   parts.push(`${model.total} total`);
-  const focused = passingFocusedProgressText(progress, { plain: true });
+  const focused = focusedProgressText(progress, { plain: true });
   if (focused) parts.push(`latest ${focused}`);
   return parts.join(", ");
 }
@@ -1451,7 +1544,7 @@ function renderDockProgressChart(el, phase, progress, model) {
       backgroundColor: cssThemeColor("--surface-raised", "#171717"),
       borderColor: cssThemeColor("--border", "#333"),
       textStyle: { color: cssThemeColor("--text", "#ddd"), fontSize: 11 },
-      formatter: () => dockProgressTooltipHtml(model),
+      formatter: () => dockProgressTooltipHtml(model, progress),
     },
     xAxis: {
       type: "value",
@@ -1502,13 +1595,13 @@ function renderDockProgressChart(el, phase, progress, model) {
   }
 }
 
-function dockProgressTooltipHtml(model) {
+function dockProgressTooltipHtml(model, progress) {
   const bestDelta = `+${fmtInt(model.bestDelta)}`;
   const regression = `-${fmtInt(model.regression)}`;
   return `
     <div class="dock-progress-tooltip">
       ${model.hasStart ? `<div><span>Start</span><strong>${fmtInt(model.start)}</strong></div>` : ""}
-      <div><span>Current</span><strong>${model.isBounded ? `${fmtInt(model.current)}-${fmtInt(model.currentUpper)}` : fmtInt(model.current)}</strong></div>
+      <div><span>${escapeHtml(stageProgressLabel(progress))}</span><strong>${model.isBounded ? `${fmtInt(model.current)}-${fmtInt(model.currentUpper)}` : fmtInt(model.current)}</strong></div>
       <div><span>Best</span><strong>${fmtInt(model.best)}</strong></div>
       ${model.hasStart ? `<div><span>Peak gain</span><strong>${bestDelta}</strong></div>` : ""}
       ${model.isBounded
@@ -1522,11 +1615,11 @@ function dockProgressTooltipHtml(model) {
 }
 
 function disposeProgressDockChart(container = progressDock) {
-  const el = container?.querySelector?.(".dock-progress-echart");
-  if (!el) return;
-  el._ralphResizeObserver?.disconnect?.();
-  el._ralphResizeObserver = null;
-  window.echarts?.getInstanceByDom?.(el)?.dispose?.();
+  for (const el of container?.querySelectorAll?.(".dock-progress-echart") ?? []) {
+    el._ralphResizeObserver?.disconnect?.();
+    el._ralphResizeObserver = null;
+    window.echarts?.getInstanceByDom?.(el)?.dispose?.();
+  }
 }
 
 function setProgressDockHtml(html) {
@@ -5485,6 +5578,37 @@ function buildAgentTestProgressState(records) {
     byTurn.set(turn, progress);
     if (!latest || turn >= latest.turn) latest = progress;
   }
+  for (const record of records) {
+    if (record.eventType !== "ralph.source-progress") continue;
+    const source = record.event?.sourceProgress;
+    const turn = displayTurnForRecord(record);
+    const progress = byTurn.get(turn);
+    if (source?.stage !== "pa33" || progress?.stage !== source.stage ||
+        !Number.isInteger(source.current?.passed) || source.current.passed < 0 ||
+        !Number.isInteger(source.current?.total) || source.current.total <= 0 ||
+        source.current.passed > source.current.total) continue;
+    const combine = (tests, review) => tests && review ? { ...tests,
+      passed: tests.passed + review.passed,
+      passedUpperBound: (tests.passedUpperBound ?? tests.passed) + review.passed,
+      total: tests.total + review.total } : null;
+    let tests = progress.testProgress ?? progress.current;
+    if (source.tests?.total > 0 &&
+        Date.parse(source.tests.recordedAt) >= Date.parse(tests.recordedAt ?? progress.recordedAt ?? "")) {
+      tests = source.tests;
+    }
+    const testStart = progress.sourceResponsibilities ? progress.testStart : progress.start;
+    const current = combine(tests, source.current);
+    const start = combine(testStart, source.start);
+    if (start) start.total = current.total;
+    const previousBest = progress.sourceResponsibilities ? progress.best : start;
+    const combined = { ...progress, current, start,
+      best: previousBest?.total === current.total && previousBest.passed > current.passed ? previousBest : current,
+      recordedAt: record.recordedAt, unit: "items",
+      sourceResponsibilities: source.current, testProgress: tests, testStart,
+      status: current.passed === current.total ? "pass" : "running" };
+    byTurn.set(turn, combined);
+    if (latest?.turn === turn) latest = combined;
+  }
   return { byTurn, latest, testStatusesByTurn };
 }
 
@@ -5631,8 +5755,6 @@ function buildConfiguredCheckProgress(records) {
   }
   return byTurn;
 }
-
-
 
 function applyProgressBestCache(progressState, run = null) {
   if (!progressState) {
@@ -5824,7 +5946,7 @@ function deriveRalphTestProgress(record, tracker) {
     return null;
   }
   const turn = displayTurnForRecord(record);
-  const target = progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+  const target = progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage, tracker.stageTotals);
   if (!target) {
     return null;
   }
@@ -5833,6 +5955,9 @@ function deriveRalphTestProgress(record, tracker) {
     return null;
   }
   const progress = progressFromTestStatus(testStatus, configured.stage, tracker);
+  if (!progress) {
+    return null;
+  }
   if (record.eventType === "ralph.phase-status" && record.event?.action === "turn-start") {
     return {
       stage: configured.stage,
@@ -5902,7 +6027,7 @@ function progressTargetFromRecord(record, stageTotalAnchors) {
   if (!testStatus) {
     return null;
   }
-  return progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage);
+  return progressTargetFromTestStatus(testStatus, record.event?.phaseStatus?.stage, stageTotalAnchors);
 }
 
 function progressPhaseTargetFromRecord(record, stageTotalAnchors) {
@@ -5926,7 +6051,22 @@ function ralphTestStatusFromRecord(record) {
   return null;
 }
 
-function progressTargetFromTestStatus(testStatus, phaseStage = null) {
+function cumulativeTestStatus(testStatus) {
+  const command = parseAgentTestCommand(testStatus?.command ?? "");
+  return command?.kind === "through" ||
+    (command?.kind === "selected" && command.stages.length > 1) ||
+    (testStatus?.stageCount ?? 0) > 1;
+}
+
+function cumulativeTestStatusCoversStage(testStatus, stage) {
+  const command = parseAgentTestCommand(testStatus?.command ?? "");
+  if (command?.kind === "through") {
+    return stageNumber(stage) <= command.stageNumber;
+  }
+  return command?.stages?.includes(stage) ?? false;
+}
+
+function progressTargetFromTestStatus(testStatus, phaseStage = null, stageTotals = new Map()) {
   const stages = Array.isArray(testStatus?.stages) ? testStatus.stages : [];
   const normalizedPhaseStage = normalizeStageName(phaseStage);
   const phaseStageMatchesStatus =
@@ -5943,6 +6083,13 @@ function progressTargetFromTestStatus(testStatus, phaseStage = null) {
     return null;
   }
   const stageStatus = stages.find((candidate) => candidate?.name === stage);
+  // A cumulative summary describes the whole prefix, not the named assignment.
+  // Without its own row, only a separately verified assignment total is usable.
+  if (!stageStatus && cumulativeTestStatus(testStatus)) {
+    const total = !testStatusHasSubset(testStatus) && cumulativeTestStatusCoversStage(testStatus, stage)
+      ? finitePositiveNumber(stageTotals.get(stage)) : null;
+    return total ? { stage, total, recordedAt: testStatus.recordedAt ?? null } : null;
+  }
   const total = testStatusHasSubset(testStatus) && normalizeStageName(testStatus?.targetStage) === stage
     ? finitePositiveNumber(testStatus?.testsTotal) ?? finitePositiveNumber(stageStatus?.total)
     : finitePositiveNumber(stageStatus?.total) ?? finitePositiveNumber(testStatus?.testsTotal);
@@ -5982,6 +6129,13 @@ function progressFromTestStatus(testStatus, stage, tracker) {
         inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ?? 0,
       status: stageStatus.status === "pass" || testStatus.allTestsPassed ? "pass" : "fail",
     };
+  }
+  if (cumulativeTestStatus(testStatus)) {
+    const total = tracker.stageTotals.get(stage);
+    // All-pass proves every included assignment passed. A failing aggregate
+    // cannot locate those failures, so keep the last assignment observation.
+    return testStatus.allTestsPassed && total > 0 && cumulativeTestStatusCoversStage(testStatus, stage)
+      ? { passed: total, passedUpperBound: total, status: "pass" } : null;
   }
   return {
     passed: inferredStagePassedFromThroughStatus(testStatus, stage, tracker) ??
@@ -6370,7 +6524,7 @@ function applyAgentTestProgressObservation(tracker, observation) {
   }
   const anchoredStageTotal = target?.total ?? tracker.stageTotals.get(observation.stage) ?? 0;
   if (
-    observation.partialStage &&
+    (observation.partialStage || observation.hasSubset) &&
     anchoredStageTotal > observation.total
   ) {
     const anchored = TEST_PROGRESS_EVIDENCE?.anchorPartialStageEvidence(
@@ -6442,16 +6596,20 @@ function applyAgentTestProgressObservation(tracker, observation) {
           passedUpperBound: previousCurrent.passedUpperBound ?? previousCurrent.passed,
           total: Math.max(previousCurrent.total ?? 0, knownTotal),
         }
-      : observedCurrent;
+      : observation.hasSubset && !previousCurrent
+        ? { passed: 0, passedUpperBound: knownTotal, total: knownTotal }
+        : observedCurrent;
   const current = TEST_PROGRESS_EVIDENCE?.selectCurrentStageEvidence(
     previousCurrent,
     candidateCurrent,
     observation,
   ) ?? candidateCurrent;
-  tracker.stageCurrent.set(bestKey, current);
+  if (!observation.hasSubset) tracker.stageCurrent.set(bestKey, current);
   const previousBest = tracker.stageBest.get(bestKey);
   const best =
-    !previousBest || current.passed >= previousBest.passed
+    previousBest && observation.hasSubset
+      ? previousBest
+      : !previousBest || current.passed >= previousBest.passed
       ? { ...current, recordedAt: observation.recordedAt }
       : previousBest;
   const normalizedBest = {
@@ -6459,13 +6617,14 @@ function applyAgentTestProgressObservation(tracker, observation) {
     total: Math.max(best.total ?? 0, knownTotal),
   };
 
-  tracker.stageBest.set(bestKey, normalizedBest);
+  if (!observation.hasSubset) tracker.stageBest.set(bestKey, normalizedBest);
   const progress = {
     ...observation,
     current,
     best: normalizedBest,
     start: tracker.stageBaseline.get(bestKey) ?? null,
     latestFocused: focusedEvidence,
+    ...(focusedEvidence && !previousCurrent ? { fullStageUnmeasured: true } : {}),
   };
   if (shouldReplaceLatestAgentTestProgress(tracker.latest, progress)) {
     tracker.latest = progress;
@@ -6750,8 +6909,8 @@ function latestProgressSummaryHtml(progress) {
   }
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
   return [
-    `<span class="summary-progress">${escapeHtml(turnText)} ${escapeHtml(progress.stage)} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}</span>`,
-    passingFocusedProgressText(progress),
+    `<span class="summary-progress">${escapeHtml(turnText)} ${escapeHtml(progress.stage)} ${stageProgressLabel(progress)} ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}</span>`,
+    focusedProgressText(progress),
     `<span class="muted">${escapeHtml(progress.commandTarget)}</span>`,
   ].filter(Boolean).join(" ");
 }
@@ -6763,8 +6922,8 @@ function dockProgressText(progress) {
   const turnText = Number.isInteger(progress.turn) ? `turn ${progress.turn}` : "setup";
   if (progress.unit === "checks") return `${turnText} ${progress.stage} ${progressRatioText(progress.current)} tests`;
   const runningText = progress.status === "running" ? " running" : "";
-  const focused = passingFocusedProgressText(progress, { plain: true });
-  return `${turnText} ${progress.stage} current ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${focused ? `; ${focused}` : ""}${runningText}`;
+  const focused = focusedProgressText(progress, { plain: true });
+  return `${turnText} ${progress.stage} ${stageProgressLabel(progress)} ${progressRatioText(progress.current)}; best ${progressRatioText(progress.best)}${focused ? `; ${focused}` : ""}${runningText}`;
 }
 
 function dockPhaseProgressText(phase, progress) {
@@ -6773,12 +6932,12 @@ function dockPhaseProgressText(phase, progress) {
   const target = phaseTargetText(phase) || progress?.stage || "";
   if (target) parts.push(target);
   if (progress?.current) {
-    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
+    parts.push(`${stageProgressLabel(progress)} ${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
     if (progress.start) parts.push(`start ${progressRatioText(progress.start)}`);
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
     }
-    const focused = passingFocusedProgressText(progress, { plain: true });
+    const focused = focusedProgressText(progress, { plain: true });
     if (focused) parts.push(focused);
     if (progress.status === "running") parts.push("running");
   } else if (phase?.allRequiredPassed) {
@@ -6793,11 +6952,11 @@ function turnPhaseProgressText(phase, progress) {
   const target = phaseTargetText(phase) || progress?.stage || "";
   if (target) parts.push(target);
   if (progress?.current) {
-    parts.push(`${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
+    parts.push(`${stageProgressLabel(progress)} ${progressRatioText(progress.current)}${progress.unit === "checks" ? " tests" : ""}`);
     if (progress.best && progress.best.passed > progress.current.passed) {
       parts.push(`best ${progressRatioText(progress.best)}`);
     }
-    const focused = passingFocusedProgressText(progress, { plain: true });
+    const focused = focusedProgressText(progress, { plain: true });
     if (focused) parts.push(focused);
     if (progress.status === "running") parts.push("running");
   }
@@ -6841,12 +7000,12 @@ function progressRatioText(value) {
   return `${upper > lower ? `${lower}-${upper}` : lower}/${total}`;
 }
 
-function passingFocusedProgressText(progress, options = {}) {
+function focusedProgressText(progress, options = {}) {
   const focused = progress?.latestFocused;
-  if (focused?.status !== "pass" || !(focused.total > 0)) {
+  if (!(focused?.total > 0)) {
     return "";
   }
-  const text = `focused ${focused.passed ?? 0}/${focused.total}`;
+  const text = `focused ${progressRatioText(focused)} ${focused.status ?? "unknown"}`;
   return options.plain
     ? text
     : `<span class="muted">${escapeHtml(text)}</span>`;
@@ -6867,7 +7026,7 @@ function testStatusText(ts, options = {}) {
   const parts = currentFull
     ? [
         `full beginning ${testStatusPassingRange(ts)}/${ts.testsTotal} tests`,
-        `full current ${testStatusPassingRange(currentFull)}/${currentFull.testsTotal} est`,
+        `full ${stageProgressLabel(options.progress)} ${testStatusPassingRange(currentFull)}/${currentFull.testsTotal} est`,
       ]
     : [`full ${testStatusPassingRange(ts)}/${ts.testsTotal} tests`];
   if (ts.stageCount > 0) parts.push(`${ts.stagesPassed}/${ts.stageCount} stages`);
@@ -7265,6 +7424,8 @@ function renderTimeline(records) {
     fragment.append(turnEl);
   }
   const contentScrollPositions = captureContentScrollPositions();
+  disposeComparisonCharts(timelineEl);
+  disposeProgressDockChart(timelineEl);
   timelineEl.replaceChildren(fragment);
   restoreContentScrollPositions(contentScrollPositions);
   scrollDebug("render-timeline-after", {
@@ -7592,6 +7753,7 @@ async function loadRuns(options = {}) {
     opt.textContent = "No runs found";
     runSelect.append(opt);
     summaryEl.innerHTML = "";
+    disposeProgressDockChart(timelineEl);
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
     state.shapeUsage = null;
@@ -7643,10 +7805,10 @@ async function loadCombinedRuns(options = {}) {
   const requestId = options.requestId ?? ++state.loadRequestId;
   setCombinedModeActive(true);
   hideRunDocsPanel();
-  hideRunComparisonPanel();
   setViewTitles("Active Runs", "Recent Cards");
   setSelectedRun(runSelect.value || state.selectedRun);
   const activeRuns = state.staticMode ? staticCombinedRuns() : state.runs.filter(isActiveRunMeta);
+  scheduleCombinedComparisonPanel(activeRuns);
   const query = combinedRunQueryParams().toString();
   const loaded = await Promise.all(activeRuns.map(async (run) => {
     try {
@@ -7655,11 +7817,13 @@ async function loadCombinedRuns(options = {}) {
         : await fetchJson(`/api/run/${encodeURIComponent(run.id)}?${query}`);
       const events = collapseMirroredCodexItems(data.events ?? []);
       const shapeUsage = normalizeShapeUsage(data.shapeUsage);
+      const loadedRun = { ...run,
+        ...(data.sourceProgressHistory ? { sourceProgressHistory: data.sourceProgressHistory } : {}) };
       return {
-        run,
+        run: loadedRun,
         events,
         shapeUsage,
-        summary: buildSummary(events, shapeUsage, run),
+        summary: buildSummary(events, shapeUsage, loadedRun),
         error: null,
       };
     } catch (error) {
@@ -7721,6 +7885,8 @@ async function loadRun(id, options = {}) {
 
   const rawEvents = data.events ?? [];
   state.events = collapseMirroredCodexItems(rawEvents);
+  const runMeta = state.runs.find(run => run.id === id);
+  if (runMeta) runMeta.sourceProgressHistory = data.sourceProgressHistory ?? [];
   state.combinedRuns = [];
   state.shapeUsage = normalizeShapeUsage(data.shapeUsage);
   state.codexDetail = data.codexDetail ?? null;
@@ -7756,6 +7922,7 @@ function staticCombinedRuns() {
 }
 
 async function renderComparisonView() {
+  const requestId = ++state.comparisonRequestId;
   setCombinedModeActive(false);
   hideRunDocsPanel();
   hideRunComparisonPanel();
@@ -7765,19 +7932,28 @@ async function renderComparisonView() {
   state.shapeUsage = null;
   state.codexDetail = null;
   state.raw = [];
-  if (!state.staticMode) {
-    summaryEl.innerHTML = '<div class="summary-wide muted">Comparison data is available in static exports.</div>';
+  if (!timelineEl.querySelector(".comparison-charts")) {
+    summaryEl.innerHTML = '<div class="summary-wide muted">Loading comparison...</div>';
+  }
+  let comparison;
+  try {
+    comparison = await loadComparison();
+  } catch (error) {
+    if (requestId !== state.comparisonRequestId || currentViewerMode() !== "compare") return;
+    summaryEl.innerHTML = `<div class="summary-wide muted">Comparison unavailable: ${escapeHtml(error.message)}</div>`;
+    disposeComparisonCharts(timelineEl);
+    disposeProgressDockChart(timelineEl);
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
-    if (progressDock) {
-      setProgressDockHtml('<span class="muted">No static comparison data</span>');
-      updateProgressDockSpace();
-    }
+    setProgressDockHtml('<span class="muted">Comparison unavailable</span>');
+    updateProgressDockSpace();
     return;
   }
-  const comparison = await loadStaticComparison();
+  if (requestId !== state.comparisonRequestId || currentViewerMode() !== "compare") return;
   if (!comparison) {
     summaryEl.innerHTML = '<div class="summary-wide muted">No comparison data exported.</div>';
+    disposeComparisonCharts(timelineEl);
+    disposeProgressDockChart(timelineEl);
     timelineEl.innerHTML = "";
     eventCountEl.textContent = "";
     return;
@@ -7793,6 +7969,7 @@ async function renderComparisonView() {
   const orderedRuns = runOrder.map((index) => comparison.runs[index]);
   const totals = runOrder.map((index) => comparisonTotalForRows(rows, index));
   await ensureEChartsLoaded();
+  if (requestId !== state.comparisonRequestId || currentViewerMode() !== "compare") return;
   summaryEl.innerHTML = `
     <div><strong>through</strong><select id="compareThrough" class="comparison-select">${comparisonThroughOptions(displayRows, through)}</select></div>
     <div><strong>runs</strong>${fmtInt(comparison.runs.length)}</div>
@@ -7808,6 +7985,7 @@ async function renderComparisonView() {
   document.getElementById("compareLayout")?.addEventListener("change", (event) => {
     state.comparisonLayout = event.target.value;
     state.compareThrough = null;
+    state.combinedComparisonThrough = null;
     state.runComparisonThrough.clear();
     renderComparisonView().catch((error) => console.error("comparison render failed", error));
   });
@@ -7845,6 +8023,7 @@ async function renderComparisonView() {
   tableScroll.append(table);
   content.append(charts, tableScroll);
   disposeComparisonCharts(timelineEl);
+  disposeProgressDockChart(timelineEl);
   timelineEl.replaceChildren(content);
   hydrateComparisonCharts(charts, rows, runOrder, orderedRuns);
   eventCountEl.textContent = `${fmtInt(rows.length)} milestones / ${fmtInt(comparison.runs.length)} runs`;
@@ -7856,6 +8035,15 @@ async function renderComparisonView() {
     `);
     updateProgressDockSpace();
   }
+}
+
+async function loadComparison() {
+  if (state.staticMode) return loadStaticComparison();
+  const params = new URLSearchParams();
+  for (const run of state.runs.filter(isActiveRunMeta)) {
+    params.append("run", run.id);
+  }
+  return fetchJson(`/api/comparison?${params}`);
 }
 
 async function loadStaticComparison() {
@@ -7872,7 +8060,7 @@ async function loadStaticComparison() {
 
 function comparisonRunOrder(runs) {
   // Give shown runs the most distinct colors before allocating any to hidden runs.
-  return runs.map((_, index) => index).sort((a, b) =>
+  return runs.map((_, index) => index).filter(index => runs[index]?.progressModel?.kind !== "source-files").sort((a, b) =>
     Number(comparisonRunVisible(runs[b], b)) - Number(comparisonRunVisible(runs[a], a))
     || Number(runs[b]?.highlighted === true) - Number(runs[a]?.highlighted === true)
     || a - b);
@@ -8577,6 +8765,7 @@ function hideRunComparisonPanel() {
     runComparisonCard.hidden = true;
     delete runComparisonCard.dataset.runId;
     delete runComparisonCard.dataset.renderKey;
+    delete runComparisonCard.dataset.mode;
   }
   if (runComparisonEl) {
     runComparisonEl.innerHTML = "";
@@ -8587,6 +8776,80 @@ function hideRunComparisonPanel() {
   if (runComparisonThrough) {
     runComparisonThrough.disabled = true;
   }
+}
+
+function scheduleCombinedComparisonPanel(runs) {
+  if (!runComparisonCard || !runComparisonEl) return;
+  const key = runs.map(run => run.id).sort().join("\0");
+  const cached = state.combinedComparison?.key === key ? state.combinedComparison : null;
+  if (cached?.data) {
+    renderCombinedComparisonPanel(cached)
+      .catch((error) => console.error("combined comparison render failed", error));
+    if (cached.promise || Date.now() - cached.loadedAt < RUN_COMPARISON_REFRESH_MS) return;
+  } else {
+    if (runComparisonCard.dataset.mode !== "combined") {
+      disposeComparisonCharts(runComparisonEl);
+      runComparisonEl.innerHTML = '<div class="run-comparison-status muted">Loading comparison...</div>';
+    }
+    runComparisonCard.dataset.mode = "combined";
+    runComparisonCard.hidden = false;
+    runComparisonMeta.textContent = "Loading comparison...";
+    runComparisonThrough.disabled = true;
+  }
+  if (cached?.promise) return;
+  const entry = { key, data: cached?.data ?? null, loadedAt: cached?.loadedAt ?? 0, promise: null };
+  state.combinedComparison = entry;
+  entry.promise = loadComparison()
+    .then(async (data) => {
+      if (state.combinedComparison !== entry) return;
+      entry.data = data;
+      entry.loadedAt = Date.now();
+      await renderCombinedComparisonPanel(entry);
+    })
+    .catch((error) => {
+      if (state.combinedComparison !== entry || !isCombinedView()) return;
+      runComparisonMeta.textContent = `Comparison unavailable: ${error.message}`;
+      if (!entry.data) {
+        disposeComparisonCharts(runComparisonEl);
+        runComparisonEl.innerHTML = `<div class="run-comparison-status muted">Comparison unavailable: ${escapeHtml(error.message)}</div>`;
+      }
+    })
+    .finally(() => { entry.promise = null; });
+}
+
+async function renderCombinedComparisonPanel(entry) {
+  if (!isCombinedView() || state.combinedComparison !== entry || !entry?.data) return;
+  const comparison = entry.data;
+  const displayLayout = state.comparisonLayout;
+  const rows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, displayLayout);
+  const requested = Number.parseInt(state.combinedComparisonThrough, 10);
+  const through = Math.max(1, Math.min(rows.length,
+    Number.isFinite(requested) ? requested : defaultCombinedComparisonThrough(comparison, rows)));
+  const renderKey = `combined:${entry.key}:${entry.loadedAt}:${displayLayout}:${through}`;
+  if (runComparisonCard.dataset.renderKey === renderKey) return;
+  await ensureEChartsLoaded();
+  if (!isCombinedView() || state.combinedComparison !== entry ||
+      entry.data !== comparison || state.comparisonLayout !== displayLayout) return;
+  const shownRows = rows.slice(0, through);
+  const runOrder = comparisonRunOrder(comparison.runs);
+  const orderedRuns = runOrder.map(index => comparison.runs[index]);
+  const charts = renderComparisonCharts(shownRows, runOrder, orderedRuns);
+  disposeComparisonCharts(runComparisonEl);
+  runComparisonEl.replaceChildren(charts);
+  runComparisonCard.hidden = false;
+  hydrateComparisonCharts(charts, shownRows, runOrder, orderedRuns);
+  runComparisonLayout.innerHTML = comparisonLayoutOptions(displayLayout);
+  runComparisonThrough.innerHTML = comparisonThroughOptions(rows, through);
+  runComparisonThrough.disabled = false;
+  runComparisonThrough.hidden = false;
+  runComparisonLayout.hidden = false;
+  const sourceRuns = comparison.runs.filter(run => isSourceTranslationRun(run)).length;
+  const currentPaRuns = (comparison.localRunIndices ?? []).filter(index => !isSourceTranslationRun(comparison.runs[index])).length;
+  runComparisonMeta.textContent = `${fmtInt(currentPaRuns)} current / ${fmtInt(runOrder.length)} PA runs` +
+    (sourceRuns ? ` · ${sourceRuns} source translation${sourceRuns === 1 ? "" : "s"} shown below` : "");
+  runComparisonCard.dataset.mode = "combined";
+  runComparisonCard.dataset.renderKey = renderKey;
+  runComparisonCard.hidden = false;
 }
 
 function comparisonForStaticRun(comparison, run) {
@@ -8610,6 +8873,19 @@ function comparisonForStaticRun(comparison, run) {
 function scheduleRunComparisonPanel(run) {
   if (!runComparisonCard || !runComparisonEl || !run) {
     hideRunComparisonPanel();
+    return;
+  }
+  if (isSourceTranslationRun(run)) {
+    state.runComparisonRequestId += 1;
+    disposeComparisonCharts(runComparisonEl);
+    const summary = buildSummary(state.events, state.shapeUsage, run);
+    runComparisonEl.innerHTML = sourceTranslationChartHtml(summary, run);
+    runComparisonCard.hidden = false;
+    runComparisonCard.dataset.mode = "source-files";
+    delete runComparisonCard.dataset.renderKey;
+    runComparisonMeta.textContent = "Source-file progress by turn";
+    runComparisonThrough.hidden = true;
+    runComparisonLayout.hidden = true;
     return;
   }
   const now = Date.now();
@@ -8693,8 +8969,27 @@ function defaultRunComparisonThrough(comparison, rows = ASSIGNMENT_LAYOUT.compar
   return Math.max(1, Math.min(rows.length, currentPa + 1));
 }
 
+function defaultCombinedComparisonThrough(comparison, rows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, state.comparisonLayout)) {
+  const runs = comparison?.runs ?? [];
+  const indices = Array.isArray(comparison?.localRunIndices)
+    ? comparison.localRunIndices
+    : runs.flatMap((run, index) => run.highlighted === true ? [index] : []);
+  const activeIndices = indices.filter(index => Number.isInteger(index) && index >= 0 && index < runs.length &&
+    runs[index]?.progressModel?.kind !== "source-files");
+  if (!activeIndices.length) return Math.max(1, rows.length);
+  let current = 0;
+  for (const [index, row] of rows.entries()) {
+    if (activeIndices.some(runIndex => comparisonSummaryStarted(row?.runs?.[runIndex]))) {
+      current = index + 1;
+    }
+  }
+  return Math.max(1, Math.min(rows.length, current + 1));
+}
+
 async function renderRunComparisonPanel(run, comparison, loadedAt) {
   const runs = comparison?.runs ?? [];
+  runComparisonThrough.hidden = false;
+  runComparisonLayout.hidden = false;
   const displayLayout = state.comparisonLayout;
   const allRows = ASSIGNMENT_LAYOUT.comparisonRows(comparison, displayLayout);
   const requestedThrough = Number.parseInt(state.runComparisonThrough.get(run.id), 10);
@@ -8884,6 +9179,9 @@ function setViewTitles(summaryText, timelineText) {
 }
 
 function setCombinedModeActive(active) {
+  if (!active && document.body.classList.contains("is-combined-view")) {
+    hideRunComparisonPanel();
+  }
   document.body.classList.toggle("is-combined-view", active);
 }
 
@@ -8903,7 +9201,10 @@ function isActiveRunMeta(run) {
 }
 
 function renderCombinedRuns(runs) {
-  const loaded = Array.isArray(runs) ? runs : [];
+  const loaded = Array.isArray(runs) ? [...runs].sort((left, right) =>
+    String(left.run.label ?? left.run.id).localeCompare(
+      String(right.run.label ?? right.run.id), "en", { numeric: true }) ||
+    String(left.run.id).localeCompare(String(right.run.id), "en")) : [];
   const activeCount = loaded.length;
   const errorCount = loaded.filter((entry) => entry.error).length;
   const totalCards = loaded.reduce((sum, entry) => sum + latestCombinedEntries(entry.events).length, 0);
@@ -8932,7 +9233,10 @@ function renderCombinedRuns(runs) {
     fragment.append(renderCombinedRun(entry));
   }
 
+  disposeComparisonCharts(timelineEl);
+  disposeProgressDockChart(timelineEl);
   timelineEl.replaceChildren(fragment);
+  hydrateCombinedProgressCharts(loaded);
   renderCombinedProgressDock(loaded);
 }
 
@@ -8969,6 +9273,11 @@ function renderCombinedRun(entry) {
     details.innerHTML = runDetailHtml(entry.summary, entry.run, { includeName: false, metaClass: "combined-run-meta" });
   }
   header.append(details);
+  if (!entry.error && isSourceTranslationRun(entry.run)) {
+    const sourceProgress = document.createElement("div");
+    sourceProgress.innerHTML = sourceTranslationChartHtml(entry.summary, entry.run);
+    header.append(sourceProgress);
+  }
   runEl.append(header);
 
   const feed = document.createElement("div");
@@ -8992,7 +9301,32 @@ function renderCombinedRun(entry) {
     feed.append(el);
   });
   runEl.append(feed);
+  if (!entry.error) {
+    const progress = document.createElement("div");
+    progress.className = "combined-run-progress";
+    progress.dataset.runId = entry.run.id;
+    progress.setAttribute("aria-label", `${entry.run.label ?? entry.run.id} progress`);
+    progress.innerHTML = runDetailHtml(entry.summary, entry.run, {
+      includeName: false,
+      metaClass: "combined-run-meta",
+      compact: true,
+    });
+    runEl.append(progress);
+  }
   return runEl;
+}
+
+function hydrateCombinedProgressCharts(entries = state.combinedRuns) {
+  const runs = new Map(entries.map((entry) => [entry.run.id, entry]));
+  for (const panel of timelineEl.querySelectorAll(".combined-run-progress")) {
+    const entry = runs.get(panel.dataset.runId);
+    if (!entry) continue;
+    hydrateDockProgressChart(
+      panel,
+      entry.summary?.latestPhaseStatus?.status ?? null,
+      entry.summary?.testProgress?.latest ?? null,
+    );
+  }
 }
 
 function latestCombinedEntries(records, limit = COMBINED_RUN_CARD_LIMIT) {
@@ -9686,6 +10020,12 @@ if (combinedViewToggle) {
 }
 if (runComparisonThrough) {
   runComparisonThrough.addEventListener("change", () => {
+    if (isCombinedView()) {
+      state.combinedComparisonThrough = Number.parseInt(runComparisonThrough.value, 10);
+      renderCombinedComparisonPanel(state.combinedComparison)
+        .catch((error) => console.error("combined comparison render failed", error));
+      return;
+    }
     const runId = state.selectedRun;
     const cached = state.runComparisons.get(runId);
     if (!runId || !cached?.data) {
@@ -9709,6 +10049,12 @@ runComparisonLayout?.addEventListener("change", () => {
   state.comparisonLayout = runComparisonLayout.value;
   state.runComparisonThrough.clear();
   state.compareThrough = null;
+  state.combinedComparisonThrough = null;
+  if (isCombinedView()) {
+    renderCombinedComparisonPanel(state.combinedComparison)
+      .catch((error) => console.error("combined comparison render failed", error));
+    return;
+  }
   const runId = state.selectedRun;
   const cached = state.runComparisons.get(runId);
   if (cached?.data) {

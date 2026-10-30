@@ -133,6 +133,11 @@
     if (!previous) {
       return candidate;
     }
+    // A subset is separate evidence, not a replacement for the last stage run.
+    // Keep failed focused checks visible separately as well as passing ones.
+    if (observation?.hasSubset === true) {
+      return previous;
+    }
     const previousUpper = Number.isFinite(previous?.passedUpperBound)
       ? previous.passedUpperBound
       : previous?.passed;

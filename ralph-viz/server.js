@@ -27,6 +27,7 @@ import {
 import { addUnrealSessionDisplayEvents } from "../unreal-session-events.js";
 import { compactRunUsageEvent } from "../run-usage-events.js";
 import { codexCommandCompletionEvent } from "../codex-session-events.js";
+import { augmentSourceResponsibilityProgress } from "./source-responsibilities.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -96,6 +97,8 @@ let PUBLISHED_COMPARISON_CACHE = null;
 let PUBLISHED_COMPARISON_READ = null;
 const LOCAL_COMPARISON_CACHE = new Map();
 const LOCAL_COMPARISON_READS = new Map();
+const LIVE_COMPARISON_CACHE = new Map();
+const LIVE_COMPARISON_READS = new Map();
 const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Scan .ralph/*/events/*.jsonl
@@ -135,6 +138,8 @@ async function listFiles() {
     if (error?.code === "ENOENT") return [];
     throw error;
   }
+  const descriptors = await discoverRalphConfigDescriptors();
+  const progressModels = new Map(descriptors.map((entry) => [entry.runName, entry.progressModel]));
   const withStats = await Promise.all(results.map(async (entry) => {
     const eventStat = await fs.stat(entry.filePath);
     let stateStat = null;
@@ -155,6 +160,8 @@ async function listFiles() {
       size: eventStat.size,
       mtime: new Date(latestMtimeMs).toISOString(),
       eventMtime: eventStat.mtime.toISOString(),
+      ...(progressModels.get(entry.id.split('/')[0])
+        ? { progressModel: progressModels.get(entry.id.split('/')[0]) } : {}),
       state,
     };
   }));
@@ -202,7 +209,7 @@ function safeRunRef(id) {
   // id is "dirName/fileBase" — validate both parts
   const parts = id.split("/");
   if (parts.length !== 2) return null;
-  if (!parts.every(p => /^[a-zA-Z0-9._-]+$/.test(p))) return null;
+  if (!parts.every(p => p !== "." && p !== ".." && /^[a-zA-Z0-9._-]+$/.test(p))) return null;
   return {
     shape: parts[0],
     threadId: parts[1],
@@ -520,11 +527,14 @@ async function readRunStructuralEvents(filePath, tailTurns = DEFAULT_CODEX_TAIL_
   return events;
 }
 
-async function readRunStructureIndex(filePath) {
+async function readRunStructureIndex(filePath, { progressHistory = false } = {}) {
   const cacheKey = path.resolve(filePath);
   const pending = RUN_STRUCTURE_FILE_READS.get(cacheKey);
-  if (pending) return pending;
-  const read = refreshRunStructureCache(filePath);
+  if (pending) {
+    const index = await pending;
+    if (!progressHistory || Array.isArray(index.progressSnapshots)) return index;
+  }
+  const read = refreshRunStructureCache(filePath, { progressHistory });
   RUN_STRUCTURE_FILE_READS.set(cacheKey, read);
   try {
     return await read;
@@ -535,7 +545,7 @@ async function readRunStructureIndex(filePath) {
   }
 }
 
-async function refreshRunStructureCache(filePath) {
+async function refreshRunStructureCache(filePath, { progressHistory = false } = {}) {
   const stat = await fs.stat(filePath);
   const cachePath = runStructureCachePath(filePath);
   const cacheKey = path.resolve(filePath);
@@ -550,10 +560,11 @@ async function refreshRunStructureCache(filePath) {
     !Number.isFinite(cache?.fileSize) ||
     cache.fileSize < 0 || cache.fileSize > stat.size ||
     (cache.fileSize === stat.size && cache.mtimeMs !== stat.mtimeMs) ||
-    !Array.isArray(cache?.entries) || !Array.isArray(cache?.phaseEvents)
+    !Array.isArray(cache?.entries) || !Array.isArray(cache?.phaseEvents) ||
+    (progressHistory && !Array.isArray(cache?.progressSnapshots))
   ) {
     cache = { version: RUN_STRUCTURE_CACHE_VERSION, fileSize: 0,
-      trailingBytes: "", entries: [], phaseEvents: [] };
+      trailingBytes: "", entries: [], phaseEvents: [], progressSnapshots: [] };
   }
   if (cache.fileSize < stat.size) {
     const delta = await scanRunStructuralEventDelta(
@@ -564,6 +575,9 @@ async function refreshRunStructureCache(filePath) {
     cache.trailingBytes = delta.trailingBytes;
     cache.entries = cache.entries.concat(delta.entries);
     cache.phaseEvents = cache.phaseEvents.concat(delta.phaseEvents);
+    if (Array.isArray(cache.progressSnapshots)) {
+      cache.progressSnapshots = cache.progressSnapshots.concat(delta.progressSnapshots);
+    }
     await writeJsonAtomically(cachePath, cache);
   }
   // LRU bounds retention when browsing many runs in a long-lived server.
@@ -578,9 +592,10 @@ async function refreshRunStructureCache(filePath) {
 async function scanRunStructuralEventDelta(filePath, start, end, leadingBytes = "") {
   const entries = [];
   const phaseEvents = [];
+  const progressSnapshots = [];
   let buffered = Buffer.from(leadingBytes, "base64");
   let offset = start - buffered.length;
-  if (end <= start) return { entries, phaseEvents, trailingBytes: leadingBytes };
+  if (end <= start) return { entries, phaseEvents, progressSnapshots, trailingBytes: leadingBytes };
   const stream = createReadStream(filePath, {
     start: Math.max(0, start), end: Math.max(0, end - 1),
   });
@@ -601,6 +616,15 @@ async function scanRunStructuralEventDelta(filePath, start, end, leadingBytes = 
               turnNumber: event.turnNumber, eventType: event.eventType,
               event: { type: event.eventType, action: event.event?.action,
                 agentProfile: event.event?.agentProfile } });
+            const phase = event.event?.phaseStatus;
+            const status = phase?.testStatus;
+            if (Number.isInteger(event.turnNumber) && Number.isInteger(status?.testsPassed) &&
+                Number.isInteger(status?.testsTotal) && status.testsTotal > 0 &&
+                status.testsPassed >= 0 && status.testsPassed <= status.testsTotal) {
+              progressSnapshots.push({ turn: event.turnNumber, stage: status.targetStage ?? phase.stage,
+                action: event.event?.action,
+                passed: status.testsPassed, total: status.testsTotal });
+            }
           }
         }
       } catch (_) {}
@@ -608,7 +632,7 @@ async function scanRunStructuralEventDelta(filePath, start, end, leadingBytes = 
     }
     buffered = buffered.subarray(lineStart);
   }
-  return { entries, phaseEvents, trailingBytes: buffered.toString("base64") };
+  return { entries, phaseEvents, progressSnapshots, trailingBytes: buffered.toString("base64") };
 }
 
 function runStructureCachePath(filePath) {
@@ -3726,6 +3750,12 @@ async function discoverRalphConfigDescriptors() {
   return descriptors;
 }
 
+export function normalizeProgressModel(value) {
+  if (value?.kind !== 'source-files' || !/^pa\d+$/.test(value.stage ?? '') ||
+      !Number.isSafeInteger(value.total) || value.total <= 0) return null;
+  return { kind: 'source-files', stage: value.stage, total: value.total };
+}
+
 async function readRalphConfigDescriptor(configPath) {
   let fileConfig;
   try {
@@ -3772,6 +3802,7 @@ async function readRalphConfigDescriptor(configPath) {
     model,
     reasoningEffort,
     assignmentLayout,
+    progressModel: normalizeProgressModel(fileConfig.progressModel),
     workdir,
     driverMode: String(fileConfig.driverMode ?? "standard").trim().toLowerCase(),
     testSubsets: sliceNormalizeTestSubsets(fileConfig.testSubsets),
@@ -7629,6 +7660,7 @@ function comparisonRunForChart(run, highlighted = false) {
     repositoryUrl: run?.repositoryUrl ?? null,
     layout: ASSIGNMENT_LAYOUT.descriptor(run?.layout, "v2"),
     comparisonComplete: run?.comparisonComplete === true,
+    ...(normalizeProgressModel(run?.progressModel) ? { progressModel: normalizeProgressModel(run.progressModel) } : {}),
     highlighted,
   };
 }
@@ -7656,46 +7688,57 @@ function comparisonRunMatchesLocal(publishedRun, localRun, runRef) {
 }
 
 function mergePublishedAndLocalComparison(published, local, runRef, localMtime) {
+  const merged = mergePublishedAndLocalComparisons(published, [{
+    comparison: local, runRef, localMtime,
+  }]);
+  return { ...merged, localRunIndex: merged.runs.length - 1 };
+}
+
+function mergePublishedAndLocalComparisons(published, locals) {
   const publishedRuns = Array.isArray(published?.runs) ? published.runs : [];
-  const localRun = local?.runs?.[0] ?? null;
-  if (!localRun) {
-    throw new Error("Local comparison did not contain a run");
-  }
+  const localEntries = locals.map(({ comparison, runRef, localMtime }) => {
+    const run = comparison?.runs?.[0];
+    if (!run) throw new Error("Local comparison did not contain a run");
+    return {
+      run, runRef, localMtime,
+      rows: new Map((comparison.rows ?? []).map((row) => [row.pa, row])),
+      through: Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10) || 0,
+    };
+  });
   const includedPublishedRuns = publishedRuns
     .map((run, index) => ({ run, index }))
-    .filter(({ run }) => !comparisonRunMatchesLocal(run, localRun, runRef));
+    .filter(({ run }) => !localEntries.some((local) =>
+      comparisonRunMatchesLocal(run, local.run, local.runRef)));
   const publishedRows = new Map((published?.rows ?? []).map((row) => [row.pa, row]));
-  const localRows = new Map((local?.rows ?? []).map((row) => [row.pa, row]));
   const through = Math.max(
     Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0,
-    Number.parseInt(String(local?.through ?? "").replace(/^pa/, ""), 10) || 0,
+    ...localEntries.map((local) => local.through),
   );
   const runs = [
     ...includedPublishedRuns.map(({ run }) => comparisonRunForChart(run)),
-    comparisonRunForChart({
-      ...localRun,
-      label: `${runRef.shape} (local)`,
-    }, true),
+    ...localEntries.map(({ run, runRef }) => comparisonRunForChart({
+      ...run, label: `${runRef.shape} (local)`,
+    }, true)),
   ];
   const rows = [];
   for (let number = 1; number <= through; number += 1) {
     const pa = `pa${number}`;
     const publishedRow = publishedRows.get(pa);
-    const localRow = localRows.get(pa);
     rows.push({
       pa,
       runs: [
         ...includedPublishedRuns.map(({ index }) => comparisonSummaryForChart(publishedRow?.runs?.[index], pa)),
-        comparisonSummaryForChart(localRow?.runs?.[0], pa),
+        ...localEntries.map((local) => comparisonSummaryForChart(local.rows.get(pa)?.runs?.[0], pa)),
       ],
     });
   }
   return {
     generatedAt: new Date().toISOString(),
     publishedGeneratedAt: published?.generatedAt ?? null,
-    localUpdatedAt: localMtime?.toISOString?.() ?? null,
+    localUpdatedAt: localEntries.map((local) => local.localMtime?.toISOString?.())
+      .filter(Boolean).sort().at(-1) ?? null,
     through: `pa${through}`,
-    localRunIndex: runs.length - 1,
+    localRunIndices: localEntries.map((_, index) => includedPublishedRuns.length + index),
     runs,
     rows,
   };
@@ -7705,7 +7748,8 @@ async function configuredRunMetadataForShape(shape) {
   const descriptors = await discoverRalphConfigDescriptors();
   const descriptor = descriptors.find((candidate) => candidate.runName === shape);
   return descriptor
-    ? { model: descriptor.model, assignmentLayout: descriptor.assignmentLayout }
+    ? { model: descriptor.model, assignmentLayout: descriptor.assignmentLayout, workdir: descriptor.workdir,
+        progressModel: descriptor.progressModel }
     : {
         model: null,
         assignmentLayout: ASSIGNMENT_LAYOUT.inferLayoutId(shape),
@@ -7790,9 +7834,10 @@ async function buildLocalRunComparison(rawId, through) {
     "--format", "json",
     "--through", through,
     "--ralph-dir", RALPH_DIR,
+    "--work-dir", ROOT_DIR,
     "--codex-dir", codexSessionsDir,
     "--claude-dir", CLAUDE_PROJECTS_DIR,
-    rawId,
+    ...(Array.isArray(rawId) ? rawId : [rawId]),
   ], {
     cwd: REPO_DIR,
     maxBuffer: 128 * 1024 * 1024,
@@ -7802,6 +7847,64 @@ async function buildLocalRunComparison(rawId, through) {
     console.warn(`local comparison for ${rawId}: ${stderr.trim()}`);
   }
   return JSON.parse(stdout);
+}
+
+async function readLiveComparison(rawIds, force = false) {
+  const ids = [...new Set(rawIds)].sort((left, right) =>
+    left.localeCompare(right, "en", { numeric: true }));
+  const key = ids.join("\0");
+  const cached = LIVE_COMPARISON_CACHE.get(key);
+  if (!force && cached && Date.now() - cached.loadedAt < LOCAL_COMPARISON_CACHE_MS) {
+    return cached.value;
+  }
+  if (LIVE_COMPARISON_READS.has(key)) return LIVE_COMPARISON_READS.get(key);
+  const read = (async () => {
+    try {
+      const published = await readPublishedComparison(force);
+      if (!ids.length) return mergePublishedAndLocalComparisons(published, []);
+      const through = `pa${Math.max(40,
+        Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0)}`;
+      const metadata = await Promise.all(ids.map(async (id) => {
+        const runRef = safeRunRef(id);
+        const [stat, configured] = await Promise.all([
+          fs.stat(runRef.filePath), configuredRunMetadataForShape(runRef.shape),
+        ]);
+        return { runRef, stat, configured };
+      }));
+      // Whole-source translation has no PA cost milestones. Do not attribute its
+      // entire history to the transport stage or scan it as a PA comparison.
+      const paIds = ids.filter((_, index) => metadata[index].configured.progressModel?.kind !== 'source-files');
+      const local = paIds.length ? await buildLocalRunComparison(paIds, through) : { runs: [], rows: [] };
+      const locals = metadata.map(({ runRef, stat, configured }, index) => {
+        const paIndex = paIds.indexOf(ids[index]);
+        if (paIndex < 0) return {
+          runRef, localMtime: stat.mtime,
+          comparison: { through: 'pa0', rows: [], runs: [{ spec: runRef.shape,
+            model: configured.model, progressModel: configured.progressModel,
+            layout: ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout) }] },
+        };
+        return {
+          runRef, localMtime: stat.mtime,
+          comparison: {
+            through: local.through,
+            runs: [{
+              ...local.runs[paIndex],
+              model: configured.model ?? local.runs[paIndex]?.model,
+              layout: ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout),
+            }],
+            rows: local.rows.map((row) => ({ pa: row.pa, runs: [row.runs[paIndex]] })),
+          },
+        };
+      });
+      const value = mergePublishedAndLocalComparisons(published, locals);
+      LIVE_COMPARISON_CACHE.set(key, { loadedAt: Date.now(), value });
+      return value;
+    } finally {
+      LIVE_COMPARISON_READS.delete(key);
+    }
+  })();
+  LIVE_COMPARISON_READS.set(key, read);
+  return read;
 }
 
 async function readRunComparison(rawId, runRef, force = false) {
@@ -7827,6 +7930,7 @@ async function readRunComparison(rawId, runRef, force = false) {
           local.runs[0].model = configured.model;
         }
         local.runs[0].layout = ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout);
+        if (configured.progressModel) local.runs[0].progressModel = configured.progressModel;
       }
       const value = mergePublishedAndLocalComparison(published, local, runRef, stat.mtime);
       LOCAL_COMPARISON_CACHE.set(rawId, { loadedAt: Date.now(), value });
@@ -7924,6 +8028,7 @@ async function requestHandler(req, res) {
       size: entry.size,
       mtime: entry.mtime,
       eventMtime: entry.eventMtime,
+      ...(entry.progressModel ? { progressModel: entry.progressModel } : {}),
       state: entry.state,
     }));
     return sendJson(res, { runs });
@@ -7985,6 +8090,19 @@ async function requestHandler(req, res) {
     }
   }
 
+  if (pathname === "/api/comparison") {
+    const rawIds = url.searchParams.getAll("run");
+    if (rawIds.some((id) => !safeRunRef(id))) {
+      return sendJson(res, { error: "Invalid run id" }, 400);
+    }
+    try {
+      return sendJson(res, await readLiveComparison(rawIds, url.searchParams.get("refresh") === "1"));
+    } catch (error) {
+      console.warn("live comparison failed:", error?.message ?? error);
+      return sendJson(res, { error: error?.message ?? "Comparison unavailable" }, error?.code === "ENOENT" ? 404 : 502);
+    }
+  }
+
   if (pathname.startsWith("/api/run/")) {
     const rawId = decodeURIComponent(pathname.slice("/api/run/".length));
     const runRef = safeRunRef(rawId);
@@ -7993,6 +8111,7 @@ async function requestHandler(req, res) {
     }
     let events = [];
     let shapeUsage = null;
+    let sourceProgressHistory;
     const detailOptions = parseCodexDetailOptions(url.searchParams);
     const usageMode = normalizeUsageMode(url.searchParams.get("usage"));
     try {
@@ -8007,7 +8126,14 @@ async function requestHandler(req, res) {
           })
         : await readFastShapeUsage(runRef.shape, runRef.threadId, events, usageMode);
       const configured = await configuredRunMetadataForShape(runRef.shape);
-      const { phaseEvents } = await readRunStructureIndex(runRef.filePath);
+      await augmentSourceResponsibilityProgress(events, configured.workdir,
+        path.join(path.dirname(path.dirname(runRef.filePath)), "state.json"));
+      const { phaseEvents, progressSnapshots } = await readRunStructureIndex(runRef.filePath,
+        { progressHistory: Boolean(configured.progressModel) });
+      if (configured.progressModel) {
+        sourceProgressHistory = progressSnapshots.filter(point =>
+          point.stage === configured.progressModel.stage && point.total === configured.progressModel.total);
+      }
       const attributionEvents = mergeEventStreams(
         phaseEvents,
         events,
@@ -8022,7 +8148,8 @@ async function requestHandler(req, res) {
     if (!events.length) {
       return sendJson(res, { error: "Run not found" }, 404);
     }
-    return sendJson(res, { events, shapeUsage, codexDetail: detailOptions });
+    return sendJson(res, { events, shapeUsage, codexDetail: detailOptions,
+      ...(sourceProgressHistory ? { sourceProgressHistory } : {}) });
   }
 
   res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -8039,7 +8166,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-export { fetchPublishedComparison, mergePublishedAndLocalComparison, requestHandler };
+export { fetchPublishedComparison, mergePublishedAndLocalComparison, mergePublishedAndLocalComparisons, requestHandler };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SERVER_FILE) {
   server.listen(PORT, HOST, () => {
