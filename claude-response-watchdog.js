@@ -20,6 +20,61 @@ function literalWord(text) {
   return offset ? { value, rest: text.slice(offset) } : null;
 }
 
+// This is a recognizer, never an evaluator. Limit guard/report pipelines to
+// read-only commands with literal arguments or simple path-variable expansion.
+function readOnlyCommands(text, sequence = false) {
+  if (/[\n\r`]/.test(text)) return false;
+  const unexpanded = text.replace(/\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})/g, '');
+  if (/\$[({\[]/.test(unexpanded)) return false;
+  let words = [], word = '', started = false, quote = null, separator = null;
+  const flushWord = () => {
+    if (started) words.push(word);
+    word = ''; started = false;
+  };
+  const flushCommand = () => {
+    flushWord();
+    if (!words.length) return false;
+    const [command, ...args] = words;
+    words = [];
+    if (command === 'echo') return args.length > 0 && args.every(arg => /^[\w .:-]+$/.test(arg));
+    if (command === 'xargs') return args[0] === 'grep';
+    return ['cat', 'tail', 'head', 'grep', 'wc', 'ls'].includes(command);
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === '\\' && quote === '"') {
+        if (++i === text.length) return false;
+        word += /[$`"\\]/.test(text[i]) ? text[i] : `\\${text[i]}`;
+      } else word += c;
+    } else if (c === '"' || c === "'") {
+      quote = c; started = true; separator = null;
+    } else if (/\s/.test(c)) {
+      flushWord();
+    } else if (c === '2' && !started && /^2>\s*\/dev\/null(?=\s|$)/.test(text.slice(i))) {
+      // Only an actual unquoted stderr discard is a permitted redirect.
+      i += /^2>\s*\/dev\/null(?=\s|$)/.exec(text.slice(i))[0].length - 1;
+    } else if (c === '|' || (sequence && c === ';')) {
+      if (!flushCommand()) return false;
+      separator = c;
+    } else if (/[\w./*${}:=-]/.test(c)) {
+      word += c; started = true; separator = null;
+    } else return false;
+  }
+  if (quote) return false;
+  return separator === ';' ? true : flushCommand();
+}
+
+function readOnlyGuard(text) {
+  if (/^\[\s+-s\s+[\w./-]+\s+\]$/.test(text)) return true;
+  // Counts produced by a bounded read-only pipeline, as in $(ls ... | wc -l).
+  // Nested substitutions, arithmetic, executable helpers and redirects fail
+  // readOnlyCommands; the predicate itself is a literal numeric comparison.
+  const count = /^\[\s+\$\((.*)\)\s+-(?:eq|ne|ge|gt|le|lt)\s+\d+\s+\]$/.exec(text);
+  return readOnlyCommands(count ? count[1] : text);
+}
+
 export function pollingPattern(argv) {
   if (!['sh', 'bash', 'dash'].includes(path.basename(argv[0] ?? ''))) return null;
   const index = argv.indexOf('-c');
@@ -32,18 +87,13 @@ export function pollingPattern(argv) {
     if (!word || !/^\s*< \/dev\/null && pwd -P >\| \/tmp\/claude-[\w-]+-cwd\s*$/.test(word.rest)) return null;
     script = word.value;
   }
-  // Only a negative process wait, optionally guarded by a literal read-only
-  // grep or file-size test, with a sleep-only body and read-only output.
-  // Patterns may contain literal spaces; never evaluate the shell.
-  const quoted = String.raw`(?:"[\w .|\\:=/-]+"|'[\w .|\\:=/-]+')`;
-  const guardCommand = String.raw`(?:grep\s+-q\s+${quoted}\s+[\w./-]+(?:\s+2>\s*/dev/null)?|\[\s+-s\s+[\w./-]+\s+\])`;
-  const guard = String.raw`(?:${guardCommand}\s*&&\s*)?`;
-  const wait = String.raw`!\s+pgrep\s+-f\s+(?:'([\w./ -]+)'|"([\w./ -]+)")\s*>\s*/dev/null(?:\s*&&\s*${guardCommand})?;\s*do\s+sleep\s+[1-9]\d*;\s*done`;
-  const report = String.raw`(?:cat\s+[\w./\${}"' -]+|tail\s+(?:-[1-9]\d*|-n\s+[1-9]\d*)\s+[\w./-]+|grep\s+-(?:c|E)\s+${quoted}\s+[\w./-]+(?:\s*\|\s*head(?:\s+-n\s+[1-9]\d*)?)?|echo\s+(?:[\w.:-]+|${quoted}))`;
-  const output = String.raw`(?:;\s*${report})*`;
-  const match = new RegExp(String.raw`^\s*until\s+${guard}${wait}\s*${output}\s*$`).exec(script);
-  if (!match) return null;
-  try { return new RegExp(match[1] ?? match[2]); } catch { return null; }
+  const loop = /^\s*until\s+(.+);\s*do\s+sleep\s+[1-9]\d*;\s*done(?:\s*;\s*(.*))?\s*$/.exec(script);
+  if (!loop) return null;
+  const wait = /^(?:(.+?)\s*&&\s*)?!\s+pgrep\s+-f\s+(?:'([\w./ -]+)'|"([\w./ -]+)")\s*>\s*\/dev\/null(?:\s*&&\s*(.+))?$/.exec(loop[1]);
+  if (!wait || (wait[1] && !readOnlyGuard(wait[1].trim())) ||
+      (wait[4] && !readOnlyGuard(wait[4].trim())) ||
+      (loop[2] && !readOnlyCommands(loop[2].trim(), true))) return null;
+  try { return new RegExp(wait[2] ?? wait[3]); } catch { return null; }
 }
 
 export async function readProcesses() {
@@ -95,14 +145,20 @@ export function createClaudeResponseWatchdog({ rootPid, graceMs = 60_000,
   let revision = 0;
   let closed = false;
   const current = version => !closed && revision === version;
-  async function inspect(version) {
+  async function inspect(version, warn = true) {
     try {
       if (!current(version)) return;
-      onStatus({ status: 'waiting', rootPid });
+      if (warn) onStatus({ status: 'waiting', rootPid });
       const rows = await snapshot();
       if (!current(version)) return;
       const candidates = findSelfWaits(rows, rootPid);
-      if (!candidates.length) return;
+      if (!candidates.length) {
+        // A report pipeline may be running at the first snapshot, or a real
+        // worker may still match. Recheck inactivity without cancelling it.
+        timer = setTimeout(() => { void inspect(version, false); }, graceMs);
+        timer.unref?.();
+        return;
+      }
       // Recheck identity and the matching process set before any signal.
       const fresh = await snapshot();
       if (!current(version)) return;

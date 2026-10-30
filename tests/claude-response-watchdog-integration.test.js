@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-for (const variant of ['simple', 'report-guarded', 'post-guarded', 'file-guarded', 'inception']) test(`a successful response with a ${variant} self-wait returns to goal verification and external checks`,
+for (const variant of ['simple', 'report-guarded', 'post-guarded', 'counter-guarded', 'file-guarded', 'inception']) test(`a successful response with a ${variant} self-wait returns to goal verification and external checks`,
   { skip: process.platform !== 'linux' }, t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-response-watchdog-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -27,6 +27,7 @@ for (const variant of ['simple', 'report-guarded', 'post-guarded', 'file-guarded
       simple: `until ! pgrep -f '${marker}' >/dev/null; do sleep 30; done`,
       'report-guarded': `until grep -q "TESTS PASSED\\|FAIL\\|Error" ${report} 2>/dev/null && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -1 ${report}`,
       'post-guarded': `until ! pgrep -f "${marker}" >/dev/null && grep -q "exit=" ${report}; do sleep 30; done; echo done`,
+      'counter-guarded': `until [ $(ls ${root}/*.log | xargs grep -l "TESTS" 2>/dev/null | wc -l) -ge 0 ] && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; cat ${report} | grep -v "^$" | head -20`,
       'file-guarded': `until [ -s ${report} ] && ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; tail -6 ${report}`,
       inception: `until ! pgrep -f "${marker}" >/dev/null; do sleep 30; done; grep -c "MATCH" ${report}; grep -E "MISMATCH|DIFFER|rror" ${report} | head; tail -3 ${report}`,
     }[variant];

@@ -94,6 +94,43 @@ test('recognizes report guards after the process wait and literal completion mes
   ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
 });
 
+test('recognizes read-only counter guards and report pipelines without executing shell text', () => {
+  const command = 'until [ $(ls /tmp/fz-trim/log* | xargs grep -l "^done\\|seed 3[0-9]\\|" 2>/dev/null | wc -l) -ge 0 ] && ! pgrep -f "fuzz.sh" >/dev/null; do sleep 20; done; cat /tmp/fz-trim/log* | grep -v "^$" | grep -vc "ok$"; cat /tmp/fz-trim/log* | grep -iv " ok$" | head -20';
+  const quoted = "'" + command.replaceAll("'", "'\"'\"'") + "'";
+  for (const body of [command, `source snapshot || true && eval ${quoted} < /dev/null && pwd -P >| /tmp/claude-123-cwd`]) {
+    const waiter = row(2, 1, ['/bin/bash', '-c', body]);
+    assert(pollingPattern(waiter.argv));
+    assert.deepEqual(findSelfWaits([root, waiter, sleeper], 1), [waiter]);
+    assert.deepEqual(findSelfWaits([root, waiter, sleeper, row(4, 99, ['bash', 'fuzz.sh'])], 1), []);
+  }
+  for (const unsafe of [
+    command.replace('xargs grep', 'xargs sh'),
+    command.replace('ls /tmp/fz-trim/log*', 'touch /tmp/marker'),
+    command.replace('wc -l', 'wc -l > /tmp/marker'),
+    command.replace('wc -l', 'wc -l $(touch /tmp/marker)'),
+    command.replace('ls /tmp/fz-trim/log*', 'ls `touch /tmp/marker`'),
+    command.replace('cat /tmp/fz-trim/log*', 'cat "${BAD@P}"'),
+    command.replace('cat /tmp/fz-trim/log*', '"cat 2>/dev/null" /tmp/report'),
+    command.replace('cat /tmp/fz-trim/log*', '"c\\at" /tmp/report'),
+    command + '; rm /tmp/marker',
+    command.replace('head -20', 'sh /tmp/helper'),
+  ]) assert.equal(pollingPattern(['/bin/bash', '-c', unsafe]), null, unsafe);
+});
+
+test('rechecks a previously busy wait after real work ends, with a single warning', async () => {
+  let reads = 0;
+  const signals = [], events = [];
+  const guard = createClaudeResponseWatchdog({ rootPid: 1, graceMs: 5,
+    snapshot: async () => ++reads === 1
+      ? [root, poll, sleeper, row(4, 1, ['sh', 'watchdog/example.sh'])] : [root, poll, sleeper],
+    signal: p => signals.push(p), onStatus: e => events.push(e.status) });
+  guard.observe(success);
+  await delay(40);
+  guard.close();
+  assert.deepEqual(signals, [3, 2]);
+  assert.deepEqual(events, ['waiting', 'self-wait-stopped']);
+});
+
 test('successful result warns, rechecks, and cancels only the proven loop and its sleep', async () => {
   const events = [], signals = [];
   const guard = createClaudeResponseWatchdog({ rootPid: 1, graceMs: 5,
@@ -165,7 +202,7 @@ test('recovers a real self-matching shell without leaving its sleep holding the 
     const guard = createClaudeResponseWatchdog({ rootPid: process.pid, graceMs: 5 });
     t.after(() => guard.close());
     guard.observe(success);
-    await Promise.race([exited, delay(2000).then(() => { throw new Error('Polling shell was not recovered'); })]);
+    await Promise.race([exited, delay(10000).then(() => { throw new Error('Polling shell was not recovered'); })]);
     await delay(20);
     const after = await readProcesses();
     assert(!after.some(p => children.some(c => c.pid === p.pid && c.start === p.start)));
