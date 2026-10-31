@@ -6,10 +6,10 @@ checks and 500-turn limit. It runs PA1–PA35 with native phase goals, a 100 GiB
 private filesystem and a 64 GiB/no-swap scope. It uses the default Codex profile
 and SSH identity, with no copied credentials or repository credential helper.
 
-The installed base is assignments tag `v7`, commit
-`b1c9069344706ee05c3ccca4f0c4fe6cd31f62be`, including the PA6/PA7
-compact-storage handout guidance. Preparation commit `98f30c30` adds only
-`spec.md`. The private run repository's `main` is pushed; Ralph remains
+The installed base is assignments tag `v7.1`, commit
+`90f57e195bc1232e56a63cffd8239f277e44c1aa`, including the PA6/PA7
+compact-storage guidance and the floating-point fixes. Preparation commit
+`256f31e2` adds only `spec.md`. The private run repository's `main` is pushed; Ralph remains
 unstarted. See [VALIDATION.txt](VALIDATION.txt) for setup evidence.
 The installer resolves the release tag before provisioning and refuses an
 existing destination. It never substitutes V6 or a moving main branch.

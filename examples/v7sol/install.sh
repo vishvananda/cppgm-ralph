@@ -6,7 +6,7 @@ private_root="$work_base/private/v7sol"
 checkout="$private_root/checkout"
 config_path="$work_base/v7sol.config.json"
 state_dir="$work_base/.ralph/v7sol-gpt-6.1-sol-high"
-assignment_tag=v7
+assignment_tag=v7.1
 assignment_remote=https://github.com/vishvananda/cppgm-assignments.git
 remote_name=vishvananda/cppgm-run-v7sol
 

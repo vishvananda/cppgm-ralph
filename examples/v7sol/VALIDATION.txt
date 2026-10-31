@@ -1,7 +1,9 @@
-V7 Sol scaffold installed and verified 2026-10-31; Ralph remains unstarted.
+V7 Sol scaffold updated to assignments v7.1 and verified 2026-10-31; Ralph remains unstarted.
 
-Assignments tag v7: b1c9069344706ee05c3ccca4f0c4fe6cd31f62be.
-Preparation commit: 98f30c30; only spec.md differs from the tagged base.
+Assignments tag v7.1: 90f57e195bc1232e56a63cffd8239f277e44c1aa.
+Export source: cppgm-extended a94cee3337dda90e347bb7bcad6bf2ae7a2afb9b.
+The mistaken v9.1 tags were deleted and replaced with v7.1 in both repositories.
+Preparation commit: 256f31e2; only spec.md differs from the tagged base.
 Private run repository: vishvananda/cppgm-run-v7sol (main pushed).
 Checkout: ~/work/v7sol -> ~/work/private/v7sol/checkout.
 
@@ -11,13 +13,14 @@ PASS: config matches V6 Sol after excluding run name and checkout/private paths.
 PASS: new 100 GiB volume, persistent mount and 64 GiB/no-swap memory scope.
 PASS: all 18 sidecars resolve; goals fit the native limit for every PA1-PA35 phase.
 PASS: installed config, sidecars and spec match the committed example files.
-PASS: tagged PA6/PA7 handouts include the compact-storage guidance.
+PASS: tagged PA6/PA7 handouts include the compact-storage guidance; v7.1 also
+      includes the exported floating-point fixes and updated reference bundle.
 PASS: scaffold build, expected initial PA1 local/through failures, 19-file audit.
 PASS: grouped instructions/cycles at 100% running and DWARF sampling in Bubblewrap.
 PASS: Codex 0.166.0, default-profile Sol/high inference, native goal completion
       verified by the separate connectivity probe; no compiler work requested.
 PASS: ordinary SSH remote, no repository credential helper or copied credentials.
-PASS: clean checkout, no Ralph state.json or run event log; no tmux worker started.
+PASS: clean checkout, no Ralph state.json or run event log; no V7 worker started.
 PASS: shell/JavaScript syntax and git diff --check.
 
 Evidence: ~/work/private/v7sol/artifacts/scaffold-verification/
@@ -25,3 +28,5 @@ Resolved release tag/commit: assignments-base.txt.
 Sandbox/build/test checks: verification.log, build.log, pa1-initial.log,
 pa1-through-initial.log, counts.txt, perf.data and profile.txt.
 Native-goal probe: goal-completion.json and codex-smoke.jsonl.
+
+Prior v7 setup evidence is preserved in artifacts/scaffold-verification-v7-20261031T204537Z/.
