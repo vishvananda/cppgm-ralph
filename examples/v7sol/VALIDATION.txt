@@ -1,15 +1,27 @@
-V7 Sol scaffold templates verified 2026-10-30. Installation awaits assignments v7.
+V7 Sol scaffold installed and verified 2026-10-31; Ralph remains unstarted.
+
+Assignments tag v7: b1c9069344706ee05c3ccca4f0c4fe6cd31f62be.
+Preparation commit: 98f30c30; only spec.md differs from the tagged base.
+Private run repository: vishvananda/cppgm-run-v7sol (main pushed).
+Checkout: ~/work/v7sol -> ~/work/private/v7sol/checkout.
 
 PASS: config matches V6 Sol after excluding run name and checkout/private paths.
-      Same native Codex gpt-6.1-sol/high, default profile, checks, four phases,
-      checkpoint cadence, PA35 routing/endpoint, 500 turns and resource limits.
-PASS: all 18 prompt/goal sidecars resolve; rendered goals fit the native limit
-      for every PA1-PA35 phase with the verifier's reserved overhead.
-PASS: shell and JavaScript syntax; git diff --check.
-PASS: installer exits before provisioning when assignments tag v7 is absent.
-      No v7sol checkout, private volume, remote or Ralph worker was created.
+      Native Codex gpt-6.1-sol/high, default profile, four phases, checkpoint
+      cadence, PA35 routing/endpoint, 500 turns and identical course checks.
+PASS: new 100 GiB volume, persistent mount and 64 GiB/no-swap memory scope.
+PASS: all 18 sidecars resolve; goals fit the native limit for every PA1-PA35 phase.
+PASS: installed config, sidecars and spec match the committed example files.
+PASS: tagged PA6/PA7 handouts include the compact-storage guidance.
+PASS: scaffold build, expected initial PA1 local/through failures, 19-file audit.
+PASS: grouped instructions/cycles at 100% running and DWARF sampling in Bubblewrap.
+PASS: Codex 0.166.0, default-profile Sol/high inference, native goal completion
+      verified by the separate connectivity probe; no compiler work requested.
+PASS: ordinary SSH remote, no repository credential helper or copied credentials.
+PASS: clean checkout, no Ralph state.json or run event log; no tmux worker started.
+PASS: shell/JavaScript syntax and git diff --check.
 
-The installer records the resolved release commit and performs the actual
-scaffold build, initial PA1 failures, file audit, sandbox perf-counter/sampling
-and native-goal probes after the tag exists. Those runtime checks have not yet
-been run for V7; V6's results are not claimed as V7 evidence.
+Evidence: ~/work/private/v7sol/artifacts/scaffold-verification/
+Resolved release tag/commit: assignments-base.txt.
+Sandbox/build/test checks: verification.log, build.log, pa1-initial.log,
+pa1-through-initial.log, counts.txt, perf.data and profile.txt.
+Native-goal probe: goal-completion.json and codex-smoke.jsonl.

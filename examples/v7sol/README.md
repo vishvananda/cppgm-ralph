@@ -6,11 +6,13 @@ checks and 500-turn limit. It runs PA1–PA35 with native phase goals, a 100 GiB
 private filesystem and a 64 GiB/no-swap scope. It uses the default Codex profile
 and SSH identity, with no copied credentials or repository credential helper.
 
-The assignments `v7` tag is pending. The installer resolves that tag before
-creating any run paths, volume or remote repository and refuses installation
-if it is absent. It never substitutes V6 or a moving main branch. V7 is expected
-to include the PA6/PA7 compact-storage handout guidance; release preparation
-must include that change before tagging assignments.
+The installed base is assignments tag `v7`, commit
+`b1c9069344706ee05c3ccca4f0c4fe6cd31f62be`, including the PA6/PA7
+compact-storage handout guidance. Preparation commit `98f30c30` adds only
+`spec.md`. The private run repository's `main` is pushed; Ralph remains
+unstarted. See [VALIDATION.txt](VALIDATION.txt) for setup evidence.
+The installer resolves the release tag before provisioning and refuses an
+existing destination. It never substitutes V6 or a moving main branch.
 
 The general implementation, checkpoint-audit and final-audit prompts/goals
 reinforce compact common records, separate optional payloads and short-lived
@@ -27,7 +29,7 @@ or starting a run:
 node examples/v7sol/verify-setup.mjs --templates-only
 ```
 
-Once the assignments tag is published, install from `cppgm-ralph`:
+To reproduce the setup on a fresh host, install from `cppgm-ralph`:
 
 ```sh
 bash examples/v7sol/install.sh
