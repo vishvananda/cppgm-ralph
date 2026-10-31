@@ -7,15 +7,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("live comparison endpoint includes multiple current runs, deduplicates, and caches", { timeout: 30000 }, async (t) => {
+test("combined and individual comparisons include PA35 beyond the published range", { timeout: 30000 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-live-comparison-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const shapes = ["v5sol-gpt-6.1-sol-high", "v5rust-gpt-6.1-sol-high"];
   for (const [index, shape] of shapes.entries()) {
     const eventsDir = path.join(root, ".ralph", shape, "events");
     await fs.mkdir(eventsDir, { recursive: true });
-    const record = (recordedAt, eventType, event) => ({
-      recordedAt, threadId: `fixture-${index}`, turnNumber: 1,
+    const record = (recordedAt, eventType, event, turnNumber = 1) => ({
+      recordedAt, threadId: `fixture-${index}`, turnNumber,
       eventType, event: { type: eventType, ...event },
     });
     const events = [
@@ -26,6 +26,13 @@ test("live comparison endpoint includes multiple current runs, deduplicates, and
       record("2026-10-12T00:10:00Z", "turn.completed", {
         usage: { input_tokens: 1000 * (index + 1), cached_input_tokens: 500, output_tokens: 100 },
       }),
+      record("2026-10-12T00:11:00Z", "ralph.phase-status", {
+        action: "turn-start", phaseStatus: { stage: "pa35", phase: "implement", allRequiredPassed: false },
+      }, 2),
+      record("2026-10-12T00:11:00Z", "ralph.prompt", { prompt: "Implement pa35" }, 2),
+      record("2026-10-12T00:12:00Z", "turn.completed", {
+        usage: { input_tokens: 2000, cached_input_tokens: 500, output_tokens: 200 },
+      }, 2),
     ];
     await fs.writeFile(path.join(eventsDir, "run.jsonl"), events.map(JSON.stringify).join("\n") + "\n");
     await fs.writeFile(path.join(root, `${shape.split("-")[0]}.config.json`), JSON.stringify({
@@ -37,7 +44,7 @@ test("live comparison endpoint includes multiple current runs, deduplicates, and
     publishedRequests += 1;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
-      through: "pa1",
+      through: "pa39",
       runs: [{ spec: "baseline", comparisonComplete: true }, { spec: shapes[0] }],
       rows: [{ pa: "pa1", runs: [
         { cost: 7, durationMs: 7000, status: "complete", turns: [1] },
@@ -95,5 +102,14 @@ test("live comparison endpoint includes multiple current runs, deduplicates, and
   const cached = await (await fetch(`${base}/api/comparison?${reversed}`)).json();
   assert.equal(cached.generatedAt, data.generatedAt);
   assert.equal(publishedRequests, 1);
+  const individualResponse = await fetch(`${base}/api/run-comparison/${encodeURIComponent(`${shapes[0]}/run`)}`);
+  const individual = await individualResponse.json();
+  assert.equal(individualResponse.status, 200, `${JSON.stringify(individual)} ${stderr}`);
+  assert.equal(individual.through, "pa40", "the published cutoff cannot hide local PA35 (canonical PA40)");
+  const singlePa35 = individual.rows.find(row => row.pa === "pa35").runs[individual.localRunIndex];
+  const combinedPa35 = data.rows.find(row => row.pa === "pa35").runs[2];
+  assert(singlePa35.cost > 0, "include optimization work in the individual graph");
+  assert.equal(singlePa35.cost, combinedPa35.cost);
+  assert.equal(singlePa35.durationMs, combinedPa35.durationMs);
   assert.equal((await fetch(`${base}/api/comparison?run=../invalid`)).status, 400);
 });

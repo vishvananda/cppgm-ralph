@@ -7954,7 +7954,10 @@ async function readRunComparison(rawId, runRef, force = false) {
   const read = (async () => {
     try {
       const published = await readPublishedComparison(force);
-      const through = published?.through ?? "pa40";
+      // A published baseline may predate PA35 (canonical PA40). Local work
+      // must use the same full comparison range as the combined endpoint.
+      const through = `pa${Math.max(40,
+        Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0)}`;
       const [local, stat, configured] = await Promise.all([
         buildLocalRunComparison(rawId, through),
         fs.stat(runRef.filePath),
