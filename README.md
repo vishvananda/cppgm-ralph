@@ -222,6 +222,8 @@ Tail views index event byte ranges in `.ralph/<run>/usage-cache` and load
 command output and test reports only for the selected turns. Usage and comparison
 accounting retain compact metadata instead of full transcripts. The index is
 rebuilt from the event log when missing or invalid.
+Cached turn totals retain root and subagent model costs even when their cards
+are outside the selected tail, so the run usage panel includes historical work.
 
 Build the static viewer with:
 

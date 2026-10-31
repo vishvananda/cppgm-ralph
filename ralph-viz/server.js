@@ -57,7 +57,7 @@ const CODEX_TAIL_SESSION_MAX_BYTES = 24 * 1024 * 1024;
 const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
-const RUN_USAGE_CACHE_VERSION = 29;
+const RUN_USAGE_CACHE_VERSION = 30;
 const COMPARE_PA_COSTS_CACHE_VERSION = 3;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 2;
@@ -1703,12 +1703,17 @@ export function attributeShapeUsageModels(shapeUsage, events, rootModel = null) 
     let attributedTurnTotal = null;
     const turnUsages = (run.turnUsages ?? []).map((entry) => {
       const turnModel = usageRootModelForTurn(threadMeta, entry.turnNumber, rootModel);
-      const usage = pricedUsageCoveringAggregate(
-        entry.usage,
-        attributedByTurn.get(entry.turnNumber),
-        turnModel,
-        attributedByTurn.has(entry.turnNumber),
-      );
+      // Cached per-turn components cover historical children even when their
+      // cards are outside the requested tail. Partial thread attribution must
+      // not replace that complete ledger or reprice its children as the root.
+      const usage = sameTokenUsage(usageFromModelComponents(entry.usage), entry.usage)
+        ? normalizeUsage(entry.usage)
+        : pricedUsageCoveringAggregate(
+            entry.usage,
+            attributedByTurn.get(entry.turnNumber),
+            turnModel,
+            attributedByTurn.has(entry.turnNumber),
+          );
       attributedTurnTotal = addUsage(attributedTurnTotal, usage);
       return { ...entry, usage };
     });
@@ -2317,6 +2322,21 @@ function turnUsageEntriesFromEvents(events) {
 
 function usageFromEventsByTurn(events) {
   const map = new Map();
+  const attempts = buildRawTurnAttemptWindows(events);
+  const slotTurns = new Map();
+  const usageSlotFor = (record) => {
+    const turn = eventTurnNumber(record);
+    if (turn == null) return null;
+    const attempt = rawTurnAttemptForTime(attempts, turn, Date.parse(record.recordedAt ?? ""));
+    const key = attempt?.key ?? turn;
+    slotTurns.set(key, turn);
+    return key;
+  };
+  const rootModels = new Map();
+  for (const record of events) {
+    const model = record.eventType === "ralph.phase-status" ? record.event?.agentProfile?.model : null;
+    if (model) rootModels.set(eventTurnNumber(record), model);
+  }
   const tokenTurns = new Set();
   const tokenRecords = events
     .filter((event) => event.eventType === "codex.session.token_count" && event.event?.usage)
@@ -2340,7 +2360,7 @@ function usageFromEventsByTurn(events) {
       if (!hasTokenUsage(delta)) {
         continue;
       }
-      const turn = eventTurnNumber(record);
+      const turn = usageSlotFor(record);
       if (turn == null) {
         continue;
       }
@@ -2351,7 +2371,7 @@ function usageFromEventsByTurn(events) {
 
   for (const event of events) {
     if (event.eventType === "turn.completed" && event.event?.usage) {
-      const turn = eventTurnNumber(event);
+      const turn = usageSlotFor(event);
       if (turn == null) {
         continue;
       }
@@ -2367,7 +2387,7 @@ function usageFromEventsByTurn(events) {
     }
 
     if (event.eventType === "finished" && event.event?.value?.usageMetadata) {
-      const turn = eventTurnNumber(event);
+      const turn = usageSlotFor(event);
       if (turn == null || tokenTurns.has(turn)) {
         continue;
       }
@@ -2378,6 +2398,14 @@ function usageFromEventsByTurn(events) {
     }
   }
 
+  // Price roots while their provider-reported dollars still describe only
+  // root usage. Then append children with their own models, before a tail
+  // request can discard the historical cards needed to reconstruct them.
+  for (const [turn, usage] of map) {
+    if (rootModels.has(slotTurns.get(turn))) {
+      map.set(turn, MODEL_PRICING.attributeUsage(usage, rootModels.get(slotTurns.get(turn))));
+    }
+  }
   const completedChildren = new Set();
   for (const event of events) {
     const item = event.event?.item;
@@ -2388,10 +2416,10 @@ function usageFromEventsByTurn(events) {
     ) {
       continue;
     }
-    const turn = eventTurnNumber(event);
+    const turn = usageSlotFor(event);
     const threadId = String(item.agent_thread_id ?? item.id ?? "");
     const key = `${turn}\u0000${threadId}`;
-    if (!Number.isInteger(turn) || turn <= 0 || !threadId || completedChildren.has(key)) {
+    if (turn == null || !threadId || completedChildren.has(key)) {
       continue;
     }
     completedChildren.add(key);
@@ -2401,7 +2429,14 @@ function usageFromEventsByTurn(events) {
     );
   }
 
-  return map;
+  // A resumed turn can contain several provider attempts, each with its own
+  // reported cost. Reconcile those costs before folding them into one turn.
+  const byTurn = new Map();
+  for (const [slot, usage] of map) {
+    const turn = slotTurns.get(slot);
+    byTurn.set(turn, addUsage(byTurn.get(turn), usage));
+  }
+  return byTurn;
 }
 
 function eventTurnNumber(event) {

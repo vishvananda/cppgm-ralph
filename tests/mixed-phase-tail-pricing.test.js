@@ -96,6 +96,87 @@ test("combined fast usage keeps completed Opus dollars and estimates the live al
   }
 });
 
+for (const childModel of ["opus", "gpt-6-luna"]) {
+  test(`tail usage retains historical ${childModel} child costs and root provider dollars`, async (t) => {
+    const originalCwd = process.cwd();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-historical-child-price-"));
+    t.after(async () => {
+      process.chdir(originalCwd);
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    const runName = "fixture-opus-high";
+    await fs.writeFile(path.join(root, "fixture.config.json"), JSON.stringify({
+      name: "fixture", provider: "claude", model: "opus", reasoningEffort: "high",
+      workdir: path.join(root, "work"),
+    }));
+    const eventsDir = path.join(root, ".ralph", runName, "events");
+    await fs.mkdir(eventsDir, { recursive: true });
+    const childUsage = { input_tokens: 1000, cached_input_tokens: 500,
+      output_tokens: 100, total_tokens: 1100 };
+    await writeJsonl(path.join(eventsDir, "run.jsonl"), [
+      ...turnEvents(1, FABLE_THREAD_2, "opus", "2026-10-25T14:00", 0.01234),
+      { recordedAt: "2026-10-25T14:00:03.000Z", threadId: FABLE_THREAD_2, turnNumber: 1,
+        eventType: "item.completed", event: { item: { type: "subagent", id: "child",
+          agent_thread_id: "child", parent_thread_id: FABLE_THREAD_2,
+          model: childModel, usage: childUsage } } },
+      ...turnEvents(2, FABLE_THREAD_3, "opus", "2026-10-25T14:01", null).slice(0, 2),
+    ]);
+    process.chdir(root);
+    const serverUrl = pathToFileURL(path.join(originalCwd, "ralph-viz", "server.js"));
+    serverUrl.searchParams.set("historical-child-price-test", `${childModel}-${Date.now()}`);
+    const { requestHandler } = await import(serverUrl.href);
+    const pricing = globalThis.RALPH_MODEL_PRICING;
+    const childCost = pricing.estimateCost(childUsage, childModel);
+    const url = `/api/run/${encodeURIComponent(`${runName}/run`)}?codex=tail&tailTurns=1&usage=fast`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await requestJson(requestHandler, url);
+      assert.equal(response.status, 200);
+      const shape = response.body.shapeUsage;
+      assert.equal(shape.usage.total_tokens, 3300, "all root and historical child tokens survive the tail view");
+      assert.ok(Math.abs(shape.usage.cost_usd - (0.01234 + childCost + 0.0041)) < 1e-12,
+        JSON.stringify(shape.usage));
+      const first = shape.runs[0].turnUsages.find(entry => entry.turnNumber === 1).usage;
+      assert.ok(Math.abs(first.cost_usd - (0.01234 + childCost)) < 1e-12);
+    }
+  });
+}
+
+test("resumed turns reconcile each attempt's provider cost before summing the turn", async (t) => {
+  const originalCwd = process.cwd();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-attempt-price-"));
+  t.after(async () => {
+    process.chdir(originalCwd);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const runName = "fixture-opus-high";
+  await fs.writeFile(path.join(root, "fixture.config.json"), JSON.stringify({
+    name: "fixture", provider: "claude", model: "opus", reasoningEffort: "high",
+  }));
+  const eventsDir = path.join(root, ".ralph", runName, "events");
+  await fs.mkdir(eventsDir, { recursive: true });
+  const resumed = turnEvents(1, FABLE_THREAD_2, "opus", "2026-10-25T14:01", 0.01234);
+  // The same provider thread resumes with cumulative counters, but its result
+  // reconciles only this attempt's 1100-token delta.
+  resumed[1].event.usage = { input_tokens: 2000, cached_input_tokens: 1000,
+    output_tokens: 200, total_tokens: 2200 };
+  await writeJsonl(path.join(eventsDir, "run.jsonl"), [
+    ...turnEvents(1, FABLE_THREAD_2, "opus", "2026-10-25T14:00", null).slice(0, 2),
+    ...resumed,
+    ...turnEvents(2, FABLE_THREAD_3, "opus", "2026-10-25T14:02", null).slice(0, 2),
+  ]);
+  process.chdir(root);
+  const serverUrl = pathToFileURL(path.join(originalCwd, "ralph-viz", "server.js"));
+  serverUrl.searchParams.set("attempt-price-test", String(Date.now()));
+  const { requestHandler } = await import(serverUrl.href);
+  const response = await requestJson(requestHandler,
+    `/api/run/${encodeURIComponent(`${runName}/run`)}?codex=tail&tailTurns=1&usage=fast`);
+  assert.equal(response.status, 200);
+  const shape = response.body.shapeUsage;
+  assert.equal(shape.usage.total_tokens, 3300);
+  assert.ok(Math.abs(shape.usage.cost_usd - (0.0041 + 0.01234 + 0.0041)) < 1e-12,
+    JSON.stringify(shape.usage));
+});
+
 function turnEvents(turnNumber, threadId, model, minutePrefix, totalCostUsd) {
   const usage = {
     input_tokens: 1000,
