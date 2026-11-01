@@ -257,10 +257,12 @@ object compiler to build a representation that only a tool reads.
   (keeping capacity, never contents). At -O0, lowering SHOULD stream each
   function into the backend the same way; an optimizing level keeps the
   unit's LowIR until its interprocedural passes are done.
-- Where values that live across blocks are kept MUST be decided by a placement
-  policy separate from instruction selection, so that a better allocator
-  replaces the policy and not the selector. Machine-IR passes run between
-  selection and encoding.
+- Value identity MUST remain separate from physical location. Selection SHOULD
+  produce typed virtual registers with explicit uses, definitions, clobbers and
+  fixed-register constraints; placement SHOULD use those selected instructions.
+  Replacing allocation MUST NOT require rewriting selection or reconstructing
+  value identity from physical-register traffic. The final MIR dump records
+  physical placement; machine-IR passes run before encoding.
 - Generated code is judged dynamically from PA33 on. A value SHOULD keep one
   register over its whole range, across blocks, calls and exception regions;
   a frame home answers a constraint on one value over one range (a handler
@@ -269,9 +271,10 @@ object compiler to build a representation that only a tool reads.
   earlier and no wider.
 - Admission and exclusion rules (inlining, promotion in functions with
   cleanups, allocation across calls in loops) MUST be justified by what they
-  exclude on real programs. When the largest remaining excess comes from a
-  model's constraint rather than its thresholds, replace the model instead of
-  tuning around it or rewriting its output locally.
+  exclude on real programs. Rank removable cost across producers and consumers,
+  using function/call attribution and instruction mix together. If a gain is
+  blocked by another pass, redesign the coupled boundary rather than repeatedly
+  tuning one model's thresholds or rewriting its output locally.
 - The default level (-O0) MUST run a small backend: selection, a bounded
   placement policy, and encoding. Each optimizing pass SHOULD document its
   scope and complexity bound.
@@ -449,11 +452,11 @@ through-PA33 and inception checks still passing. `test-progress` reads saved
 rungs; it runs no measurements and cannot certify a changed compiler. Partial
 handoffs refresh the changed gate group once on the final tree; unchanged groups
 keep their cached results. Required checks run once; Ralph repeats them. Keep a
-mechanism ledger: each remaining excess class, its owning model, and whether its
-fix is a batch or a restructure. A restructure handoff replaces one owner's
-model completely; it ends when correctness holds and no saved rung is lost, and
-need not gain. Do not edit gate limits, workload manifests, fixtures, timestamps
-or measurements to manufacture progress. The V4 supplemental PA33/PA34
+mechanism ledger: ranked removable cost, causal models across affected owners,
+and whether their fix is a batch or a restructure. A restructure replaces the
+blocking model across those owners; it ends when correctness holds and no saved
+rung is lost, and need not gain. Do not edit gate limits, workload manifests,
+fixtures, timestamps or measurements to manufacture progress. The V4 supplemental PA33/PA34
 instruction checker is not part of this V7 run; V7 owns its optimization and
 kernel limits in PA35.
 

@@ -1,7 +1,7 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
 Review every PA35 change since the reviewed boundary.
-- Transform legality, ownership, required reducers/generated controls are checked.
+- Check legality, required controls and priorities across causal producer/consumer chains.
 - Measured rung progress is preserved; validation reruns only confirm fixes.
 - A canonical group is refreshed only when a fix changed the compiler.
 - Attribution separates constant-source codegen from compiler-speed changes.

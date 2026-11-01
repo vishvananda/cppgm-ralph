@@ -9,6 +9,8 @@ Review all commits since the last reviewed code tip, the handout/spec,
 architecture, transformation legality, reducers and required generated controls.
 Separate compiler work from generated-code effects and verify constant-source
 A/B attribution, identical output, build/link flags and allocator assumptions.
+Check that priorities reflect removable cost across producers/consumers; repeated
+small gains require reviewing blocking boundaries, not just instruction classes.
 
 Preserve measured rung progress. Do not rerun validation the handoff checks
 already passed; run a check only to confirm a fix you made, and refresh a

@@ -4,6 +4,7 @@ Assignments tag v7.1: 90f57e195bc1232e56a63cffd8239f277e44c1aa.
 Export source: cppgm-extended a94cee3337dda90e347bb7bcad6bf2ae7a2afb9b.
 The mistaken v9.1 tags were deleted and replaced with v7.1 in both repositories.
 Preparation commit: 256f31e2; only spec.md differs from the tagged base.
+Prompt/spec refresh: 935f6456, 2026-11-01; still only spec.md differs from that base.
 Private run repository: vishvananda/cppgm-run-v7sol (main pushed).
 Checkout: ~/work/v7sol -> ~/work/private/v7sol/checkout.
 
@@ -30,3 +31,12 @@ pa1-through-initial.log, counts.txt, perf.data and profile.txt.
 Native-goal probe: goal-completion.json and codex-smoke.jsonl.
 
 Prior v7 setup evidence is preserved in artifacts/scaffold-verification-v7-20261031T204537Z/.
+
+2026-11-01 prompt/spec refresh:
+PASS: example and installed config/18-sidecar/native-goal-size checks.
+PASS: installed sidecars/spec equal examples; config and assignment base unchanged.
+PASS: git diff --check; private spec commit pushed; no Ralph state or run event log.
+PA35 priorities now span causal producer/consumer chains, with coupled model changes.
+Spec and general prompts/audits reinforce value identity and replaceable placement.
+The ten edited instruction files grew by 74 words in total; no run-specific examples.
+Prior instructions and refresh evidence: artifacts/prompt-refresh-20261101/.

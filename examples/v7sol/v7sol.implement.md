@@ -21,8 +21,9 @@ include owned payloads. Reuse unchanged storage evidence under section 11.
 Validate affected correctness, required reuse and bounded work; reuse valid
 qualified evidence. Investigate demonstrated excess, including
 repeated linear work, without expanding unrelated checks. Generated-code
-limits belong to their owning assignment; spec section 7's code-quality
-properties apply from the first backend owner.
+limits belong to their owning assignment. From PA24, retain value identities
+through selection and keep placement replaceable over actual instruction
+constraints (spec section 7).
 
 Before editing, record HEAD as `Stage base commit` and `Last reviewed commit`
 in the compact stage plan. Keep decisions, remaining behavior groups, evidence

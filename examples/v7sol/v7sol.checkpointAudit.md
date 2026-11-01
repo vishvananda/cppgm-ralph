@@ -14,7 +14,8 @@ and use focused language/reference comparisons beyond fixtures.
 Trace affected results through producers and consumers. Show what is reused
 and what requires new work; proportional growth alone does not establish
 efficient reuse. Check common-record growth, optional payloads and scratch
-lifetimes; reuse unchanged storage measurements. Under spec section 11,
+lifetimes; from PA24, check value identity and the selection/placement seam.
+Reuse unchanged storage measurements. Under spec section 11,
 refresh only missing or invalidated affected evidence. Shared changes need
 representative consumer smokes. Record uncertainty; preserve checkpoint
 progress and earlier-stage behavior.

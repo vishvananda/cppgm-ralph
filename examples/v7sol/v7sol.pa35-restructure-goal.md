@@ -1,12 +1,12 @@
 Ralph loop {{turnNumber}} for {{runName}}.
 
-Replace the model behind PA35's largest remaining excess.
-- The excess mechanism and the owner model producing it are named from attribution.
-- The owner is rebuilt around a stated property; no flag keeps the old model and
+Replace the blocking model behind PA35's highest-value removable mechanism.
+- Function/call and instruction attribution rank cost across producers/consumers.
+- Necessary owners are rebuilt around a stated property; no flag keeps the old model and
   no threshold tuning stands in for it.
 - Legality, earlier behavior, inception and smoke pass; generated-seed checks pass when due.
 - Refreshed canonical groups keep every saved rung; a gain is not required.
-- The mechanism ledger records owner, property, measured effect and remaining excess.
+- The ledger records the causal chain, property, measured effect and remaining excess.
 
 Required checks:
 {{modelValidation}}

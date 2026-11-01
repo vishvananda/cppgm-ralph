@@ -9,7 +9,8 @@ and SSH identity, with no copied credentials or repository credential helper.
 The installed base is assignments tag `v7.1`, commit
 `90f57e195bc1232e56a63cffd8239f277e44c1aa`, including the PA6/PA7
 compact-storage guidance and the floating-point fixes. Preparation commit
-`256f31e2` adds only `spec.md`. The private run repository's `main` is pushed; Ralph remains
+`256f31e2` adds only `spec.md`; `935f6456` refines the backend and optimization
+guidance. The private run repository's `main` is pushed; Ralph remains
 unstarted. See [VALIDATION.txt](VALIDATION.txt) for setup evidence.
 The installer resolves the release tag before provisioning and refuses an
 existing destination. It never substitutes V6 or a moving main branch.
@@ -18,7 +19,12 @@ The general implementation, checkpoint-audit and final-audit prompts/goals
 reinforce compact common records, separate optional payloads and short-lived
 scratch. When common layouts change, collect record sizes, counts, capacities,
 owned payloads and peak RSS on a representative input; reuse unaffected evidence.
-The spec adds the same storage property. These are general architecture
+The spec adds the same storage property and recommends retaining virtual value
+identities through selection, with replaceable placement over actual instruction
+constraints. Implementation and audit prompts reinforce that seam from PA24.
+PA35 prompts/goals rank removable cost across producers and consumers using
+function/call attribution with instruction mix; coupled changes can span owners,
+and repeated small gains trigger review of the blocking model. These are general
 instructions, with no run-specific diagnosis or new acceptance thresholds.
 Large implementation batches and existing focused-validation guidance remain.
 

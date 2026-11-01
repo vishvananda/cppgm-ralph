@@ -14,7 +14,8 @@ Do not audit later capabilities as though they already exist.
 Trace supported results through producers and consumers. Show what is reused
 and what requires new work; proportional growth alone does not establish
 efficient reuse. Check common-record growth, optional payloads and scratch
-lifetimes; reuse unchanged storage measurements. Under spec section 11,
+lifetimes; from PA24, check value identity and the selection/placement seam.
+Reuse unchanged storage measurements. Under spec section 11,
 refresh only missing or invalidated evidence after fixes stabilize; reuse
 valid qualification and host/baseline data. Review supported capabilities,
 not every historical input. Refresh canonical course acceptance on final

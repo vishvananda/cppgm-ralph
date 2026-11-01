@@ -21,17 +21,18 @@ do not pre-run them more than once. Timing confirms milestones, not handoffs; a
 difference inside A/A noise is no finding. Keep allocators and build/link lines
 equal.
 
-Each handoff is one coherent batch against the largest excess mechanism of one
-owner and requires genuine progress in the canonical saved gate-group
-measurements. Refresh the affected group before `test-progress`; it only reads
-rungs and cannot certify changed code. Unchanged groups keep their cached
-results; never manufacture progress by editing results or timestamps. Keep a
-mechanism ledger in the plan: remaining excess by class,
-its owning model, and whether the fix is a batch or a restructure. When a change
-loses on A/B because of another owner's model, or needs that model replaced,
-record it there for the scheduled restructure turn rather than reverting it
-silently or tuning thresholds. Preserve earlier through-PA33 behavior and run
-inception regularly. Complete implementation only after canonical
+Rank removable cost using function/call attribution and instruction mix together;
+the largest instruction class alone is not a priority. Each handoff addresses
+one causal mechanism across all necessary owners and requires genuine progress
+in the canonical saved gate-group measurements. If A/B exposes a blocking
+producer/consumer model, complete the coupled changes or record that boundary
+for the scheduled restructure; repeated small gains call for revisiting the
+model, not another local refinement. Keep this ranked mechanism ledger in the
+plan, with estimated removable cost, blocking models and batch/restructure scope.
+Refresh the affected group before `test-progress`; it only reads rungs and cannot
+certify changed code. Unchanged groups keep their cached results; never edit
+results or timestamps to manufacture progress. Preserve earlier through-PA33
+behavior and run inception regularly. Complete implementation only after canonical
 `make -C pa35 test` passes on the final tree; the independent audit still
 remains. Do not rebuild measurement infrastructure already supplied by the
 assignment.
