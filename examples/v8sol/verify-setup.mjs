@@ -8,7 +8,7 @@ import { buildSystemdScopeSpawn } from '../../systemd-scope.js';
 
 const templatesOnly = process.argv.includes('--templates-only');
 const configPath = path.resolve(process.argv.slice(2).find(arg => !arg.startsWith('--')) ??
-  path.join(import.meta.dirname, 'v7sol.config.json'));
+  path.join(import.meta.dirname, 'v8sol.config.json'));
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const stateDir = path.join(config.stateBaseDir, `${config.name}-${config.model}-${config.reasoningEffort}`);
 assert(!fs.existsSync(path.join(stateDir, 'state.json')), 'Verify an unstarted run');
@@ -28,7 +28,7 @@ const comparable = value => {
   delete result.sessionIsolation.privateWriteDir;
   return result;
 };
-assert.deepEqual(comparable(config), comparable(previous), 'Keep V6 and V7 Sol checks/resources identical');
+assert.deepEqual(comparable(config), comparable(previous), 'Keep V6 and V8 Sol checks/resources identical');
 const templates = new Set();
 for (const phase of config.phases) {
   for (const name of [...phase.checks]) assert(config.checks[name], name);
@@ -41,23 +41,23 @@ for (const phase of config.phases) {
       .filter(check => check.required && !check.excludeStages?.includes(stage)
         && (!check.onlyStages || check.onlyStages.includes(stage)));
     const template = phase.goalTemplates?.[stage] ?? phase.goalTemplate;
-    const goal = fs.readFileSync(path.join(path.dirname(configPath), `v7sol.${template}.md`), 'utf8');
+    const goal = fs.readFileSync(path.join(path.dirname(configPath), `v8sol.${template}.md`), 'utf8');
     const rendered = goal.replaceAll('{{modelValidation}}', checks.map(check =>
       `- ${check.name} [BLOCKER]: ${check.command}`).join('\n'))
       .replaceAll('{{testStage}}', stage).replaceAll('{{stageNumber}}', stage.slice(2))
-      .replaceAll('{{runName}}', 'v7sol-gpt-6.1-sol-high').replaceAll('{{turnNumber}}', '500');
+      .replaceAll('{{runName}}', 'v8sol-gpt-6.1-sol-high').replaceAll('{{turnNumber}}', '500');
     assert(rendered.length + 700 < 4000, `Native goal must fit without truncation: ${stage}/${phase.name}`);
   }
 }
 assert.equal(templates.size, 18);
 for (const template of templates) {
-  const text = fs.readFileSync(path.join(path.dirname(configPath), `v7sol.${template}.md`), 'utf8');
+  const text = fs.readFileSync(path.join(path.dirname(configPath), `v8sol.${template}.md`), 'utf8');
   assert(text.includes('{{modelValidation}}'));
   assert(text.includes('native phase goal'));
   assert(text.includes('`update_goal`'));
 }
 if (templatesOnly) {
-  console.log('V7 Sol config parity, 18 sidecars and native-goal sizes: PASS (templates only; no run started)');
+  console.log('V8 Sol config parity, 18 sidecars and native-goal sizes: PASS (templates only; no run started)');
   process.exit(0);
 }
 assert.equal(fs.readFileSync(path.join(config.workdir, 'spec.md'), 'utf8'),

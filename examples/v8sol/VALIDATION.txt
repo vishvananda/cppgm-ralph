@@ -1,0 +1,37 @@
+V8 Sol scaffold renamed from unstarted V7 and verified 2026-11-02.
+
+Assignments tag v8: 08cb1953146bb72bb3cfbadd88e8aba9b427712c.
+Export source: cppgm-extended 9407c687f799ff4dfecdb593f8dfb7c254430d81.
+Prepared run tip: da944f48; only spec.md differs from the tagged base.
+Private run repository: vishvananda/cppgm-run-v8sol (renamed, main pushed).
+Checkout: ~/work/v8sol -> ~/work/private/v8sol/checkout.
+Volume: vg0/cppgm_v8sol; UUID mount in /etc/fstab uses the renamed private path.
+
+PASS: config matches V6 Sol after excluding run name and checkout/private paths.
+      Native Codex gpt-6.1-sol/high, default profile, four phases, checkpoint
+      cadence, PA35 routing/endpoint, 500 turns and identical course checks.
+PASS: original 100 GiB volume retained, renamed and mounted at the V8 path;
+      persistent UUID mount and 64 GiB/no-swap memory scope retained.
+PASS: all 18 sidecars resolve; goals fit the native limit for every PA1-PA35 phase.
+PASS: installed config, sidecars and spec match the example files.
+PASS: V8 contains the PA6/PA7 storage and PA24 flexible-placement guidance.
+PASS: scaffold build, expected initial PA1 local/through failures, 19-file audit.
+PASS: V8 reference-binary bundle downloaded and verified through make setup.
+PASS: grouped instructions/cycles at 100% running and DWARF sampling in Bubblewrap.
+PASS: default-profile Sol/high native goal completion in the sandbox connectivity
+      probe; no compiler implementation work requested.
+PASS: ordinary SSH remote, no repository credential helper or copied credentials.
+PASS: clean checkout, no Ralph state.json or run event log; no V8 worker started.
+PASS: shell/JavaScript syntax and git diff --check.
+
+Evidence: ~/work/private/v8sol/artifacts/scaffold-verification/
+Resolved release tag/commit: assignments-base.txt.
+Sandbox/build/test checks: verification.log, build.log, pa1-initial.log,
+pa1-through-initial.log, counts.txt, perf.data and profile.txt.
+Native-goal probe: goal-completion.json and codex-smoke.jsonl.
+Upgrade record and previous head/spec/fstab/sidecars: artifacts/v8-upgrade-20261102/.
+Earlier prompt refresh: artifacts/prompt-refresh-20261101/.
+
+PA35 priorities span causal producer/consumer chains, with coupled model changes.
+Spec and general prompts/audits reinforce value identity and replaceable placement.
+The previous concise prompt/spec edits are retained without run-specific examples.

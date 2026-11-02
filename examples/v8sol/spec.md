@@ -3,7 +3,7 @@
 ## Purpose
 
 This specification defines the production architecture for a self-contained
-Linux x86-64 C++11 compiler developed cumulatively through V7 PA1–PA35.
+Linux x86-64 C++11 compiler developed cumulatively through V8 PA1–PA35.
 It is normative for this run; the assignment handouts define the language, ABI,
 fixtures and canonical exit commands. Apply architecture requirements to the
 capabilities introduced so far; preserve later boundaries without implementing
@@ -457,7 +457,7 @@ and whether their fix is a batch or a restructure. A restructure replaces the
 blocking model across those owners; it ends when correctness holds and no saved
 rung is lost, and need not gain. Do not edit gate limits, workload manifests,
 fixtures, timestamps or measurements to manufacture progress. The V4 supplemental PA33/PA34
-instruction checker is not part of this V7 run; V7 owns its optimization and
+instruction checker is not part of this V8 run; V8 owns its optimization and
 kernel limits in PA35.
 
 ## Architecture review
