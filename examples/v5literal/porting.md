@@ -92,3 +92,12 @@ Use `make milestones` for the stages listed in `port/milestones.json`; it does
 not replace final validation. `clone_bootstrap_probe.py --limit 4` and `--source`
 provide isolated diagnostic object comparisons, not bootstrap acceptance. Broad
 sweeps belong at stable milestones and final closure, not after every file.
+
+## Reference updates
+
+Read `port/reference-update.json` before following an older ledger. Recover
+changed completed files in dependency groups using the recorded old/new C++
+revisions, then resume pending translation. Preserve unchanged Rust work and
+reviews; changed source hashes require new correspondence review and affected
+validation. Revalidate usable course milestones against the current oracle. Old
+receipts remain historical; do not replay unrelated audits or redesign algorithms.

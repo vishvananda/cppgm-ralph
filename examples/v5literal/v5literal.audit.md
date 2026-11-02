@@ -11,6 +11,12 @@ persistent state, failure restoration, lazy/short-circuit order, live queues and
 cache boundaries. Record Rust-required representation adaptations; defer optional
 redesign, abstractions and optimization. Keep the frozen per-file mapping.
 
+When `port/reference-update.json` exists, recover its changed completed sources
+in dependency groups before new translation. Diff the pinned old/new C++ files;
+update affected declarations and consumers together. Old plans and receipts do
+not establish current parity. Reuse unchanged reviews, renew affected evidence
+and usable milestones, and avoid repeating unrelated historical audits.
+
 Review all changed source mappings since the recorded reviewed tip. Trace
 original branches, state lifetimes and queue/cache boundaries, not just fixtures. Pending declarations/stubs may help compilation but do not
 count as implemented. Use make inspect SOURCE=dev/path.cpp to map every function.

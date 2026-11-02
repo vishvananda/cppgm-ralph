@@ -22,6 +22,10 @@ comments and exact entries in `port/unsafe.json`; run `make audit-rust` to check
 the ledger. No C++ implementation FFI, compiler fallback, embedded oracle answers,
 fixture recognition or silent baseline/reference updates.
 
+After a reference update, recover changed completed files from
+`port/reference-update.json` first; retain unchanged work and renew affected
+reviews/evidence against the current pin. Old ledgers never override new source.
+
 Select the next finite dependency batch from `porting.md`; declarations or stubs
 are pending work. Use `make inspect SOURCE=dev/path.cpp` for original definitions
 and mapped Rust function identities. A completed source needs complete function

@@ -37,6 +37,8 @@ order, using finite batches for mutually dependent declarations. A source is
 complete only when its entire contract is implemented, its function map is
 complete, and current Rust bytes and validation evidence are reviewed. Pending
 stubs may support compilation but never count as translated responsibilities.
+After a reference update, recover changed completed sources and their consumers
+against the current pin; preserve unchanged work and renew affected evidence.
 
 Assignment fixtures, original course/debug lanes, exact output comparison and
 the cross-implementation bootstrap validate the result. They do not authorize

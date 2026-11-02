@@ -1,4 +1,5 @@
-Complete one finite source-faithful translation/review handoff. Follow the
+Complete one finite source-faithful translation/review handoff. Recover changed
+completed sources from any reference update first. Follow the
 frozen file/function mapping, preserve algorithms and execution lifetimes, and
 record only Rust-required adaptations. Validate the changed group and unsafe
 invariants, close only fully reviewed source responsibilities, update the compact

@@ -1,0 +1,29 @@
+V5Literal reference migration to V8, 2026-11-02
+
+C++ source: 9407c687f799ff4dfecdb593f8dfb7c254430d81 (v8).
+Assignments: 08cb1953146bb72bb3cfbadd88e8aba9b427712c (v8).
+Independent reference: ~/work/references/v8literal-cpp.
+Previous reference retained at ~/work/references/v5literal-cpp.
+Nine release oracle tools verified against the V8 bundle manifest.
+
+Source census: 408 -> 456; 48 added, zero removed, 209 changed.
+Existing completed rows: 182 -> 102 retained, 80 pending recovery.
+Rust implementation/reviews/unsafe ledger and Ralph history are retained.
+Only dev/frontend_source_sets.mk changed under dev/ during installation.
+Protected fixture, source, oracle and policy pins are updated together.
+A fresh clone-v8 artifact namespace prevents stale gate reuse.
+Prior bootstrap scratch is archived. Old validation receipts retain original paths.
+
+PASS protected preflight, exact 102/456 inventory, 89 harness regressions,
+format/Clippy review and unsafe audit (297 files, 2934 constructs, zero findings).
+PASS oracle and unchanged candidate PA1: 61/61 each against V8 fixtures.
+PASS native goal length (largest rendered check list 1047 chars plus reserve).
+Worker startup must omit --continue and --reuse-last-checks; startup establishes
+V8's current progress baseline without resetting existing turns or logs.
+
+Migration instructions recover changed completed files in dependency groups,
+renew affected source/evidence and usable milestones, then resume translation.
+Exact comparison, all original course/debug lanes and PA34 proof remain required;
+this installation does not claim full compiler or bootstrap correctness.
+
+Evidence: ~/work/private/v5literal/artifacts/reference-update-v8/.

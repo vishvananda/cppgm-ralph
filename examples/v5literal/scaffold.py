@@ -15,8 +15,8 @@ from port_inventory import freeze_source
 
 HERE = Path(__file__).resolve().parent
 BASE_EXAMPLE = HERE.parent / 'v5rust'
-REVISION = '22cd2cd17f660b765c8118e9675fab676daec714'
-ASSIGNMENTS = '829dd5d2c7e5abba72ce5e58985e15e6bb6576c2'
+REVISION = '9407c687f799ff4dfecdb593f8dfb7c254430d81'
+ASSIGNMENTS = '08cb1953146bb72bb3cfbadd88e8aba9b427712c'
 NAME = 'v5literal'
 
 
@@ -40,6 +40,12 @@ Use the frozen C++ files directly. Preserve functions, fields, control flow,
 persistent state, failure restoration, lazy/short-circuit order, live queues and
 cache boundaries. Record Rust-required representation adaptations; defer optional
 redesign, abstractions and optimization. Keep the frozen per-file mapping.
+
+When `port/reference-update.json` exists, recover its changed completed sources
+in dependency groups before new translation. Diff the pinned old/new C++ files;
+update affected declarations and consumers together. Old plans and receipts do
+not establish current parity. Reuse unchanged reviews, renew affected evidence
+and usable milestones, and avoid repeating unrelated historical audits.
 
 Start with a shared pointer/arena/null/error/integer convention, then translate
 in dependency order. Pending declarations/stubs may help compilation but do not
@@ -67,7 +73,8 @@ compiler may remain incomplete. No goal reset, protected-policy or Ralph-state e
     audit = audit.replace('Start with a shared pointer/arena/null/error/integer convention, then translate\nin dependency order.',
         'Review all changed source mappings since the recorded reviewed tip. Trace\noriginal branches, state lifetimes and queue/cache boundaries, not just fixtures.')
     audit += '\nFinal advancement requires the complete inventory, all PA1–PA33 differential/course/debug lanes and full Rust quality. PA34 then proves clean C1==C2==CR==C3; partial probes never satisfy it.\n'
-    goal = '''Complete one finite source-faithful translation/review handoff. Follow the
+    goal = '''Complete one finite source-faithful translation/review handoff. Recover changed
+completed sources from any reference update first. Follow the
 frozen file/function mapping, preserve algorithms and execution lifetimes, and
 record only Rust-required adaptations. Validate the changed group and unsafe
 invariants, close only fully reviewed source responsibilities, update the compact
@@ -109,6 +116,7 @@ def main():
     module.BASE, module.PRIVATE, module.ROOT = base, private, root
     module.REFERENCE, module.CONTROL = reference, control
     module.REVISION, module.ASSIGNMENT_REVISION = REVISION, ASSIGNMENTS
+    module.ASSIGNMENT_TAG = 'v8'
     root.mkdir(); control.mkdir(exist_ok=True)
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=reference).decode().split('\0')[:-1]
     for name in tracked:
@@ -181,7 +189,7 @@ os.execv("{control}/venv/bin/python", ["{control}/venv/bin/python", "{control}/p
     module.write(root / 'porting.md', (HERE / 'porting.md').read_text())
     module.write(root / 'docs/port/pa33.md', '''# Whole-source translation ledger
 
-Inventory: 0/408 complete. No C++ compiler implementation has been translated.
+Inventory: 0/456 complete. No C++ compiler implementation has been translated.
 PA33 is a Ralph transport label, not assignment progress. See porting.md.
 
 First batch: inspect original shared storage/identity/ownership types and their
