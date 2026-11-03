@@ -15,8 +15,8 @@ from port_inventory import freeze_source
 
 HERE = Path(__file__).resolve().parent
 BASE_EXAMPLE = HERE.parent / 'v5rust'
-REVISION = '9407c687f799ff4dfecdb593f8dfb7c254430d81'
-ASSIGNMENTS = '08cb1953146bb72bb3cfbadd88e8aba9b427712c'
+REVISION = '8d4c68b9e37976a0c290109bcc9f63f1b4e95cea'
+ASSIGNMENTS = '0755b5f68b801456bc077c78811b11165f292d94'
 NAME = 'v5literal'
 
 
@@ -63,8 +63,9 @@ Original tests, diagnostics, work counters and generated files remain exact.
 Fill current whole-source reviews and function correspondence, then mark only
 fully translated/reviewed source rows complete. Keep one ledger: batch, reviewed
 tip, mappings/adaptations, findings, evidence and next dependency. Commit and
-leave clean. Complete Ralph's existing bounded handoff goal and return; the
-compiler may remain incomplete. No goal reset, protected-policy or Ralph-state edit.
+leave clean. Call update_goal with status complete and return after the bounded
+handoff; the compiler may remain incomplete. Ralph refreshes progress gates
+after return; their prior logs are not completion criteria. No goal reset or policy/state edit.
 
 {{modelValidation}}
 '''
@@ -79,8 +80,9 @@ frozen file/function mapping, preserve algorithms and execution lifetimes, and
 record only Rust-required adaptations. Validate the changed group and unsafe
 invariants, close only fully reviewed source responsibilities, update the compact
 ledger, commit and leave clean. Partial completion ends this handoff, not the
-compiler. Complete Ralph's existing native goal; do not reset goals or weaken
-the source inventory, exact comparator or final course/bootstrap requirements.
+compiler. Call update_goal with status complete after the bounded handoff; Ralph
+refreshes progress gates after return. Do not reset goals or weaken the source
+inventory, exact comparator or final course/bootstrap requirements.
 
 {{modelValidation}}
 '''
@@ -187,9 +189,9 @@ os.execv("{control}/venv/bin/python", ["{control}/venv/bin/python", "{control}/p
         writer.writerow(['cpp_source', 'rust_owner', 'status'])
         writer.writerows((source, spec['rust_path'], 'pending') for source, spec in source_inventory['sources'].items())
     module.write(root / 'porting.md', (HERE / 'porting.md').read_text())
-    module.write(root / 'docs/port/pa33.md', '''# Whole-source translation ledger
+    module.write(root / 'docs/port/pa33.md', f'''# Whole-source translation ledger
 
-Inventory: 0/456 complete. No C++ compiler implementation has been translated.
+Inventory: 0/{len(source_inventory['sources'])} complete. No C++ compiler implementation has been translated.
 PA33 is a Ralph transport label, not assignment progress. See porting.md.
 
 First batch: inspect original shared storage/identity/ownership types and their

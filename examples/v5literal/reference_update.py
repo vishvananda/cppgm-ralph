@@ -36,16 +36,25 @@ def census(reference, revision):
         for name in names if name.startswith('dev/') and name.endswith(('.cpp', '.h'))}}
 
 
-def classify(old, new, rows):
+def classify(old, new, rows, previous=None):
     a, b = old['sources'], new['sources']
     changed = sorted(p for p in a.keys() & b.keys() if a[p]['sha256'] != b[p]['sha256'])
     unchanged = sorted(p for p in a.keys() & b.keys() if a[p]['sha256'] == b[p]['sha256'])
     complete = {row['cpp_source'] for row in rows if row['status'] == 'complete'}
+    previous = previous or {}
+    pending_recovery = (set(previous.get('recover', [])) - complete) & b.keys()
+    recover = (complete & set(changed)) | pending_recovery
+    baselines = previous.get('recovery_baselines', {})
     return {'old_revision': old['revision'], 'new_revision': new['revision'],
             'old_total': len(a), 'new_total': len(b), 'old_complete': len(complete),
             'added': sorted(b.keys() - a.keys()), 'removed': sorted(a.keys() - b.keys()),
             'changed': changed, 'unchanged': unchanged,
-            'recover': sorted(complete & set(changed)),
+            'recover': sorted(recover),
+            'previous_pending_recovery': sorted(pending_recovery),
+            'recovery_baselines': {
+                source: baselines.get(source, previous.get('old_revision', old['revision']))
+                if source in pending_recovery else old['revision']
+                for source in sorted(recover)},
             'preserve': sorted(complete & set(unchanged))}
 
 
@@ -106,29 +115,42 @@ def main():
     settings = json.loads((control / 'settings.json').read_text())
     root = Path(settings['checkout'])
     state = json.loads((Path(settings['state_dir']) / 'state.json').read_text())
-    if state.get('activeTurn'):
+    if args.apply and (state.get('activeTurn') or {}).get('status') == 'running':
         raise RuntimeError('finish or interrupt the active turn before migration')
-    processes = subprocess.check_output(['ps', '-eo', 'args'], text=True)
-    if any('ralph.js' in line and str(control) in line for line in processes.splitlines()
-           if 'reference_update.py' not in line):
-        raise RuntimeError('stop the worker before migration')
+    if args.apply:
+        config = control.parent / (control.name.removesuffix('-control') + '.config.json')
+        processes = subprocess.check_output(['ps', '-eo', 'pid,args'], text=True)
+        for line in processes.splitlines():
+            if 'ralph.js' not in line or 'reference_update.py' in line:
+                continue
+            pid, command = line.strip().split(maxsplit=1)
+            try:
+                environment = Path('/proc', pid, 'environ').read_bytes().split(b'\0')
+            except (OSError, PermissionError):
+                environment = []
+            if str(control) in command or str(config) in command or (
+                    b'RALPH_CONFIG=' + str(config).encode() in environment):
+                raise RuntimeError('stop the worker before migration')
     revision = git(reference, 'rev-parse', args.tag + '^{commit}').decode().strip()
     if git(reference, 'rev-parse', 'HEAD').decode().strip() != revision:
         raise RuntimeError('reference checkout must be at the requested tag')
-    if git(reference, 'status', '--porcelain').strip() or git(root, 'status', '--porcelain').strip():
+    if git(reference, 'status', '--porcelain').strip() or (args.apply and git(root, 'status', '--porcelain').strip()):
         raise RuntimeError('candidate and reference must be clean')
     old = json.loads((control / 'source-inventory.json').read_text())
     new = census(reference, revision)
     with (root / 'port/source-map.tsv').open() as stream:
         rows = list(csv.DictReader(stream, delimiter='\t'))
-    report = classify(old, new, rows)
+    previous_file = root / 'port/reference-update.json'
+    previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
+    report = classify(old, new, rows, previous)
     report.update(assignment_revision=args.assignment_revision, tag=args.tag,
                   previous_reference=settings['reference'], reference=str(reference),
                   candidate_before=git(root, 'rev-parse', 'HEAD').decode().strip())
     print(json.dumps({k: len(v) if isinstance(v, list) else v for k, v in report.items()}, indent=2))
     if not args.apply:
         return
-    backup = Path(settings['artifacts']).parent / ('reference-update-' + args.tag)
+    namespace = args.tag + '-' + revision[:12]
+    backup = Path(settings['artifacts']).parent / ('reference-update-' + namespace)
     backup.mkdir(parents=True, exist_ok=False)
     shutil.copytree(control, backup / 'control', ignore=shutil.ignore_patterns('venv', '__pycache__'))
     shutil.copytree(root / 'port', backup / 'port')
@@ -142,7 +164,7 @@ def main():
     for directory in (control, root / 'scripts/clone'):
         updated = dict(settings, reference=str(reference), revision=revision,
                        assignment_revision=args.assignment_revision, assignment_tag=args.tag,
-                       artifacts=str(Path(settings['artifacts']).parent / ('clone-' + args.tag)))
+                       artifacts=str(Path(settings['artifacts']).parent / ('clone-' + namespace)))
         write_json(directory / 'settings.json', updated)
         Path(updated['artifacts']).mkdir(parents=True, exist_ok=True)
     new_inputs = refresh_inputs(root, reference, old['revision'], revision)
@@ -172,14 +194,16 @@ Prior candidate tip: `{report['candidate_before']}`. Previous ledger and raw
 evidence are retained at `{backup}` and the prior Git history.
 
 The current inventory has {len(new['sources'])} sources. {len(report['preserve'])}
-previously completed sources are byte-identical; {len(report['recover'])} changed
-completed sources require recovery, and {len(report['added'])} new sources are
+previously completed sources are byte-identical; {len(report['recover'])} sources
+require recovery (including {len(report['previous_pending_recovery'])} carried
+from the prior update), and {len(report['added'])} new sources are
 pending. Existing Rust implementation, reviews and unsafe records are retained.
 Changed C++ sources are pending; an old review never certifies new source bytes.
 
 Read `port/reference-update.json`. First recover changed completed files in
-dependency groups, using `git -C {reference} diff {old['revision']} {revision}
--- dev/path.cpp` and `make inspect SOURCE=dev/path.cpp`. Update affected Rust
+dependency groups, using each file's `recovery_baselines` revision with
+`git -C {reference} diff OLD {revision} -- dev/path.cpp` and
+`make inspect SOURCE=dev/path.cpp`. Update affected Rust
 declarations and consumers together, preserving the new source algorithms and
 lifetimes. Use existing tests and current source diffs; do not replay historical
 audits wholesale or redesign the compiler. Renew only affected source reviews

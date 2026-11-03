@@ -27,3 +27,29 @@ Exact comparison, all original course/debug lanes and PA34 proof remain required
 this installation does not claim full compiler or bootstrap correctness.
 
 Evidence: ~/work/private/v5literal/artifacts/reference-update-v8/.
+
+Refresh of the moved V8 release, 2026-11-03
+
+C++ source: 8d4c68b9e37976a0c290109bcc9f63f1b4e95cea.
+Assignments: 0755b5f68b801456bc077c78811b11165f292d94.
+Reference: ~/work/references/v8literal-cpp-8d4c68b9.
+Previous V8 reference remains available at ~/work/references/v8literal-cpp.
+Nine oracle binaries were SHA256-verified against the updated release manifest.
+
+Stopped after clean translation commit 726d4a91e6729df511ebe82bb19be571c7868dca.
+Source census: 456 -> 457; 1 added, 6 changed.
+Completed sources: 161 -> 159 retain current reviews.
+Recovery queue: 26, including 24 unfinished prior recoveries. Each retains its
+original C++ diff baseline; a second update does not forget earlier work.
+
+Backups: private/v5literal/artifacts/reference-update-v8-8d4c68b9e379/.
+New measurement namespace: private/v5literal/artifacts/clone-v8-8d4c68b9e379/.
+Old review evidence remains available at its original paths.
+Prompts explicitly complete the native goal at a clean bounded handoff and leave
+Ralph-owned progress checks to Ralph after return. All final parity gates remain.
+
+Refresh verification: protected preflight PASS; exact inventory 159/457 current
+reviews; 90 harness regressions PASS; format/Clippy/unsafe/source audit PASS
+(300 Rust files, 3037 unsafe constructs, zero findings).
+Evidence: ~/work/maintenance/v5literal-v8-refresh-20261103/.
+PASS unchanged candidate and new V8 oracle PA1: 61/61 each.

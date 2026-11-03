@@ -34,6 +34,23 @@ class ReferenceUpdateTests(unittest.TestCase):
                      'shared/source.gram', 'dev/frontend_source_sets.mk'):
             self.assertTrue(reference_owned(path), path)
 
+    def test_second_release_preserves_unfinished_recovery_and_its_original_diff(self):
+        old = {'revision': 'middle', 'sources': {
+            name: {'sha256': value, 'rust_path': name + '.rs'}
+            for name, value in [('unfinished', 'a'), ('recovered', 'b'), ('changed', 'c')]}}
+        new = {'revision': 'latest', 'sources': {name: dict(spec) for name, spec in old['sources'].items()}}
+        new['sources']['changed']['sha256'] = 'd'
+        rows = [{'cpp_source': name, 'rust_owner': name + '.rs',
+                 'status': 'pending' if name == 'unfinished' else 'complete'}
+                for name in old['sources']]
+        prior = {'old_revision': 'original', 'recover': ['unfinished', 'recovered', 'removed']}
+        report = classify(old, new, rows, prior)
+        self.assertEqual(report['recover'], ['changed', 'unfinished'])
+        self.assertEqual(report['previous_pending_recovery'], ['unfinished'])
+        self.assertEqual(report['recovery_baselines'], {'changed': 'middle', 'unfinished': 'original'})
+        again = classify(new, new, rows, report)
+        self.assertEqual(again['recovery_baselines']['unfinished'], 'original')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -33,8 +33,9 @@ Original tests, diagnostics, work counters and generated files remain exact.
 Fill current whole-source reviews and function correspondence, then mark only
 fully translated/reviewed source rows complete. Keep one ledger: batch, reviewed
 tip, mappings/adaptations, findings, evidence and next dependency. Commit and
-leave clean. Complete Ralph's existing bounded handoff goal and return; the
-compiler may remain incomplete. No goal reset, protected-policy or Ralph-state edit.
+leave clean. Call update_goal with status complete and return after the bounded
+handoff; the compiler may remain incomplete. Ralph refreshes progress gates
+after return; their prior logs are not completion criteria. No goal reset or policy/state edit.
 
 {{modelValidation}}
 

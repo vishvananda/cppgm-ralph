@@ -49,8 +49,8 @@ process.stdin.on('end', () => {
             raise RuntimeError('mock Ralph failed for a reason other than intentionally incomplete source progress')
         state = json.loads(next((root / 'state').glob('*/state.json')).read_text())
         status = state['lastTestStatus']
-        if status['testsTotal'] != 456 or status['testsPassed'] != 0 or state['activeStage'] != 'pa33':
-            raise RuntimeError('Ralph did not retain the incomplete 0/456 source inventory')
+        if status['testsTotal'] != config['progressModel']['total'] or status['testsPassed'] != 0 or state['activeStage'] != 'pa33':
+            raise RuntimeError('Ralph did not retain the configured incomplete source inventory')
         (report / 'ralph-config-state.json').write_text(json.dumps(state, indent=2) + '\n')
 
 
@@ -61,6 +61,9 @@ def main():
     here = Path(__file__).resolve().parent; repo = here.parents[1]
     config = json.loads((base / 'v5literal.config.json').read_text())
     root = base / 'v5literal'; control = base / 'v5literal-control'
+    total = len(json.loads((control / 'source-inventory.json').read_text())['sources'])
+    if config['progressModel']['total'] != total:
+        raise RuntimeError('configured progress total differs from the pinned source census')
     python = control / 'venv/bin/python'; report = base / 'private/v5literal/artifacts/setup-verification'
     report.mkdir(parents=True, exist_ok=True)
     expected_state = str(Path(config['stateBaseDir']) / (config['name'] + '-' + config['model'] + '-' + config['reasoningEffort']))
@@ -73,8 +76,8 @@ def main():
     command([python, '-m', 'unittest', 'discover', '-s', control, '-p', 'test_*.py'], cwd=root, log=report / 'harness.log')
     command([python, control / 'port_check.py', 'preflight'], cwd=root, log=report / 'preflight.log')
     text = command([python, control / 'port_check.py', 'inventory'], cwd=root, expected=1, log=report / 'inventory.log')
-    if '===== TEST SUMMARY: 0 / 456 TESTS PASSED =====' not in text:
-        raise RuntimeError('fresh inventory must be exactly 0/456')
+    if f'===== TEST SUMMARY: 0 / {total} TESTS PASSED =====' not in text:
+        raise RuntimeError(f'fresh inventory must be exactly 0/{total}')
     command(['python3', control / 'clone_quality.py'], cwd=root, log=report / 'quality.log')
     command(['python3', control / 'clone_check.py', 'oracle-self-check', 'pa1'], cwd=root, log=report / 'oracle-self-check.log')
     command(['python3', control / 'clone_check.py', 'case', 'pa1', 'tests/100-a.t'], cwd=root, expected=1, log=report / 'candidate-case.log')
@@ -108,9 +111,9 @@ process.stdout.write(execFileSync(cmd.command,cmd.args,{encoding:'utf8'}));
         raise RuntimeError('private /tmp leaked into host /tmp')
     if list((base / '.ralph').glob('v5literal-*')):
         raise RuntimeError('verification must not create actual run state')
-    result = {'source_files': 456, 'completed': 0, 'candidate_tools': 'all nine exit 86',
+    result = {'source_files': total, 'completed': 0, 'candidate_tools': 'all nine exit 86',
               'oracle_self_check': 'pass', 'candidate_differential_case': 'correctly fails',
-              'quality': 'pass', 'isolation': 'pass', 'mock_ralph': '0/456, no advancement',
+              'quality': 'pass', 'isolation': 'pass', 'mock_ralph': f'0/{total}, no advancement',
               'auth': 'shared default Codex', 'worker_started': False}
     (report / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
