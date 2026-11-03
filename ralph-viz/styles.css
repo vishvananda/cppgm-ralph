@@ -901,6 +901,13 @@ body.is-static-viz .combined-view-toggle {
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.comparison-table thead .run-repository-link {
+  display: inline;
+  white-space: inherit;
 }
 
 .comparison-total th,
