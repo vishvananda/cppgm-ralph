@@ -14,6 +14,15 @@ function summary(cost, status = "complete") {
   };
 }
 
+test("a live replacement retains the published repository link", () => {
+  const url = "https://github.com/owner/archived-run";
+  const merged = mergePublishedAndLocalComparisons({
+    through: "pa1", runs: [{ spec: "custom", repositoryUrl: url }], rows: [],
+  }, [{ comparison: { through: "pa1", runs: [{ spec: "custom/run" }], rows: [] },
+    runRef: { shape: "custom" } }]);
+  assert.equal(merged.runs[0].repositoryUrl, url);
+});
+
 test("all live runs replace their published duplicates and retain aligned stage columns", () => {
   const published = {
     through: "pa1",

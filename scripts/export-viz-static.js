@@ -12,6 +12,7 @@ import readline from "node:readline";
 import "../ralph-viz/assignment-layouts.js";
 import "../ralph-viz/comparison-run-visibility.js";
 import { VIEWER_ASSET_NAMES } from "../ralph-viz/viewer-assets.js";
+import { archivedRepositoryUrl, resolveRunRepositoryUrl } from "../run-repository-url.js";
 import {
   collectSubagentEvents,
   DEFAULT_CLAUDE_PROJECTS_DIR,
@@ -36,16 +37,6 @@ export const DEFAULT_RUNS = [
   "v3codex-gpt-5.6-sol-xhigh",
   "v3multi-gpt-5.6-sol-xhigh",
 ];
-const RUN_REPOSITORIES = new Map([
-  ["trusted", "https://github.com/vishvananda/cppgm-run-trusted"],
-  ["opus", "https://github.com/vishvananda/cppgm-run-opus"],
-  ["mini", "https://github.com/vishvananda/cppgm-run-mini"],
-  ["fable", "https://github.com/vishvananda/cppgm-run-fable"],
-  ["luna", "https://github.com/vishvananda/cppgm-run-luna"],
-  ["v3opus", "https://github.com/vishvananda/cppgm-run-v3opus"],
-  ["v3codex", "https://github.com/vishvananda/cppgm-run-v3codex"],
-  ["v3multi", "https://github.com/vishvananda/cppgm-run-v3multi"],
-]);
 const FORMAT_VERSION = 1;
 const EXPORT_CACHE_VERSION = 1;
 const COMPARISON_MAX_OLD_SPACE_MB = 16384;
@@ -580,6 +571,7 @@ function fingerprint(value) {
 async function exportImplementationFingerprint() {
   const sources = [
     SCRIPT_FILE,
+    path.join(REPO_ROOT, "run-repository-url.js"),
     path.join(REPO_ROOT, "scripts", "compare-pa-costs.js"),
     path.join(REPO_ROOT, "subagent-events.js"),
     path.join(REPO_ROOT, "unreal-agent-events.js"),
@@ -693,8 +685,9 @@ export function annotateComparison(comparison, runMetas) {
       run.layout = meta.assignmentLayout;
       run.assignmentTitles = meta.assignmentTitles;
       run.dataPath = meta.dataPath;
-      run.repositoryUrl = meta.repositoryUrl;
+      run.repositoryUrl = meta.repositoryUrl ?? run.repositoryUrl;
     }
+    run.repositoryUrl ??= archivedRepositoryUrl(run.spec ?? run.label);
     run.ordinal = index + 1;
     const baseLabel = String(run.label ?? run.spec ?? `run-${run.ordinal}`)
       .replace(/^\d+-/, "");
@@ -905,7 +898,7 @@ async function exportRun(run, options, comparison, prepared, implementation) {
   const runMeta = {
     id: run.id,
     label: run.label,
-    repositoryUrl: RUN_REPOSITORIES.get(inferDocPrefix(run.shape)) ?? null,
+    repositoryUrl: await resolveRunRepositoryUrl(run.shape, inferRunWorktree(run, options)),
     fileBase: run.fileBase,
     filePath: run.filePath,
     dataPath: `runs/${run.safeId}/summary.json`,
@@ -1369,11 +1362,29 @@ export async function main(argv = process.argv.slice(2)) {
     ));
   }
 
+  // Repair metadata even for retained archives and unchanged run data. A new
+  // repository link must not require replaying multi-gigabyte session logs.
+  for (const meta of runMetas) {
+    const shape = String(meta.id ?? meta.label).split("/")[0];
+    const repositoryUrl = await resolveRunRepositoryUrl(shape, path.join(options.workDir, inferDocPrefix(shape)))
+      ?? meta.repositoryUrl;
+    if (repositoryUrl && meta.repositoryUrl !== repositoryUrl) {
+      meta.repositoryUrl = repositoryUrl;
+      const summaryPath = path.join(options.outDir, "data", meta.dataPath);
+      const summary = await readJsonIfExists(summaryPath);
+      if (summary?.run) {
+        summary.run.repositoryUrl = repositoryUrl;
+        await writeJson(summaryPath, summary);
+      }
+    }
+  }
+
   let comparisons = [];
-  if (reusedComparison) {
+  const beforeAnnotation = JSON.stringify(comparison);
+  annotateComparison(comparison, runMetas);
+  if (reusedComparison && JSON.stringify(comparison) === beforeAnnotation) {
     comparisons = reusedComparison.entries;
   } else {
-    annotateComparison(comparison, runMetas);
     comparisons = await writeComparison(options, comparison);
   }
   const allExportsSettled = runMetas.every((run) => run.exportSettled === true);

@@ -29,6 +29,7 @@ import { addUnrealSessionDisplayEvents } from "../unreal-session-events.js";
 import { compactRunUsageEvent } from "../run-usage-events.js";
 import { codexCommandCompletionEvent } from "../codex-session-events.js";
 import { augmentSourceResponsibilityProgress } from "./source-responsibilities.js";
+import { archivedRepositoryUrl, resolveRunRepositoryUrl } from "../run-repository-url.js";
 
 const ROOT_DIR = process.cwd();
 const RALPH_DIR = path.join(ROOT_DIR, ".ralph");
@@ -7693,7 +7694,7 @@ function comparisonRunForChart(run, highlighted = false) {
     label: String(run?.label ?? run?.spec ?? "run"),
     spec: run?.spec ?? null,
     model: run?.model ?? null,
-    repositoryUrl: run?.repositoryUrl ?? null,
+    repositoryUrl: run?.repositoryUrl ?? archivedRepositoryUrl(run?.spec ?? run?.label),
     layout: ASSIGNMENT_LAYOUT.descriptor(run?.layout, "v2"),
     comparisonComplete: run?.comparisonComplete === true,
     ...(normalizeProgressModel(run?.progressModel) ? { progressModel: normalizeProgressModel(run.progressModel) } : {}),
@@ -7735,8 +7736,9 @@ function mergePublishedAndLocalComparisons(published, locals) {
   const localEntries = locals.map(({ comparison, runRef, localMtime }) => {
     const run = comparison?.runs?.[0];
     if (!run) throw new Error("Local comparison did not contain a run");
+    const archived = publishedRuns.find(candidate => comparisonRunMatchesLocal(candidate, run, runRef));
     return {
-      run, runRef, localMtime,
+      run: { ...run, repositoryUrl: run.repositoryUrl ?? archived?.repositoryUrl }, runRef, localMtime,
       rows: new Map((comparison.rows ?? []).map((row) => [row.pa, row])),
       through: Number.parseInt(String(comparison.through ?? "").replace(/^pa/, ""), 10) || 0,
     };
@@ -7783,12 +7785,14 @@ function mergePublishedAndLocalComparisons(published, locals) {
 async function configuredRunMetadataForShape(shape) {
   const descriptors = await discoverRalphConfigDescriptors();
   const descriptor = descriptors.find((candidate) => candidate.runName === shape);
+  const repositoryUrl = await resolveRunRepositoryUrl(shape, descriptor?.workdir);
   return descriptor
     ? { model: descriptor.model, assignmentLayout: descriptor.assignmentLayout, workdir: descriptor.workdir,
-        progressModel: descriptor.progressModel }
+        progressModel: descriptor.progressModel, repositoryUrl }
     : {
         model: null,
         assignmentLayout: ASSIGNMENT_LAYOUT.inferLayoutId(shape),
+        repositoryUrl,
       };
 }
 
@@ -7917,6 +7921,7 @@ async function readLiveComparison(rawIds, force = false) {
           runRef, localMtime: stat.mtime,
           comparison: { through: 'pa0', rows: [], runs: [{ spec: runRef.shape,
             model: configured.model, progressModel: configured.progressModel,
+            repositoryUrl: configured.repositoryUrl,
             layout: ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout) }] },
         };
         return {
@@ -7926,6 +7931,7 @@ async function readLiveComparison(rawIds, force = false) {
             runs: [{
               ...local.runs[paIndex],
               model: configured.model ?? local.runs[paIndex]?.model,
+              repositoryUrl: configured.repositoryUrl ?? local.runs[paIndex]?.repositoryUrl,
               layout: ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout),
             }],
             rows: local.rows.map((row) => ({ pa: row.pa, runs: [row.runs[paIndex]] })),
@@ -7969,6 +7975,7 @@ async function readRunComparison(rawId, runRef, force = false) {
           local.runs[0].model = configured.model;
         }
         local.runs[0].layout = ASSIGNMENT_LAYOUT.descriptor(configured.assignmentLayout);
+        local.runs[0].repositoryUrl = configured.repositoryUrl ?? local.runs[0].repositoryUrl;
         if (configured.progressModel) local.runs[0].progressModel = configured.progressModel;
       }
       const value = mergePublishedAndLocalComparison(published, local, runRef, stat.mtime);
