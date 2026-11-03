@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import "./assignment-layouts.js";
+import "./comparison-run-visibility.js";
 import "./model-pricing.js";
 import "./test-progress-evidence.js";
 import "./test-command-provenance.js";
@@ -7767,7 +7768,7 @@ function mergePublishedAndLocalComparisons(published, locals) {
       ],
     });
   }
-  return {
+  return globalThis.RALPH_COMPARISON_RUN_VISIBILITY.annotate({
     generatedAt: new Date().toISOString(),
     publishedGeneratedAt: published?.generatedAt ?? null,
     localUpdatedAt: localEntries.map((local) => local.localMtime?.toISOString?.())
@@ -7776,7 +7777,7 @@ function mergePublishedAndLocalComparisons(published, locals) {
     localRunIndices: localEntries.map((_, index) => includedPublishedRuns.length + index),
     runs,
     rows,
-  };
+  });
 }
 
 async function configuredRunMetadataForShape(shape) {

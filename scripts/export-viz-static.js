@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 import "../ralph-viz/assignment-layouts.js";
+import "../ralph-viz/comparison-run-visibility.js";
 import { VIEWER_ASSET_NAMES } from "../ralph-viz/viewer-assets.js";
 import {
   collectSubagentEvents,
@@ -587,6 +588,7 @@ async function exportImplementationFingerprint() {
     path.join(REPO_ROOT, "codex-subagent-events.js"),
     path.join(REPO_ROOT, "claude-subagent-events.js"),
     path.join(REPO_ROOT, "ralph-viz", "assignment-layouts.js"),
+    path.join(REPO_ROOT, "ralph-viz", "comparison-run-visibility.js"),
     path.join(REPO_ROOT, "ralph-viz", "model-pricing.js"),
     path.join(REPO_ROOT, "ralph-viz", "turn-lifecycle.js"),
   ];
@@ -677,7 +679,7 @@ async function buildComparison(options, runs) {
   }
 }
 
-function annotateComparison(comparison, runMetas) {
+export function annotateComparison(comparison, runMetas) {
   if (!comparison || !Array.isArray(comparison.runs)) {
     return comparison;
   }
@@ -707,9 +709,13 @@ function annotateComparison(comparison, runMetas) {
     comparison.displayLayout,
   ).slice(0, throughNumber ?? undefined);
   for (const [runIndex, run] of comparison.runs.entries()) {
-    const finalSummary = displayRows.at(-1)?.runs?.[runIndex];
-    run.comparisonComplete = displayRows.length === throughNumber &&
-      finalSummary?.status === "complete";
+    const layout = ASSIGNMENT_LAYOUT.descriptor(run.layout);
+    const courseEnd = ASSIGNMENT_LAYOUT.canonicalPaNumber(layout, layout.stageCount);
+    const nativeThrough = ASSIGNMENT_LAYOUT.nativePaNumber(layout,
+      Math.min(throughNumber ?? courseEnd, courseEnd));
+    const finalSummary = comparison.rows.find(row => row.pa === `pa${nativeThrough}`)?.runs?.[runIndex];
+    run.comparisonComplete = finalSummary?.status === "complete";
+    run.comparisonReachedPa34 = globalThis.RALPH_COMPARISON_RUN_VISIBILITY.reachedPa34(comparison, runIndex);
   }
   comparison.series = comparisonSeries({
     ...comparison,

@@ -8163,7 +8163,7 @@ function comparisonRunDefaultVisible(run) {
   if (run?.highlighted === true) {
     return true;
   }
-  return run?.comparisonComplete === true;
+  return run?.comparisonReachedPa34 === true || run?.comparisonComplete === true;
 }
 
 function comparisonRunVisible(run, index) {

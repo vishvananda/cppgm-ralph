@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   DEFAULT_RUNS,
+  annotateComparison,
   main as exportViz,
   mergeComparisonUpdates,
 } from "../scripts/export-viz-static.js";
@@ -15,6 +16,23 @@ test("static export defaults include all three v3 runs", () => {
   assert.ok(DEFAULT_RUNS.includes("v3opus-claude-opus-5-xhigh"));
   assert.ok(DEFAULT_RUNS.includes("v3codex-gpt-5.6-sol-xhigh"));
   assert.ok(DEFAULT_RUNS.includes("v3multi-gpt-5.6-sol-xhigh"));
+});
+
+test('PA40 exports use native stage counts for completion and PA34 for default visibility', () => {
+  const complete = { status: 'complete', turns: [1], cost: 1 };
+  const partial = { status: 'partial', turns: [2], cost: 2 };
+  const data = { through: 'pa40', runs: [
+    { spec: 'old', layout: 'v3' }, { spec: 'finished', layout: 'v5' },
+    { spec: 'optimizing', layout: 'v5' }, { spec: 'early', layout: 'v5' },
+  ], rows: [
+    { pa: 'pa39', runs: [complete, null, null, null] },
+    { pa: 'pa34', runs: [null, complete, partial, null] },
+    { pa: 'pa35', runs: [null, complete, partial, null] },
+    { pa: 'pa40', runs: [null, null, null, null] },
+  ] };
+  annotateComparison(data, []);
+  assert.deepEqual(data.runs.map(run => run.comparisonComplete), [true, true, false, false]);
+  assert.deepEqual(data.runs.map(run => run.comparisonReachedPa34), [true, true, true, false]);
 });
 
 test("incremental comparison replaces only changed run columns", () => {
