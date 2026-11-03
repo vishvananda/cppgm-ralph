@@ -1,8 +1,8 @@
-V8 Sol scaffold renamed from unstarted V7 and verified 2026-11-02.
+V8 Sol scaffold renamed from unstarted V7 and verified 2026-11-03.
 
-Assignments tag v8: 08cb1953146bb72bb3cfbadd88e8aba9b427712c.
-Export source: cppgm-extended 9407c687f799ff4dfecdb593f8dfb7c254430d81.
-Prepared run tip: da944f48; only spec.md differs from the tagged base.
+Assignments tag v8: 0755b5f68b801456bc077c78811b11165f292d94.
+Export source: cppgm-extended 8d4c68b9e37976a0c290109bcc9f63f1b4e95cea.
+Prepared run tip: c01e9bce; only spec.md differs from the tagged base.
 Private run repository: vishvananda/cppgm-run-v8sol (renamed, main pushed).
 Checkout: ~/work/v8sol -> ~/work/private/v8sol/checkout.
 Volume: vg0/cppgm_v8sol; UUID mount in /etc/fstab uses the renamed private path.
@@ -35,3 +35,9 @@ Earlier prompt refresh: artifacts/prompt-refresh-20261101/.
 PA35 priorities span causal producer/consumer chains, with coupled model changes.
 Spec and general prompts/audits reinforce value identity and replaceable placement.
 The previous concise prompt/spec edits are retained without run-specific examples.
+
+2026-11-03: refreshed the moved v8 release (two export commits / 17 changed files).
+Existing spec commits replayed cleanly. The new bundle, scaffold build, expected
+initial PA1 failures, file audit, hardware counters and native goal probe pass.
+Config and 18 sidecars match the pushed example files; Ralph remains unstarted.
+Refresh evidence: artifacts/v8-refresh-20261103/.
