@@ -53,3 +53,9 @@ reviews; 90 harness regressions PASS; format/Clippy/unsafe/source audit PASS
 (300 Rust files, 3037 unsafe constructs, zero findings).
 Evidence: ~/work/maintenance/v5literal-v8-refresh-20261103/.
 PASS unchanged candidate and new V8 oracle PA1: 61/61 each.
+
+The interrupted thread's obsolete active native goal was archived as
+obsolete-native-goal.json in the reference-update backup, then cleared through
+the app-server API. This permits the fresh-thread restart when the already
+committed source batch passes Ralph's progress gate; no goal was falsely
+completed and Ralph state/history were not edited.

@@ -98,7 +98,9 @@ the release tag and its nine oracle tools independently verified beforehand.
 After updating instructions, refresh protected hashes, commit/push, update the
 config's source total and restart with fresh checks and a fresh thread. Do not
 use `--continue` or `--reuse-last-checks` across reference revisions. Bootstrap
-work from the earlier pin is archived, not reused.
+work from the earlier pin is archived, not reused. If an interrupted thread still
+has an active goal for the superseded inputs, archive it and clear it through
+`thread/goal/clear` before the fresh start; do not mark it complete.
 
 Recovery prompts prioritize changed completed sources in dependency groups,
 then new translation. Revalidate usable milestones against the new oracle;
