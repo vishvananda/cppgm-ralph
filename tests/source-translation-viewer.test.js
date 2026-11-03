@@ -75,6 +75,18 @@ test('full checkpoint history survives a two-turn card tail and retains reopened
   assert(y[0] - y.at(-1) > 30, 'early file completions must not look flat against the entire inventory');
 });
 
+test('an in-turn inventory result updates the source curve beyond its Ralph starting count', async () => {
+  const b = await browser();
+  const run = { progressModel: { kind: 'source-files', stage: 'pa33', total: 456 } };
+  const summary = { sourceProgressHistory: [
+    { turn: 129, stage: 'pa33', total: 456, passed: 102, action: 'turn-start' },
+  ], testProgress: { byTurn: new Map([[129, progress(129, 136, 'pa33', 456)]]) } };
+  const result = b.sourceTranslationProgress(summary, run);
+  assert.equal(result.current, 136);
+  assert.deepEqual(Array.from(result.points, point => [point.turn, point.passed]), [[128, 102], [129, 136]]);
+  assert.match(b.sourceTranslationChartHtml(summary, run), /136\/456 reviewed files/);
+});
+
 test('source translation cannot enter the PA curves or extend their default range to PA33', async () => {
   const b = await browser();
   const comparison = { runs: [{ label: 'native' }, literal], localRunIndices: [0, 1] };
@@ -112,6 +124,8 @@ test('live catalog and comparison preserve the configured source model without P
     recordedAt: new Date(Date.now() + index * 1000).toISOString(), turnNumber: index + 1, threadId: 'fixture',
     eventType: 'ralph.phase-status', event: { action: 'turn-start',
       phaseStatus: { stage: 'pa33', phase: 'implement', allRequiredPassed: false,
+        checks: [{ name: 'sourceFiles', kind: 'test', primary: true, targetStage: 'pa33',
+          command: '/work/control/venv/bin/python /work/control/port_check.py inventory' }],
         testStatus: { targetStage: 'pa33', testsPassed: passed, testsTotal: 408 } } },
   }));
   await fs.writeFile(path.join(eventsDir, 'run.jsonl'), records.map(JSON.stringify).join('\n') + '\n');
@@ -156,6 +170,17 @@ test('live catalog and comparison preserve the configured source model without P
   const appended = await (await fetch(detailsUrl)).json();
   assert.deepEqual(appended.sourceProgressHistory.map(point => point.turn), [1, 2, 3, 4, 5, 6, 7]);
   assert.equal(appended.sourceProgressHistory.at(-1).passed, 8);
+  // No workdir/source map is provided: the live result must come from the
+  // command output in turn 7, without waiting for a Ralph handoff.
+  await fs.appendFile(path.join(eventsDir, 'run.jsonl'), JSON.stringify({
+    recordedAt: new Date(Date.now() + 8000).toISOString(), turnNumber: 7, threadId: 'fixture',
+    eventType: 'item.completed', event: { item: { id: 'inventory7', type: 'command_execution',
+      command: 'python3 scripts/port_check.py record -- /work/control/venv/bin/python /work/control/port_check.py inventory',
+      aggregated_output: '===== pa33 =====\n===== TEST SUMMARY: 10 / 408 TESTS PASSED =====\n', exit_code: 1 } },
+  }) + '\n');
+  const live = await (await fetch(detailsUrl)).json();
+  assert(live.events.some(record => record.eventType === 'ralph.agent-progress' &&
+    record.turnNumber === 7 && record.event.progress.passed === 10 && record.event.progress.total === 408));
   const reset = structuredClone(records[0]);
   reset.event.phaseStatus.testStatus.testsPassed = 1;
   await fs.writeFile(path.join(eventsDir, 'run.jsonl'), JSON.stringify(reset) + '\n');

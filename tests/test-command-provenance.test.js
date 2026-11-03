@@ -163,6 +163,47 @@ test("a configured primary check that is not a built-in make target tracks its s
   assert.equal(directCommand("make -C pa36 test-progress"), null);
 });
 
+test("configured literal inventory reads the current turn's direct, recorded and redirected results", () => {
+  const { registerPhaseStatus, registerStageCommand } = globalThis.RALPH_TEST_COMMAND_PROVENANCE;
+  const primary = "/work/control/venv/bin/python /work/control/port_check.py inventory";
+  registerPhaseStatus(phaseStatusRecord("pa33", [
+    { name: "sourceFiles", kind: "test", primary: true, command: primary, targetStage: "pa33" },
+  ], 129));
+  try {
+    for (const command of [primary, "python3 scripts/port_check.py inventory", "make inventory",
+      "python3 scripts/port_check.py record -- " + primary]) {
+      assert.equal(directCommand(command)?.stage, "pa33", command);
+      const observation = progressObservationFromSessionOutput(summary(136, 456), "now", command);
+      assert.equal(observation?.passed, 136, command);
+      assert.equal(observation.total, 456);
+    }
+    for (const command of ["python3 scripts/port_check.py preflight", "make test-pa33",
+      "python3 -c 'print(\"port_check.py inventory\")'", "cat old-inventory.log"]) {
+      assert.equal(directCommand(command), null, command);
+    }
+    const tracker = createTracker();
+    tracker.sources(primary + " > /tmp/inventory.log 2>&1", "129");
+    const evidence = outputEvidence(tracker.sources("tail -4 /tmp/inventory.log", "129"), summary(136, 456));
+    assert.equal(evidence[0].info.stage, "pa33");
+    assert.equal(tracker.sources("tail -4 /tmp/inventory.log", "130")[0].info, null);
+
+    const records = [phaseStatusRecord("pa33", [
+      { kind: "test", primary: true, command: primary, targetStage: "pa33" },
+    ], 129), ...[112, 126, 136].map((passed, index) => ({
+      recordedAt: `2026-11-03T01:0${index}:00Z`, turnNumber: 129, eventType: "item.completed",
+      event: { item: { type: "command_execution", command: "python3 scripts/port_check.py record -- " + primary,
+        aggregated_output: "===== pa33 =====\n" + summary(passed, 456) } },
+    }))];
+    const events = progressEventsFromRunEvents(records);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].turnNumber, 129);
+    assert.equal(events[0].event.progress.passed, 136);
+  } finally {
+    registerStageCommand("make test-pa33", "pa33");
+  }
+  assert.equal(directCommand(primary), null, "inventory needs its configured source primary");
+});
+
 test("run events learn the primary check and record its ladder summary as stage progress", () => {
   const command = (id, at, cmd, output) => ({
     recordedAt: at, threadId: "t", turnNumber: 3, eventType: "item.completed",

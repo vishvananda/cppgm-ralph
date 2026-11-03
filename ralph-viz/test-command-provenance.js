@@ -79,6 +79,27 @@
     return parts.join("\0");
   }
 
+  function configuredInvocationKey(words, at = 0) {
+    const program = words[at]?.split("/").at(-1);
+    const args = words.slice(at + 1);
+    // The literal port exposes the same protected inventory through a Python
+    // control path, a checkout wrapper, and `make inventory`. `record --` runs
+    // that command and adds a receipt; it does not change its test population.
+    const scriptAt = /^python(?:\d+(?:\.\d+)*)?$/.test(program ?? "") ? at + 1 : at;
+    if (words[scriptAt]?.split("/").at(-1) === "port_check.py") {
+      const scriptArgs = words.slice(scriptAt + 1);
+      if (scriptArgs[0] === "record" && scriptArgs[1] === "--") {
+        return configuredInvocationKey(scriptArgs, 2);
+      }
+      if (scriptArgs.length === 1 && scriptArgs[0] === "inventory") return "literal-source-inventory";
+    }
+    if (program === "make") {
+      if (args.length === 1 && args[0] === "inventory") return "literal-source-inventory";
+      return makeInvocationKey(["make", ...args]);
+    }
+    return words.slice(at).join("\0");
+  }
+
   function registerStageCommand(command, stage) {
     if (!/^pa\d+$/.test(stage ?? "")) return false;
     const segments = shellSegments(command);
@@ -86,12 +107,12 @@
     const words = makeWords(segments[0].tokens);
     let at = 0;
     while (/^[A-Za-z_]\w*=/.test(words[at] ?? "")) at++;
-    if (words[at]?.split("/").at(-1) !== "make") return false;
-    if (builtinInvocation(words, at)) {
+    if (!words[at]) return false;
+    if (words[at].split("/").at(-1) === "make" && builtinInvocation(words, at)) {
       configuredPrimaries.delete(stage);
       return false;
     }
-    configuredPrimaries.set(stage, makeInvocationKey(["make", ...words.slice(at + 1)]));
+    configuredPrimaries.set(stage, configuredInvocationKey(words, at));
     return true;
   }
 
@@ -107,7 +128,7 @@
   }
 
   function configuredInvocation(words, at) {
-    const key = makeInvocationKey(["make", ...words.slice(at + 1)]);
+    const key = configuredInvocationKey(words, at);
     for (const [stage, primary] of configuredPrimaries) {
       if (primary !== key) continue;
       const command = words.slice(at).join(" ");
@@ -133,7 +154,7 @@
       while (words[at]?.startsWith("-")) at++;
       at++;
     }
-    if (words[at]?.split("/").at(-1) !== "make") return null;
+    if (words[at]?.split("/").at(-1) !== "make") return configuredInvocation(words, at);
     const builtin = builtinInvocation(words, at);
     if (builtin) return configuredPrimaries.has(builtin.stage) ? null : builtin;
     return configuredInvocation(words, at);
