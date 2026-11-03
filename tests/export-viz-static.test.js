@@ -52,6 +52,8 @@ test("static export reuses unchanged run artifacts and rebuilds changed runs", a
     fs.mkdir(claudeDir, { recursive: true }),
   ]);
   await fs.writeFile(eventPath, `${JSON.stringify(event(1, "ralph.prompt"))}\n`);
+  await fs.mkdir(path.join(workDir, 'fixture'));
+  await fs.writeFile(path.join(workDir, 'fixture/spec.md'), 'Initial compiler spec\n');
 
   const args = [
     "--out", outDir,
@@ -70,6 +72,10 @@ test("static export reuses unchanged run artifacts and rebuilds changed runs", a
   assert.equal(first.source.reusedRuns, 0);
   assert.equal(first.source.exportedRuns, 1);
   assert.equal(first.runs[0].exportSettled, true);
+  const firstData = JSON.parse(firstSummary);
+  const specDoc = firstData.docs.find(doc => doc.name === 'spec.md');
+  assert(specDoc);
+  assert.equal(await fs.readFile(path.join(outDir, 'data', specDoc.path), 'utf8'), 'Initial compiler spec\n');
 
   await exportViz(args);
   const second = JSON.parse(await fs.readFile(manifestPath, "utf8"));
@@ -84,6 +90,34 @@ test("static export reuses unchanged run artifacts and rebuilds changed runs", a
   assert.equal(third.source.reusedRuns, 0);
   assert.equal(third.source.exportedRuns, 1);
   assert.equal(thirdSummary.eventCount, 2);
+  await fs.writeFile(path.join(workDir, 'fixture/spec.md'), 'Updated compiler spec\n');
+  await exportViz(args);
+  const fourth = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  assert.equal(fourth.source.exportedRuns, 1, 'a spec edit invalidates the run export');
+  assert.equal(await fs.readFile(path.join(outDir, 'data', specDoc.path), 'utf8'), 'Updated compiler spec\n');
+});
+
+test('hyphenated run names export their own config, prompts and spec', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ralph-static-fork-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workDir = path.join(root, 'work'), ralphDir = path.join(root, '.ralph'), outDir = path.join(root, 'out');
+  const shape = 'v5sol-batched-gpt-6.1-sol-high';
+  await fs.mkdir(path.join(ralphDir, shape, 'events'), { recursive: true });
+  await fs.mkdir(path.join(workDir, 'v5sol-batched'), { recursive: true });
+  await fs.mkdir(path.join(workDir, 'v5sol'), { recursive: true });
+  await fs.writeFile(path.join(ralphDir, shape, 'events/run.jsonl'), JSON.stringify(event(1, 'ralph.prompt')) + '\n');
+  await fs.writeFile(path.join(workDir, 'v5sol-batched.config.json'), JSON.stringify({ assignmentLayout: 'v5' }));
+  await fs.writeFile(path.join(workDir, 'v5sol-batched.implement.md'), 'Fork instructions');
+  await fs.writeFile(path.join(workDir, 'v5sol-batched/spec.md'), 'Fork spec');
+  await fs.writeFile(path.join(workDir, 'v5sol/spec.md'), 'Original spec');
+  await exportViz(['--out', outDir, '--run', shape, '--ralph-dir', ralphDir, '--work-dir', workDir,
+    '--codex-dir', path.join(root, 'codex'), '--claude-dir', path.join(root, 'claude'), '--no-compare']);
+  const manifest = JSON.parse(await fs.readFile(path.join(outDir, 'data/runs.json'), 'utf8'));
+  const summary = JSON.parse(await fs.readFile(path.join(outDir, 'data', manifest.runs[0].dataPath), 'utf8'));
+  assert(summary.docs.some(doc => doc.name === 'v5sol-batched.config.json'));
+  assert(summary.docs.some(doc => doc.name === 'v5sol-batched.implement.md'));
+  const spec = summary.docs.find(doc => doc.name === 'spec.md');
+  assert.equal(await fs.readFile(path.join(outDir, 'data', spec.path), 'utf8'), 'Fork spec');
 });
 
 test("static export retains an archived run from the published catalog", async (t) => {
@@ -143,6 +177,7 @@ test("static export retains an archived run from the published catalog", async (
     "--codex-dir", codexDir,
     "--claude-dir", claudeDir,
     "--published-base", `http://127.0.0.1:${address.port}/`,
+    "--through", "pa40",
   ]);
 
   const exported = JSON.parse(await fs.readFile(
@@ -159,6 +194,9 @@ test("static export retains an archived run from the published catalog", async (
   ));
   assert.equal(exportedComparison.runs.length, 1);
   assert.equal(exportedComparison.runs[0].spec, "archived");
+  assert.equal(exportedComparison.through, 'pa40');
+  assert.equal(exportedComparison.rows[0].runs[0].cost, 12);
+  assert.deepEqual(exportedComparison.rows.find(row => row.pa === 'pa40').runs, [null]);
 });
 
 function event(turnNumber, eventType) {

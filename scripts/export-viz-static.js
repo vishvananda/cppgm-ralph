@@ -423,6 +423,7 @@ async function runDocCandidatePaths(run, options) {
     path.join(options.workDir, `${prefix}.config.json`),
     path.join(options.ralphDir, run.shape, "state.json"),
     path.join(options.ralphDir, run.shape, "current-goal.json"),
+    path.join(inferRunWorktree(run, options), "spec.md"),
   ];
   try {
     const entries = await fs.readdir(options.workDir, { withFileTypes: true });
@@ -477,7 +478,7 @@ function inferDocPrefix(shape) {
   for (const prefix of ["trusted", "opus", "fable", "mini", "luna"]) {
     if (shape.startsWith(prefix)) return prefix;
   }
-  return shape.split("-")[0] || shape;
+  return shape.match(/^(.*?)-(?:gpt-|claude-|opus-|deepseek-)/)?.[1] || shape.split("-")[0] || shape;
 }
 
 function sanitizeDocFileName(name) {
@@ -1148,8 +1149,19 @@ function comparisonContainsRun(comparison, run) {
 }
 
 function combineComparisonBaselines(published, local, runs, through) {
-  const publishedMatch = published?.through === through ? published : null;
-  const localMatch = local?.through === through ? local : null;
+  const extend = (comparison) => {
+    if (comparison?.through === through) return comparison;
+    const previous = paNumber(comparison?.through), requested = paNumber(through);
+    if (!previous || !requested || previous >= requested) return null;
+    // New canonical stages have no archived evidence. Preserve every existing
+    // cell and leave the extension unknown while live runs supply their data.
+    return { ...comparison, through, rows: [...comparison.rows,
+      ...Array.from({ length: requested - previous }, (_, index) => ({
+        pa: `pa${previous + index + 1}`, runs: comparison.runs.map(() => null),
+      }))] };
+  };
+  const publishedMatch = extend(published);
+  const localMatch = extend(local);
   const represented = runs.filter((run) =>
     comparisonContainsRun(publishedMatch, run) || comparisonContainsRun(localMatch, run));
   if (!represented.length) return null;

@@ -228,8 +228,8 @@ are outside the selected tail, so the run usage panel includes historical work.
 Build the static viewer with:
 
 ```bash
-npm run export-viz -- --out /dev/shm/ralph-viz-static-qol --through pa39
-npm run publish-viz -- --source /dev/shm/ralph-viz-static-qol
+npm run export-viz -- --out /mnt/vizier/ralph-viz-static --through pa40
+npm run publish-viz -- --source /mnt/vizier/ralph-viz-static
 ```
 
 The default export includes the published trusted, Opus, mini, Fable, Luna,
@@ -238,6 +238,11 @@ artifacts are reused and only changed comparison columns are rebuilt. Pass
 `--clean` when a full rebuild is required. If a default run has been archived
 locally, the exporter retains its run metadata and comparison column from the
 existing output or the published bucket instead of trying to rebuild it.
+Select additional runs with repeated `--run` arguments, retaining every existing
+published run in that list. Canonical PA40 includes V5/V6 PA35; extending an older
+comparison preserves its archived cells and leaves new archived stages unknown.
+Run documents include the checkout's `spec.md` alongside config and prompt/goal
+sidecars, including the separate documents of hyphenated fork names.
 
 Use `publish-viz` rather than calling `gcloud storage rsync` directly. It
 refuses to publish a manifest or comparison that drops an existing run, never
