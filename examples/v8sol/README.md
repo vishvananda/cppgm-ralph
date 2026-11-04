@@ -7,11 +7,11 @@ private filesystem and a 64 GiB/no-swap scope. It uses the default Codex profile
 and SSH identity, with no copied credentials or repository credential helper.
 
 The installed base is assignments tag `v8`, commit
-`22dbd7a3c197d57353dd39ce4542997ee3c1e41a`, exported from cppgm-extended
-`08bba949b4a0c3f2a728bf52c6e7089a38b44797`. It includes the compact-storage
+`639031a9a0cdd690ef9f949efdab055d433d4638`, exported from cppgm-extended
+`b7c6b8e72595a524e1b3f147212d69c02b257dd8`. It includes the compact-storage
 and PA24 placement guidance, revised optimization checks and current reference
 bundle. The unstarted V7 scaffold's spec preparation was replayed onto V8;
-`fa2b5bc7` is the renamed run tip, with only `spec.md` added to the tagged base.
+`aa1aff12` is the renamed run tip, with only `spec.md` added to the tagged base.
 The private run repository's `main` is pushed; Ralph remains unstarted.
 See [VALIDATION.txt](VALIDATION.txt) for setup evidence.
 The installer resolves the release tag before provisioning and refuses an

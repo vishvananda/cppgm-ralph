@@ -15,8 +15,8 @@ from port_inventory import freeze_source
 
 HERE = Path(__file__).resolve().parent
 BASE_EXAMPLE = HERE.parent / 'v5rust'
-REVISION = '08bba949b4a0c3f2a728bf52c6e7089a38b44797'
-ASSIGNMENTS = '22dbd7a3c197d57353dd39ce4542997ee3c1e41a'
+REVISION = 'b7c6b8e72595a524e1b3f147212d69c02b257dd8'
+ASSIGNMENTS = '639031a9a0cdd690ef9f949efdab055d433d4638'
 NAME = 'v5literal'
 
 

@@ -2,15 +2,15 @@
 
 This is a new source-driven translation of the frozen `cppgm-extended` compiler,
 not a continuation of another Rust implementation. The source revision is
-`08bba949b4a0c3f2a728bf52c6e7089a38b44797`; the matching assignment export is
-`22dbd7a3c197d57353dd39ce4542997ee3c1e41a`. See NOTICE for attribution.
+`b7c6b8e72595a524e1b3f147212d69c02b257dd8`; the matching assignment export is
+`639031a9a0cdd690ef9f949efdab055d433d4638`. See NOTICE for attribution.
 
 Read AGENTS.md, CLONE_CONTRACT.md, spec.md and porting.md. Translate the original
 files/functions and preserve their state and execution lifecycle. Narrow,
 reviewed unsafe adaptations are allowed. Defer optional restructuring and
 optimization. The reference source/tools are read-only outside the checkout.
 
-Ralph's **PA33 label is the whole-source inventory stage**, initially 0/457;
+Ralph's **PA33 label is the whole-source inventory stage**, initially 0/469;
 it does not mean earlier assignments have passed. Assignment fixtures are
 validation material. PA34 is the full cross-implementation bootstrap proof.
 All nine candidate tools initially return explicit scaffold exit 86.

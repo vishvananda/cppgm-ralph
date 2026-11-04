@@ -86,3 +86,28 @@ Rust format/Clippy and unsafe/source review (339 Rust files, 3397 constructs,
 zero findings). PASS candidate and oracle PA1, 61/61 each; the updated PA8 oracle
 self-check passes all 147 cases, including the new metadata contract. This is
 oracle validation, not a claim that Rust passes PA8.
+
+Late moved-V8 refresh, 2026-11-04
+
+C++ source: b7c6b8e72595a524e1b3f147212d69c02b257dd8.
+Assignments: 639031a9a0cdd690ef9f949efdab055d433d4638.
+Reference: ~/work/references/v8literal-cpp-b7c6b8e7.
+Previous reference: ~/work/references/v8literal-cpp-08bba949 (retained).
+Nine release binaries are SHA256-verified against the new assignment manifest.
+
+Stopped cleanly after turn 222 at c4cb6faaac1b0484704da310311dba1d2776ab7f.
+Census: 457 -> 469; 12 added, 72 existing sources changed.
+Reviews: 277 -> 236 retained, 41 reopened; no prior recovery left pending.
+All 416 existing production implementation files preserve their bytes. The
+reference-owned dev/frontend_source_sets.mk is refreshed to the new release.
+
+Backup: private/v5literal/artifacts/reference-update-v8-b7c6b8e72595/.
+New artifacts: private/v5literal/artifacts/clone-v8-b7c6b8e72595/.
+Evidence: ~/work/maintenance/v8-refresh-20261104b/literal/.
+Source progress total is 469 in installed/example config; prompts, resources,
+old receipts, Rust work and PA34 final closure requirements are retained.
+
+PASS preflight, 236/469 current source reviews and 90 harness regressions.
+PASS Rust format/Clippy/unsafe audit: 392 files, 4215 constructs, zero findings.
+PASS candidate and oracle PA1: 61/61 each; PA8 oracle self-check: 147/147.
+V8 Sol full sandbox/counter/native-goal verification passes and remains unstarted.
