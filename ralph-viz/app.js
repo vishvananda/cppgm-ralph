@@ -1185,6 +1185,7 @@ function renderSummary(events) {
   const usageText = usage
     ? usageSummaryText(usage.usage, s.priceModel, {
         durationMs: usage.durationMs,
+        totalDurationMs: usage.totalDurationMs,
         includeModel: true,
         includeModelBreakdown: true,
         suffix: usage.suffix,
@@ -1670,11 +1671,13 @@ function dockTurnText(turn) {
 }
 
 function preferredUsageSummary(summary) {
+  const totalDurationMs = shapeUsageTotalAgentDurationMs(summary?.shapeUsage);
   const attributedShapeUsage = normalizeUsage(summary?.shapeUsage?.usage);
   if (attributedShapeUsage?.model_usage?.length) {
     return {
       usage: attributedShapeUsage,
       durationMs: summary.shapeUsage.durationMs,
+      totalDurationMs,
       suffix: `${fmtInt(summary.shapeUsage.runCount)} runs`,
       costUsd: attributedShapeUsage.cost_usd,
     };
@@ -1684,6 +1687,7 @@ function preferredUsageSummary(summary) {
     return {
       usage: attributedUsage,
       durationMs: summary?.shapeUsage?.durationMs ?? summary.activeDurationMs,
+      totalDurationMs,
       suffix: summary?.shapeUsage ? `${fmtInt(summary.shapeUsage.runCount)} runs` : "selected thread",
       costUsd: attributedUsage.cost_usd,
     };
@@ -1692,6 +1696,7 @@ function preferredUsageSummary(summary) {
     return {
       usage: summary.shapeUsage.usage,
       durationMs: summary.shapeUsage.durationMs,
+      totalDurationMs,
       suffix: `${fmtInt(summary.shapeUsage.runCount)} runs`,
       costUsd: shapeUsageTurnCost(summary.shapeUsage, summary.priceModel),
     };
@@ -4538,8 +4543,15 @@ function normalizeShapeUsage(shapeUsage) {
     runCount: Number.isFinite(shapeUsage?.runCount) ? shapeUsage.runCount : 0,
     threadCount: Number.isFinite(shapeUsage?.threadCount) ? shapeUsage.threadCount : 0,
     durationMs: Number.isFinite(shapeUsage?.durationMs) ? shapeUsage.durationMs : 0,
+    totalDurationMs: shapeUsageTotalAgentDurationMs(shapeUsage),
     usage,
   };
+}
+
+function shapeUsageTotalAgentDurationMs(shapeUsage) {
+  const active = Number.isFinite(shapeUsage?.durationMs) ? Math.max(0, shapeUsage.durationMs) : 0;
+  return Number.isFinite(shapeUsage?.totalDurationMs)
+    ? Math.max(active, shapeUsage.totalDurationMs) : null;
 }
 
 function tokenCountRecords(records) {
@@ -4664,7 +4676,10 @@ function usageSummaryText(usage, model, options = {}) {
   }
   const parts = [];
   if (duration) {
-    parts.push(duration);
+    parts.push(Number.isFinite(options.totalDurationMs) ? `${duration} active` : duration);
+  }
+  if (Number.isFinite(options.totalDurationMs)) {
+    parts.push(`${durationText({ durationMs: options.totalDurationMs })} total agent time`);
   }
   parts.push(`${fmtInt(primaryTokens)} uncached tok`);
   if (cost !== "n/a") {
@@ -7622,6 +7637,17 @@ async function loadStaticRunSummary(run) {
     return state.staticRunSummaries.get(run.id);
   }
   const summary = await fetchJson(staticDataPath(run.dataPath));
+  // Older exports keep additive root/subagent time only in comparison data.
+  // Use the same full-run totals as the graph, independent of loaded cards.
+  if (summary.shapeUsage && !Number.isFinite(summary.shapeUsage.totalDurationMs)) {
+    const comparison = await loadStaticComparison().catch(() => null);
+    const total = comparison?.runs?.find(candidate => candidate.dataPath === run.dataPath ||
+      candidate.spec === run.label || candidate.spec === run.id)?.total;
+    if (Number.isFinite(total?.totalDurationMs)) {
+      summary.shapeUsage.totalDurationMs = total.totalDurationMs;
+      summary.shapeUsage.durationMs = total.activeDurationMs ?? total.durationMs ?? summary.shapeUsage.durationMs;
+    }
+  }
   state.staticRunSummaries.set(run.id, summary);
   return summary;
 }

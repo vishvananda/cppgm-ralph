@@ -877,6 +877,7 @@ async function exportRun(run, options, comparison, prepared, implementation) {
         runCount: 1,
         threadCount: null,
         durationMs: total.durationMs ?? 0,
+        totalDurationMs: total.totalDurationMs ?? total.durationMs ?? 0,
         usage: total.usage,
         cost: total.cost ?? 0,
         runs: [{
@@ -884,6 +885,7 @@ async function exportRun(run, options, comparison, prepared, implementation) {
           threadId: null,
           threadIds: [],
           durationMs: total.durationMs ?? 0,
+          totalDurationMs: total.totalDurationMs ?? total.durationMs ?? 0,
           turnDurations: comparisonRun?.turnDurations ?? [],
           turnUsages: comparisonRun?.turnUsages ?? [],
           usage: total.usage,
