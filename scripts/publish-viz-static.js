@@ -209,6 +209,10 @@ export async function main(argv = process.argv.slice(2)) {
   ]);
   await runGcloud(rsyncArgs);
   await runGcloud([
+    "storage", "objects", "update", `${options.bucket}/index.html`,
+    "--cache-control=no-cache,max-age=0",
+  ]);
+  await runGcloud([
     "storage", "cp", localComparisonPath,
     `${options.bucket}/data/${localComparisonEntry.path}`,
   ]);
