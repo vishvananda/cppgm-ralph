@@ -59,3 +59,30 @@ obsolete-native-goal.json in the reference-update backup, then cleared through
 the app-server API. This permits the fresh-thread restart when the already
 committed source batch passes Ralph's progress gate; no goal was falsely
 completed and Ralph state/history were not edited.
+
+Refresh of the moved V8 release, 2026-11-04
+
+C++ source: 08bba949b4a0c3f2a728bf52c6e7089a38b44797.
+Assignments: 22dbd7a3c197d57353dd39ce4542997ee3c1e41a.
+Reference: ~/work/references/v8literal-cpp-08bba949.
+The previous V8 reference remains at ~/work/references/v8literal-cpp-8d4c68b9.
+Nine release oracle binaries match the updated manifest's SHA256 hashes.
+
+Stopped cleanly after checkpoint audit turn 176 at cdf85f885343bf4bd6d612f1b0d4d0473e3ff014.
+All 364 tracked production files retain their original bytes.
+Source census remains 457; 28 C++ sources changed.
+Completed reviews: 221 -> 207 retained; 14 changed owners queued for recovery.
+No older recovery obligations remain outstanding. Unchanged reviews and raw
+receipts remain valid. Partial readiness from the previous pin is archived,
+including PA8's earlier 125-case coverage; it is not current V8 acceptance.
+
+Backup: private/v5literal/artifacts/reference-update-v8-08bba949b4a0/.
+Measurement namespace: private/v5literal/artifacts/clone-v8-08bba949b4a0/.
+Evidence: ~/work/maintenance/v8-refresh-20261104/literal/.
+Native goals, prompts, source mapping, resources and PA34 endpoint are retained.
+
+PASS protected preflight and current 207/457 inventory; 90 harness regressions;
+Rust format/Clippy and unsafe/source review (339 Rust files, 3397 constructs,
+zero findings). PASS candidate and oracle PA1, 61/61 each; the updated PA8 oracle
+self-check passes all 147 cases, including the new metadata contract. This is
+oracle validation, not a claim that Rust passes PA8.

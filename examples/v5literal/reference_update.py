@@ -181,6 +181,9 @@ def main():
     milestones = json.loads(milestone_file.read_text())
     if 'current_validation' in milestones:
         milestones.setdefault('historical_validation', []).append(milestones.pop('current_validation'))
+    if 'partial_readiness' in milestones:
+        milestones.setdefault('historical_partial_readiness', []).append({
+            'revision': old['revision'], 'readiness': milestones.pop('partial_readiness')})
     milestones['reference_update'] = {'revision': revision, 'needs_revalidation': milestones['stages']}
     write_json(milestone_file, milestones)
     write_json(root / 'port/reference-update.json', report)

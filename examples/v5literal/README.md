@@ -6,9 +6,9 @@ lifecycle first; defer optional rewrites and optimization. Narrow reviewed unsaf
 code is allowed. See candidate-AGENTS.md (installed as AGENTS.md),
 CLONE_CONTRACT.md, spec.md and porting.md for the installed contract.
 
-Pins: C++ `8d4c68b9e37976a0c290109bcc9f63f1b4e95cea`, assignments
-`0755b5f68b801456bc077c78811b11165f292d94`. The independent reference checkout is
-`~/work/references/v8literal-cpp-8d4c68b9` for the migrated run. Nine hash-verified V8
+Pins: C++ `08bba949b4a0c3f2a728bf52c6e7089a38b44797`, assignments
+`22dbd7a3c197d57353dd39ce4542997ee3c1e41a`. The independent reference checkout is
+`~/work/references/v8literal-cpp-08bba949` for the migrated run. Nine hash-verified V8
 release tools are installed as read-only evaluators, never candidate code. A fresh
 installation uses its own `v5literal-cpp` checkout at the same V8 pin.
 
@@ -88,7 +88,8 @@ recovery, and 48 files were added. Changed source rows become pending; old
 reviews remain available but cannot certify new source hashes. The refreshed V8
 release adds one source and changes six, bringing the census to 457. Subsequent
 updates carry forward unfinished recovery with each file's original diff baseline;
-backups and measurement namespaces include the pinned revision.
+backups and measurement namespaces include the pinned revision. The 2026-11-04
+V8 refresh changes 28 existing C++ sources and keeps the census at 457.
 
 `reference_update.py` previews the source delta by default. With `--apply`, it
 backs up control/port/evidence metadata, synchronizes reference-owned inputs,

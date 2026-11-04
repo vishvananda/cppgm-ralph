@@ -2,8 +2,8 @@
 
 This is a new source-driven translation of the frozen `cppgm-extended` compiler,
 not a continuation of another Rust implementation. The source revision is
-`8d4c68b9e37976a0c290109bcc9f63f1b4e95cea`; the matching assignment export is
-`0755b5f68b801456bc077c78811b11165f292d94`. See NOTICE for attribution.
+`08bba949b4a0c3f2a728bf52c6e7089a38b44797`; the matching assignment export is
+`22dbd7a3c197d57353dd39ce4542997ee3c1e41a`. See NOTICE for attribution.
 
 Read AGENTS.md, CLONE_CONTRACT.md, spec.md and porting.md. Translate the original
 files/functions and preserve their state and execution lifecycle. Narrow,

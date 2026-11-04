@@ -10,7 +10,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 NAME = 'v5literal'
-BASELINE = '8d4c68b9e37976a0c290109bcc9f63f1b4e95cea'
+BASELINE = '08bba949b4a0c3f2a728bf52c6e7089a38b44797'
 
 
 def run(*args, **kwargs):
@@ -57,7 +57,7 @@ def provision(base):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', type=Path, default=Path('/home/vishvananda/work'))
-    parser.add_argument('--reference-seed', type=Path, default=Path('/home/vishvananda/work/references/v8literal-cpp-8d4c68b9'))
+    parser.add_argument('--reference-seed', type=Path, default=Path('/home/vishvananda/work/references/v8literal-cpp-08bba949'))
     parser.add_argument('--no-remote', action='store_true')
     args = parser.parse_args(); base = args.base.resolve()
     root = base / 'private' / NAME / 'checkout'; control = base / (NAME + '-control')

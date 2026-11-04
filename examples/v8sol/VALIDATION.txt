@@ -1,8 +1,8 @@
-V8 Sol scaffold renamed from unstarted V7 and verified 2026-11-03.
+V8 Sol scaffold prepared from unstarted V7 and refreshed 2026-11-04.
 
-Assignments tag v8: 0755b5f68b801456bc077c78811b11165f292d94.
-Export source: cppgm-extended 8d4c68b9e37976a0c290109bcc9f63f1b4e95cea.
-Prepared run tip: c01e9bce; only spec.md differs from the tagged base.
+Assignments tag v8: 22dbd7a3c197d57353dd39ce4542997ee3c1e41a.
+Export source: cppgm-extended 08bba949b4a0c3f2a728bf52c6e7089a38b44797.
+Prepared run tip: fa2b5bc7; only spec.md differs from the tagged base.
 Private run repository: vishvananda/cppgm-run-v8sol (renamed, main pushed).
 Checkout: ~/work/v8sol -> ~/work/private/v8sol/checkout.
 Volume: vg0/cppgm_v8sol; UUID mount in /etc/fstab uses the renamed private path.
@@ -41,3 +41,11 @@ Existing spec commits replayed cleanly. The new bundle, scaffold build, expected
 initial PA1 failures, file audit, hardware counters and native goal probe pass.
 Config and 18 sidecars match the pushed example files; Ralph remains unstarted.
 Refresh evidence: artifacts/v8-refresh-20261103/.
+
+2026-11-04: refreshed the moved v8 tag to assignments 22dbd7a3c197, exported
+from C++ 08bba949b4a0. The same three spec-preparation commits replayed cleanly;
+fa2b5bc7 is pushed with only spec.md different from the tagged assignments.
+New reference tools are verified by make setup. Full sandbox verification passes:
+initial scaffold build/PA1 failures, file audit, counters/sampling and native goal
+completion. All installed configs and 18 sidecars retain their prior settings.
+Ralph remains unstarted. Evidence: artifacts/v8-refresh-20261104/.
