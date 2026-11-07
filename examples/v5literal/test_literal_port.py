@@ -120,6 +120,14 @@ class CorrespondenceTests(unittest.TestCase):
         self.assertEqual(receipt['exit'], 1)
         self.assertEqual(receipt['source_files'][self.spec['rust_path']], digest(self.file.read_bytes()))
 
+    def test_record_uses_control_python_for_parser_dependent_scripts(self):
+        self.stack.enter_context(patch.object(common, 'ARTIFACTS', self.root / 'artifacts'))
+        self.stack.enter_context(patch.object(port_check, 'inventory', return_value={self.source: self.spec}))
+        run = self.stack.enter_context(patch.object(common, 'run', return_value=(0, b'', b'')))
+        with contextlib.redirect_stdout(io.TextIOWrapper(io.BytesIO())):
+            self.assertEqual(port_check.record(['python3', 'review.py']), 0)
+        self.assertEqual(run.call_args.args[0], [str(common.CONTROL / 'venv/bin/python'), 'review.py'])
+
 
 class UnsafeAndFinalTests(unittest.TestCase):
     def test_legacy_release_uses_the_configured_literal_source_map(self):

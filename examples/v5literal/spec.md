@@ -33,7 +33,10 @@ Do not use unsafe to call the existing C++ compiler implementation.
 ## Work and evidence
 
 The complete frozen source inventory drives progress. Translate in dependency
-order, using finite batches for mutually dependent declarations. A source is
+order, finishing finite connected producer/consumer groups that remove stubs
+or close owners. Validate changed behavior with focused comparisons; reserve
+broad safety matrices for changed lifetime/cleanup mechanisms or concrete risks,
+and broad course sweeps for stable boundaries. Reuse unchanged evidence. A source is
 complete only when its entire contract is implemented, its function map is
 complete, and current Rust bytes and validation evidence are reviewed. Pending
 stubs may support compilation but never count as translated responsibilities.

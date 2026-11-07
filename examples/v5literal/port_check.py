@@ -133,6 +133,8 @@ def final():
 def record(command):
     if not command:
         raise ValueError('record needs a command after --')
+    if command[0] in ('python', 'python3'):
+        command = [str(common.CONTROL / 'venv/bin/python'), *command[1:]]
     directory = common.ARTIFACTS / 'literal-validation' / str(time.time_ns())
     directory.mkdir(parents=True)
     before = {spec['rust_path']: common.file_digest(common.ROOT / spec['rust_path'])
@@ -168,9 +170,14 @@ def draft(source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['preflight', 'inventory', 'correspondence', 'final', 'milestones', 'inspect', 'draft', 'unsafe-scan', 'record'])
+    parser.add_argument('mode', choices=['preflight', 'inventory', 'correspondence', 'final', 'milestones', 'inspect', 'draft', 'unsafe-scan', 'record', 'probe'])
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.mode == 'probe':
+        if len(args.arguments) != 1:
+            parser.error('probe requires one JSON recipe')
+        recipe = str(Path(args.arguments[0]).resolve())
+        return record([str(common.CONTROL / 'venv/bin/python'), str(common.CONTROL / 'port_probe.py'), recipe])
     if args.mode == 'record':
         return record(args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments)
     if args.mode in ('inspect', 'draft'):

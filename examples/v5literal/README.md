@@ -108,3 +108,10 @@ Recovery prompts prioritize changed completed sources in dependency groups,
 then new translation. Revalidate usable milestones against the new oracle;
 retain unchanged review evidence and avoid replaying unrelated historical audits.
 Exact comparison and final PA1–PA33/debug/bootstrap requirements are unchanged.
+
+Connected batches prioritize removing production stubs and closing owners.
+Focused native comparisons support normal translation; memory/alias and fault
+matrices target changed ownership/lifetime/cleanup or concrete safety concerns.
+The shared `port_check.py probe RECIPE.json` runner handles tool selection,
+compilation, exact comparisons and recorded evidence; see porting.md. It does
+not replace any final course, correspondence or bootstrap gate.

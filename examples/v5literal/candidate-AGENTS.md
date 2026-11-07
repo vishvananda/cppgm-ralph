@@ -26,16 +26,17 @@ After a reference update, recover changed completed files from
 `port/reference-update.json` first; retain unchanged work and renew affected
 reviews/evidence against the current pin. Old ledgers never override new source.
 
-Select the next finite dependency batch from `porting.md`; declarations or stubs
-are pending work. Use `make inspect SOURCE=dev/path.cpp` for original definitions
+Select a substantial connected producer/consumer group from `porting.md`; finish
+its shared dependencies, removing stubs or closing owners before handing off. Use `make inspect SOURCE=dev/path.cpp` for original definitions
 and mapped Rust function identities. A completed source needs complete function
 correspondence, declaration/state review, documented adaptations and hashed
 validation evidence. Update `port/source-map.tsv` and `port/reviews/` honestly.
 Source progress is reviewed implementation, never an added-test count.
 
 Use `make build`, `make lint`, `make audit-rust` and focused differential cases.
-Run applicable course milestones when tools become usable; keep their status in
-`port/milestones.json`. Broad tests belong at stable milestones and final closure.
+Use the shared probe runner; reserve memory/alias and fault matrices for changed
+ownership/lifetime/cleanup or concrete safety concerns. Reuse unchanged evidence.
+Run course milestones when usable and at stable boundaries; retain final closure.
 Use frozen-source bootstrap probes early to prioritize real mismatches; probes
 are not final acceptance. Preserve all prior successful behavior. Formatting and
 correctness checks apply; there are no style-driven file/function size limits.

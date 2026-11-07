@@ -12,9 +12,9 @@ new compiler from the handouts.
    the minimal common pointer/arena, nullable identity, error/cleanup and target
    integer conventions. Preserve original lifetimes and aliasing without invalid
    Rust references. Record narrowly needed unsafe operations and invariants.
-2. Translate foundational declarations and vocabulary, then their implementation
-   files in dependency order. Mutually recursive declarations may form one batch.
-   Keep each original file's mapped path, functions, fields and control flow.
+2. Translate connected producer/consumer groups in dependency order, including
+   shared prerequisites. Prefer removing production stubs and closing nearly
+   complete owners over stopping after a few helpers. Keep the original mapping.
 3. Progress through lexer/preprocessor, syntax/types/ABI, semantic owners,
    lowering, optimizer, native/object support and driver wiring according to
    actual dependencies. Follow existing algorithms, not independent PA solutions.
@@ -82,8 +82,8 @@ to inspect actual constructs. SAFETY comments and correctness lints still apply.
 
 ## Bounded handoffs
 
-Keep the current batch finite. Review source correspondence independently at
-checkpoint audits. Fix a required shared dependency, but queue unrelated findings.
+Finish a substantial connected group within a finite handoff. Review its source
+correspondence independently at checkpoints; queue unrelated findings.
 Keep `docs/port/pa33.md` compact: selected files, reviewed tip, adaptations,
 findings, evidence and next dependency. Commit and leave clean. A native goal
 ends a coherent handoff; it does not demand the whole compiler in one turn.
@@ -92,6 +92,42 @@ Use `make milestones` for the stages listed in `port/milestones.json`; it does
 not replace final validation. `clone_bootstrap_probe.py --limit 4` and `--source`
 provide isolated diagnostic object comparisons, not bootstrap acceptance. Broad
 sweeps belong at stable milestones and final closure, not after every file.
+
+Use focused native comparisons during translation. Run memory/alias and
+allocation-failure matrices when ownership, lifetime or cleanup behavior changes
+or a concrete concern needs investigation; reuse unchanged mechanism evidence.
+Build/lint/unsafe-audit once for the coherent handoff, and rerun for later changes.
+Original course/debug/bootstrap requirements and current-byte review stay exact.
+
+## Shared source probes
+
+`python3 scripts/port_check.py probe RECIPE.json` runs a reusable recipe with a
+normal hashed validation receipt. It selects the control Python and host C++/
+Rust tools, keeps raw build/case logs and compares exit, stdout, stderr and listed
+generated files exactly. It rejects panic, signal and scaffold exits. Recipes
+can reuse existing observers; add only changed source boundaries and controls.
+
+```json
+{
+  "inputs": ["dev/src/translated/src/sema/example_cpp.rs"],
+  "builds": [
+    {"name":"reference", "language":"cpp", "sources":["scripts/port/example.cpp"],
+     "force_include":["{reference}/dev/src/syntax/ast_expressions.h"]},
+    {"name":"candidate", "language":"rust", "sources":["scripts/port/example.rs"]}
+  ],
+  "reference":["{out}/reference"], "candidate":["{out}/candidate"],
+  "cases":[{"stdin":"one focused input\n", "exit":0}]
+}
+```
+
+Sources are checkout-relative; C++ includes the frozen `dev/src`. Use `flags`
+and `force_include` for actual dependencies, `prepare` for existing generators,
+`environment` for required build settings, `stdin_file` for a batched corpus and
+`outputs` for generated filenames relative to the probe directory. Commands
+expand `{root}`, `{reference}`, `{out}`, `{python}`, `{cxx}` and `{rustc}`.
+List transitive source/helper inputs; the manifest hashes them and refuses edits
+during validation. Safety tools can be explicit case commands. No probe result
+replaces production correspondence, original tests or final acceptance.
 
 ## Reference updates
 

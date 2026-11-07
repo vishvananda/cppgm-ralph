@@ -28,77 +28,9 @@ def load_base():
 
 
 def prompts(base, control):
-    implement = '''Translate the next finite frozen C++ source dependency batch into Rust.
-
-{{briefState}}
-Inventory status: {{testStatusSummary}}
-Primary log: {{lastTestLogPath}}
-
-Read AGENTS.md, CLONE_CONTRACT.md, spec.md, porting.md and the compact current
-ledger. PA33 is the whole-source inventory label, not an assignment feature task.
-Use the frozen C++ files directly. Preserve functions, fields, control flow,
-persistent state, failure restoration, lazy/short-circuit order, live queues and
-cache boundaries. Record Rust-required representation adaptations; defer optional
-redesign, abstractions and optimization. Keep the frozen per-file mapping.
-
-When `port/reference-update.json` exists, recover its changed completed sources
-in dependency groups before new translation. Diff the pinned old/new C++ files;
-update affected declarations and consumers together. Old plans and receipts do
-not establish current parity. Reuse unchanged reviews, renew affected evidence
-and usable milestones, and avoid repeating unrelated historical audits.
-
-Start with a shared pointer/arena/null/error/integer convention, then translate
-in dependency order. Pending declarations/stubs may help compilation but do not
-count as implemented. Use make inspect SOURCE=dev/path.cpp to map every function.
-Unsafe needs SAFETY explanations, a precise ledger and valid alias/lifetime rules.
-Never call C++ implementation code or substitute oracle answers/objects.
-
-Validate a coherent batch with make build, make lint and make audit-rust; record
-successful commands through scripts/clone/port_check.py record -- COMMAND.
-Use focused differential cases and original course milestones when tools are
-usable. Reuse controls, run broad suites at stable milestones/final closure and
-use bounded frozen-source probes to prioritize the first real divergence.
-Original tests, diagnostics, work counters and generated files remain exact.
-
-Fill current whole-source reviews and function correspondence, then mark only
-fully translated/reviewed source rows complete. Keep one ledger: batch, reviewed
-tip, mappings/adaptations, findings, evidence and next dependency. Commit and
-leave clean. Call update_goal with status complete and return after the bounded
-handoff; the compiler may remain incomplete. Ralph refreshes progress gates
-after return; their prior logs are not completion criteria. No goal reset or policy/state edit.
-
-{{modelValidation}}
-'''
-    audit = implement.replace('Translate the next finite frozen C++ source dependency batch into Rust.',
-        'Independently review the completed frozen-source batch and close concrete translation gaps.')
-    audit = audit.replace('Start with a shared pointer/arena/null/error/integer convention, then translate\nin dependency order.',
-        'Review all changed source mappings since the recorded reviewed tip. Trace\noriginal branches, state lifetimes and queue/cache boundaries, not just fixtures.')
-    audit += '\nFinal advancement requires the complete inventory, all PA1–PA33 differential/course/debug lanes and full Rust quality. PA34 then proves clean C1==C2==CR==C3; partial probes never satisfy it.\n'
-    goal = '''Complete one finite source-faithful translation/review handoff. Recover changed
-completed sources from any reference update first. Follow the
-frozen file/function mapping, preserve algorithms and execution lifetimes, and
-record only Rust-required adaptations. Validate the changed group and unsafe
-invariants, close only fully reviewed source responsibilities, update the compact
-ledger, commit and leave clean. Partial completion ends this handoff, not the
-compiler. Call update_goal with status complete after the bounded handoff; Ralph
-refreshes progress gates after return. Do not reset goals or weaken the source
-inventory, exact comparator or final course/bootstrap requirements.
-
-{{modelValidation}}
-'''
-    for phase, text in [('implement', implement), ('checkpointAudit', audit), ('audit', audit)]:
-        for suffix, body in [(phase, text), (phase + '-goal', goal)]:
-            filename = NAME + '.' + suffix + '.md'
-            for directory in (base, control, HERE):
-                (directory / filename).write_text(body)
-    for phase in ('implement', 'audit'):
-        original = (BASE_EXAMPLE / f'v5rust.pa34-{phase}.md').read_text()
-        original = original.replace('Read CLONE_CONTRACT.md\'s PA34 proof, docs/rust-clone-plan.md and the frozen',
-                                    'Read CLONE_CONTRACT.md\'s PA34 proof, porting.md and the frozen')
-        original = original.replace('Rust quality checks', 'literal Rust quality checks')
-        for suffix, body in [(f'pa34-{phase}', original), (f'pa34-{phase}-goal', goal)]:
-            for directory in (base, control, HERE):
-                (directory / (NAME + '.' + suffix + '.md')).write_text(body)
+    for source in HERE.glob(NAME + '.*.md'):
+        for directory in (base, control):
+            shutil.copy2(source, directory / source.name)
 
 
 def main():

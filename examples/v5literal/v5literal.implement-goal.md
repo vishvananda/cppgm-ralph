@@ -1,11 +1,12 @@
-Complete one finite source-faithful translation/review handoff. Recover changed
-completed sources from any reference update first. Follow the
-frozen file/function mapping, preserve algorithms and execution lifetimes, and
-record only Rust-required adaptations. Validate the changed group and unsafe
-invariants, close only fully reviewed source responsibilities, update the compact
-ledger, commit and leave clean. Partial completion ends this handoff, not the
-compiler. Call update_goal with status complete after the bounded handoff; Ralph
-refreshes progress gates after return. Do not reset goals or weaken the source
-inventory, exact comparator or final course/bootstrap requirements.
+Complete a substantial connected source-faithful translation/review handoff.
+Recover remaining reference changes first; finish a producer/consumer group
+that removes stubs or closes owners, not just a few compiling helpers. Preserve
+frozen structure, algorithms and lifetimes; record Rust-required adaptations.
+Use focused exact comparisons; target safety probes at changed ownership,
+lifetime/cleanup behavior or concrete concerns, reusing unchanged evidence.
+Review correspondence, update the compact ledger, commit and leave clean.
+Call update_goal with status complete for this bounded handoff; Ralph refreshes
+progress gates after return. No goal reset or weaker inventory, comparator,
+final course/debug checks or PA34 proof. The compiler may remain incomplete.
 
 {{modelValidation}}

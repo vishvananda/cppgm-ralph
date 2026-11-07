@@ -1,4 +1,4 @@
-Independently review the completed frozen-source batch and close concrete translation gaps.
+Independently review the connected source group and close concrete translation gaps.
 
 {{briefState}}
 Inventory status: {{testStatusSummary}}
@@ -11,24 +11,22 @@ persistent state, failure restoration, lazy/short-circuit order, live queues and
 cache boundaries. Record Rust-required representation adaptations; defer optional
 redesign, abstractions and optimization. Keep the frozen per-file mapping.
 
-When `port/reference-update.json` exists, recover its changed completed sources
-in dependency groups before new translation. Diff the pinned old/new C++ files;
-update affected declarations and consumers together. Old plans and receipts do
-not establish current parity. Reuse unchanged reviews, renew affected evidence
-and usable milestones, and avoid repeating unrelated historical audits.
+After a reference update, recover remaining changed owners and consumers first.
+Diff the pinned sources; old plans and receipts do not establish current parity.
+Reuse unchanged reviews and renew affected evidence and usable milestones.
 
-Review all changed source mappings since the recorded reviewed tip. Trace
-original branches, state lifetimes and queue/cache boundaries, not just fixtures. Pending declarations/stubs may help compilation but do not
-count as implemented. Use make inspect SOURCE=dev/path.cpp to map every function.
-Unsafe needs SAFETY explanations, a precise ledger and valid alias/lifetime rules.
-Never call C++ implementation code or substitute oracle answers/objects.
+Review changed producers and consumers together since the reviewed tip. Trace
+branches, state lifetimes and queue/cache boundaries. Close concrete gaps as one
+coherent group; queue unrelated work. Stubs receive no correspondence credit. Use make inspect SOURCE=dev/path.cpp for correspondence. Preserve shared
+pointer/error conventions, SAFETY invariants and the unsafe ledger. No C++ FFI
+or oracle substitution.
 
-Validate a coherent batch with make build, make lint and make audit-rust; record
-successful commands through scripts/clone/port_check.py record -- COMMAND.
-Use focused differential cases and original course milestones when tools are
-usable. Reuse controls, run broad suites at stable milestones/final closure and
-use bounded frozen-source probes to prioritize the first real divergence.
-Original tests, diagnostics, work counters and generated files remain exact.
+Build, lint and audit the group once at handoff; run focused exact comparisons
+while translating. Reuse probe infrastructure via python3 scripts/port_check.py
+probe RECIPE.json, or record -- COMMAND. Run memory/alias and allocation-failure
+probes for changed ownership, lifetime or cleanup behavior and concrete safety
+concerns; reuse evidence for unchanged mechanisms. Broad matrices and course
+sweeps belong at stable checkpoints/final closure. Keep all final gates exact.
 
 Fill current whole-source reviews and function correspondence, then mark only
 fully translated/reviewed source rows complete. Keep one ledger: batch, reviewed
@@ -39,4 +37,4 @@ after return; their prior logs are not completion criteria. No goal reset or pol
 
 {{modelValidation}}
 
-Final advancement requires the complete inventory, all PA1–PA33 differential/course/debug lanes and full Rust quality. PA34 then proves clean C1==C2==CR==C3; partial probes never satisfy it.
+Final advancement requires the complete inventory, all PA1–PA33 differential/course/debug lanes and full Rust quality. PA34 proves clean C1==C2==CR==C3; partial probes never satisfy it.
