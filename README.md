@@ -272,7 +272,7 @@ and active/total agent time. V9 completion uses PA37 without requiring PA38.
 
 The release-gated [V9 student scaffold](examples/v9sol/README.md) and
 [existing Rust port migration](examples/v9literal/README.md) are separate.
-Both check source/export tag provenance before changing anything, and neither
+Both check immutable source-release/export provenance before changing anything, and neither
 starts a worker. The Rust port requires PA38 compatibility even though it is
 optional in the student course.
 

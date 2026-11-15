@@ -1,10 +1,12 @@
 # V9 Sol release-gated scaffold
 
-Prepared for `vishvananda/cppgm` source commit
-`bb09801053e48486beebe014071a71353ce9be0b`. Both source tags
-`assignments-v9` and `v0.9.0` must identify this commit. The assignments
-`v0.9.0` tag must carry the matching `reference-binaries/manifest.tsv` source
-SHA and the renamed `cppgm` tool. No moving branch substitutes for a tag.
+Prepared for cppgm **v0.9.1**, source
+`c9b05c4c0f7bb1294c717551c61145940b21125e`, and exported assignments
+`57072c63636274eed3088da8ae3ac1164478117a`. Its reference manifest names
+that exact source. The immutable release tag must match; the release must
+be a descendant of the `assignments-v9` course base. An explicit exported
+commit is accepted when no matching assignments version tag exists; its
+manifest must still match the release. No moving branch substitutes for a pin.
 
 The student run uses native Codex `gpt-6.1-sol` / `high`, fresh phase goals,
 the existing compact-storage and register-placement guidance, a 500-turn
@@ -25,6 +27,9 @@ separate source/export checkouts, then prepare a reviewable migration:
 ```sh
 python3 scripts/prepare-v9sol.py --source ~/cppgm-extended \
   --assignments ~/cppgm-assignments-release \
+  --version v0.9.1 \
+  --source-revision c9b05c4c0f7bb1294c717551c61145940b21125e \
+  --assignments-revision 57072c63636274eed3088da8ae3ac1164478117a \
   --output /mnt/vizier/v9sol-prepared
 ```
 

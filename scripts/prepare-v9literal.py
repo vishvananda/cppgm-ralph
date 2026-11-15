@@ -31,9 +31,9 @@ def git(root, *args):
     return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
 
 
-def stage(control, source, assignments, output):
+def stage(control, source, assignments, output, release_options=None):
     release = load_release()
-    pins = release.verify_release(source, assignments)
+    pins = release.verify_release(source, assignments, **(release_options or {}))
     settings = json.loads((control / 'settings.json').read_text())
     original = Path(settings['checkout'])
     if git(original, 'status', '--porcelain'):
@@ -51,7 +51,7 @@ def stage(control, source, assignments, output):
     output.mkdir(parents=True, exist_ok=False)
     root, target_control = output / 'checkout', output / 'control'
     subprocess.run(['git', 'clone', '--no-hardlinks', str(original), str(root)], check=True)
-    subprocess.run(['git', 'checkout', '-b', 'migration/v0.9.0'], cwd=root, check=True)
+    subprocess.run(['git', 'checkout', '-b', 'migration/' + pins.get('source_tag', 'v9')], cwd=root, check=True)
     subprocess.run(['git', 'remote', 'set-url', 'origin', git(original, 'remote', 'get-url', 'origin')], cwd=root, check=True)
     shutil.copytree(control, target_control, ignore=shutil.ignore_patterns('venv', '__pycache__'))
     (target_control / 'venv').symlink_to(control / 'venv', target_is_directory=True)
@@ -132,7 +132,7 @@ def stage(control, source, assignments, output):
     dev_make.write_text(dev_make.read_text().replace('cppgm++', 'cppgm'))
     makefile = root / 'Makefile'
     makefile.write_text(makefile.read_text().replace(str(control), str(target_control))
-                        .replace('EXPERIMENTAL_PAS ?= pa34 pa35', 'EXPERIMENTAL_PAS ?= pa35 pa36 pa38'))
+                        .replace('EXPERIMENTAL_PAS ?= pa34 pa35', 'EXPERIMENTAL_PAS ?= pa34 pa35 pa36 pa38'))
     with (root / 'port/source-map.tsv').open('w') as stream:
         writer = csv.DictWriter(stream, fieldnames=['cpp_source', 'rust_owner', 'status'], delimiter='\t', lineterminator='\n')
         writer.writeheader()
@@ -213,8 +213,10 @@ def main():
     p.add_argument('--source', type=Path, required=True)
     p.add_argument('--assignments', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    release = load_release()
+    release.arguments(p)
     args = p.parse_args()
-    stage(args.control.resolve(), args.source.resolve(), args.assignments.resolve(), args.output.resolve())
+    stage(args.control.resolve(), args.source.resolve(), args.assignments.resolve(), args.output.resolve(), release.options(args))
 
 
 if __name__ == '__main__':

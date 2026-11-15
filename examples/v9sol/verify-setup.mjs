@@ -12,7 +12,7 @@ assert.equal(config.stopAfterStage, 'pa37');
 assert.deepEqual(config.extraStages, ['pa35', 'pa36']);
 assert(config.loopGoalsEnabled && config.freshThreadPerTurn);
 assert.equal(config.codexHome, undefined);
-assert.equal(config.sourceRelease.sourceRevision, 'bb09801053e48486beebe014071a71353ce9be0b');
+assert.match(config.sourceRelease.sourceRevision, /^[0-9a-f]{40}$/);
 const state = path.join(config.stateBaseDir, `${config.name}-${config.model}-${config.reasoningEffort}`, 'state.json');
 assert(!fs.existsSync(state), 'V9 student run must remain unstarted');
 const templates = new Set();

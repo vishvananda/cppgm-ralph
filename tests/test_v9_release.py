@@ -89,6 +89,24 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'renamed'):
             self.verify()
 
+    def test_patch_release_keeps_course_base_and_requires_matching_immutable_export(self):
+        (self.source / 'marker').write_text('patch release')
+        patch_sha = commit(self.source, 'patch')
+        git(self.source, 'tag', 'v0.9.1')
+        self.manifest.write_text(f'source_sha\t{patch_sha}\nbinary\tcppgm\tfixture-hash\n')
+        export_sha = commit(self.assignments, 'patch export')
+        pins = release.verify_release(self.source, self.assignments, expected=patch_sha,
+                                      version='v0.9.1', assignments_revision=export_sha)
+        self.assertEqual(pins['course_revision'], self.sha)
+        self.assertEqual(pins['assignments_revision'], export_sha)
+        self.assertIsNone(pins['assignments_tag'])
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            release.verify_release(self.source, self.assignments, expected=patch_sha,
+                                   version='v0.9.1', assignments_revision='main')
+        with self.assertRaisesRegex(ValueError, 'manifest'):
+            release.verify_release(self.source, self.assignments, expected=patch_sha,
+                                   version='v0.9.1', assignments_revision=self.assignment_sha)
+
     def test_preparation_preserves_old_work_and_only_adds_new_spec(self):
         work = self.base / 'work'
         root = work / 'private/v8sol/checkout'

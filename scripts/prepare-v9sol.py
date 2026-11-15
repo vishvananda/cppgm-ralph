@@ -22,9 +22,9 @@ def run(command, **kwargs):
     return subprocess.run(list(map(str, command)), check=True, **kwargs)
 
 
-def plan(work, source, assignments):
+def plan(work, source, assignments, release_options=None):
     # Verify release provenance before touching run files, config or state.
-    pins = release.verify_release(source, assignments)
+    pins = release.verify_release(source, assignments, **(release_options or {}))
     old = json.loads((work / 'v8sol.config.json').read_text())
     root = (work / 'v8sol').resolve(strict=True)
     if release.git(root, 'status', '--porcelain'):
@@ -43,7 +43,8 @@ def plan(work, source, assignments):
     # Reuse the mounted filesystem. Renaming an LVM mount is unnecessary and
     # would invalidate its fstab and sandbox bind paths.
     config['sessionIsolation']['privateWriteDir'] = old['sessionIsolation']['privateWriteDir']
-    config['sourceRelease'].update(assignmentsRevision=pins['assignments_revision'])
+    config['sourceRelease'].update(sourceRevision=pins['source_revision'], sourceTag=pins['source_tag'],
+                                  assignmentsRevision=pins['assignments_revision'], assignmentsTag=pins['assignments_tag'])
     return {'pins': pins, 'old_checkout': str(root), 'old_tip': release.git(root, 'rev-parse', 'HEAD'),
             'old_remote': release.git(root, 'remote', 'get-url', 'origin'),
             'new_remote': 'git@github.com:vishvananda/cppgm-run-v9sol.git', 'config': config,
@@ -54,7 +55,13 @@ def prepare(report, output):
     output.mkdir(parents=True, exist_ok=False)
     checkout = output / 'checkout'
     run(['git', 'clone', '--no-hardlinks', report['old_checkout'], checkout])
-    run(['git', 'fetch', report['pins']['assignments_repository'], report['pins']['assignments_revision']], cwd=checkout)
+    assignments_repository = report['pins']['assignments_repository']
+    remote = subprocess.run(['git', '-C', assignments_repository, 'remote', 'get-url', 'origin'],
+                            text=True, capture_output=True)
+    # A partial local clone may not be able to serve its promised historical
+    # blobs through upload-pack. Fetch the already-verified SHA from its origin.
+    fetch_source = remote.stdout.strip() if remote.returncode == 0 else assignments_repository
+    run(['git', 'fetch', fetch_source, report['pins']['assignments_revision']], cwd=checkout)
     # Retain the old preparation history and merge the exact export; only spec
     # differs from that export. This keeps a normal fast-forward remote push.
     merged = subprocess.run(['git', 'merge', '--no-commit', '--no-ff', report['pins']['assignments_revision']], cwd=checkout)
@@ -63,7 +70,7 @@ def prepare(report, output):
         raise ValueError('unexpected assignment merge conflict: ' + ', '.join(conflicts))
     shutil.copy2(TEMPLATES / 'spec.md', checkout / 'spec.md')
     run(['git', 'add', 'spec.md'], cwd=checkout)
-    run(['git', 'commit', '-m', 'Configure V9 Sol from the v0.9.0 assignment export'], cwd=checkout)
+    run(['git', 'commit', '-m', 'Configure V9 Sol from the ' + report['pins']['source_tag'] + ' assignment export'], cwd=checkout)
     difference = release.git(checkout, 'diff', '--name-only', report['pins']['assignments_revision'], 'HEAD').splitlines()
     if difference != ['spec.md']:
         raise ValueError('prepared checkout must differ from the release only in spec.md: ' + repr(difference))
@@ -120,9 +127,10 @@ def main():
     p.add_argument('--work-base', type=Path, default=Path.home() / 'work')
     p.add_argument('--output', type=Path, required=True, help='fresh staging directory on the retained private filesystem for --apply')
     p.add_argument('--apply', action='store_true')
+    release.arguments(p)
     args = p.parse_args()
     work = args.work_base.resolve()
-    report = plan(work, args.source, args.assignments)
+    report = plan(work, args.source, args.assignments, release.options(args))
     if args.apply:
         storage = Path(report['config']['sessionIsolation']['privateWriteDir']).resolve()
         if not args.output.resolve().is_relative_to(storage):

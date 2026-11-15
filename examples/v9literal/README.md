@@ -1,63 +1,55 @@
-# V9 update of the literal Rust compiler
+# V9 literal Rust recovery
 
-The source target is `bb09801053e48486beebe014071a71353ce9be0b` in
-`vishvananda/cppgm`, to be published as `assignments-v9` and `v0.9.0`.
-The assignments export must have its matching `v0.9.0` tag and source SHA.
-PA38 C is **required for the Rust port**, alongside wasm, all native features
-and shipped LowIR interfaces. It remains optional only for student runs.
+The current source pin is cppgm **v0.9.1**,
+`c9b05c4c0f7bb1294c717551c61145940b21125e`. Exported assignments are
+`57072c63636274eed3088da8ae3ac1164478117a`, whose reference manifest names
+that exact source. The `assignments-v9` course tag remains at its v0.9.0 base;
+patch releases must descend from it. No moving branch substitutes for a pin.
 
-Preparation already built all nine C++ tools at that commit in
-`/mnt/vizier/cppgm-v9-reference-bb09801`. The active optimized Rust compiler
-and its V8 pins are unchanged. Its current commit is `e72bb2b6`.
+The Rust implementation starts from optimized V8 commit `e72bb2b6`, retaining
+its full-LTO Cargo profile. The source census is 469 -> 777: 132 unchanged
+owners, 333 existing owners to recover (including three renames), and 312
+genuinely new owners. Changed and renamed reviews are pending; preparation
+never certifies parity. Removed owners retire when replacements are integrated.
 
-The source plan is 469 -> 770 responsibilities: 134 unchanged; 331 existing
-owners require recovery, including three renames; 305 genuinely new owners.
-The driver/scaffold rename to `cppgm` and global-data move into `machine/`
-have explicit origins and Rust relocation paths. Removed source owners are
-retired after their replacements are integrated, not blindly deleted.
+`v9literal.config.json`, its concise prompts/goals and `spec.md` describe the
+fresh native Codex worker. It uses default shared authentication, a private
+writable filesystem, 64 GiB memory and two CPUs. The existing V8 run's source,
+controls, logs and optimized binaries are retained. PA33 is only the source
+progress transport; Ralph next visits PA35 bootstrap. The owning final checks
+require PA1–34, PA37 wasm and **PA38 C**, including shipped LowIR interfaces.
+PA38 is optional only for the student Sol run. PA36 supplies performance
+workloads; retain the <=5% frozen O0/O3 compile-time target against the pin.
 
-After the source and export tags exist, stage a migration without replacing
-or starting the active run:
+Stage a later update from an exact released source and matching export:
 
 ```sh
 ~/work/v5literal-control/venv/bin/python scripts/prepare-v9literal.py \
-  --control ~/work/v5literal-control \
-  --source /mnt/vizier/cppgm-v9-reference-bb09801 \
+  --control ~/work/v9literal-control \
+  --source /mnt/vizier/cppgm-v091-reference \
   --assignments ~/cppgm-assignments-release \
+  --version v0.9.1 \
+  --source-revision c9b05c4c0f7bb1294c717551c61145940b21125e \
+  --assignments-revision 57072c63636274eed3088da8ae3ac1164478117a \
   --output /mnt/vizier/v9literal-prepared
 ```
 
-Fetch release tags into both checkouts first. The command fails before creating
-the output when tags or export provenance are missing/mismatched. It clones the
-existing Rust Git history, installs tagged **exported** tests/wrappers, retains
-implementation bytes, relocates renamed owners and records changed files as
-pending. It prepares reviewed controller templates with explicit V9 routing,
-including PA33 LowIR optimization, PA34 backend optimization, PA35 bootstrap,
-PA37 wasm and PA38 C. It creates no Ralph state, copies no credentials, starts
-no worker and does not change the active checkout/control/reference pins.
-The result is intentionally a staging branch for review and source recovery,
-not a deployment, a passed build or a parity certificate.
+This stages Git history, tagged source inventory, exported fixtures/wrappers,
+renamed Rust owners and reviewed controller routing. It changes no active run,
+copies no credentials, creates no Ralph state and starts no worker. Activation
+must rebind installation paths and refresh the protected manifest, then verify
+preflight, unsafe reviews, source counts and isolation before starting Ralph.
+The legacy updater refuses V9 through its old installation path.
 
-The legacy `reference_update.py` now has rename-aware dry-run plans but refuses
-to apply V9 using its old installation path. Use this staged migration instead.
-Legacy profiles and their tests remain supported.
+Recover connected producers/consumers in order: target/machine records;
+preprocessing/parser; semantic facts/lowering; optimizer/backend; wasm/C;
+LowIR interfaces. Preserve original algorithms and lifetimes. Existing Rust
+fast paths remain only when current source invariants still hold. Refresh
+changed evidence; reuse valid unchanged reviews. Completion requires exact
+outputs/artifacts, all configured course/debug checks and complete
+C1 == C2 == CR == C3 bootstrap proof. Record performance separately from
+Cargo build time, using paired wall time and available instruction/cycle/RSS
+measurements with explicit LTO modes.
 
-Recover connected producers/consumers in this order: shared target and machine
-records; preprocessing/parser; semantic facts and typed lowering; optimizer and
-native backend; wasm and C integration; LowIR library interfaces. Existing Rust
-fast paths may remain only when current source behavior, storage and failure
-invariants still hold. Do not replay the entire C++ commit history or rewrite
-algorithms. Each coherent group needs focused exact comparisons and refreshed
-source/unsafe reviews. Reuse unchanged evidence; refresh dependent checks.
-
-Completion requires current course/debug checks (including PA38), exact raw
-outputs/counters/artifacts and the C1 == C2 == CR == C3 bootstrap proof for all
-objects/tools. Measure runtime separately from Rust's own Cargo build time.
-The old frozen workload's 53 files are unchanged and now live under PA36;
-retain that benchmark and add full-source self-compilation. Keep the <=5%
-frozen O0/O3 wall-time target against the pinned V9 reference. Record LTO modes
-explicitly, and use paired wall time plus instruction/cycle/RSS evidence.
-
-Raw census, reference build and initial migration diagnostics are under
-`/mnt/vizier/v5literal-v9-planning-20261115/`. The initial old-Rust/new-C++
-comparison is diagnostic only; it does not claim V9 parity or performance.
+Local installation, source/export provenance and campaign logs are under
+`/mnt/vizier/cppgm-v091-intel-campaign/`; the new worker is `v9literal`.
