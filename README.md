@@ -75,8 +75,11 @@ reports or literal `echo` completion messages. Numeric report guards such as
 pipelines contain supported read-only commands; shell text is never evaluated.
 An initially busy wait is rechecked after the grace period without repeated
 warnings. Other
-workers and ambiguous waits remain untouched. Recovery still requires the goal
-completion path and external checks; a response alone never advances the run.
+workers and ambiguous waits remain untouched. Unreadable PID-namespace links
+need no elevated privileges: their processes remain possible matches, and a
+matching command with unknown namespace prevents cancellation. Recovery still
+requires the goal completion path and external checks; a response alone never
+advances the run.
 `RALPH_CLAUDE_RESPONSE_GRACE_MS` adjusts the diagnostic grace period.
 
 If Claude or Codex reports a usage/session limit

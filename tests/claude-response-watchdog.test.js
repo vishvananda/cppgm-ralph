@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs/promises';
 import test from 'node:test';
 import { createClaudeResponseWatchdog, findSelfWaits, pollingPattern, readProcesses } from '../claude-response-watchdog.js';
 
@@ -30,6 +31,41 @@ test('requires a sole self match and harmless children within the actual process
   assert.deepEqual(findSelfWaits([root, poll, row(4, 2, ['make', 'test'])], 1), []);
   assert.deepEqual(findSelfWaits([root, poll, sleeper], 99), []);
   assert.deepEqual(findSelfWaits([root, poll, sleeper, row(4, 99, ['sh', 'watchdog/example.sh'], { namespace: 'other' })], 1), [poll]);
+  assert.deepEqual(findSelfWaits([root, poll, sleeper, row(4, 99, ['sh', 'watchdog/example.sh'], { namespace: null })], 1), []);
+  assert.deepEqual(findSelfWaits([root, poll, sleeper, row(4, 99, ['systemd'], { namespace: null })], 1), [poll]);
+  assert.deepEqual(findSelfWaits([root, { ...poll, namespace: null }, sleeper], 1), []);
+});
+
+test('unreadable namespace links retain commands and ancestry without hiding possible workers', async t => {
+  const processes = [root, poll, sleeper, row(4, 99, ['systemd'])];
+  let denyCommands = false, denyAllNamespaces = false;
+  t.mock.method(fs, 'readdir', async () => processes.map(p => String(p.pid)));
+  t.mock.method(fs, 'readFile', async name => {
+    if (denyCommands) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    const entry = processes.find(p => p.pid === Number(name.split('/')[2]));
+    if (name.endsWith('/cmdline')) return Buffer.from(entry.argv.join('\0') + '\0');
+    const fields = Array(20).fill('0');
+    fields[0] = 'S'; fields[1] = String(entry.ppid); fields[19] = entry.start;
+    return `${entry.pid} (fixture) ${fields.join(' ')}`;
+  });
+  t.mock.method(fs, 'readlink', async name => {
+    if (denyAllNamespaces) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+    if (name === '/proc/4/ns/pid') throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    return root.namespace;
+  });
+  let rows = await readProcesses();
+  assert.deepEqual(rows.find(p => p.pid === 4), { ...processes[3], namespace: null });
+  assert.deepEqual(findSelfWaits(rows, 1), [poll]);
+  processes[3].argv = ['sh', 'watchdog/example.sh'];
+  rows = await readProcesses();
+  assert.deepEqual(findSelfWaits(rows, 1), []);
+
+  denyAllNamespaces = true;
+  assert.deepEqual(findSelfWaits(await readProcesses(), 1), []);
+  // Missing command visibility still prevents proof; only namespace lookup
+  // permission failures can use the conservative unknown-namespace fallback.
+  denyCommands = true;
+  await assert.rejects(readProcesses(), { code: 'EACCES' });
 });
 
 test('recognizes literal report guards, double-quoted process patterns and read-only tails', () => {

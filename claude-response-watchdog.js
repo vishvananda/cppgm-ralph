@@ -103,7 +103,13 @@ export async function readProcesses() {
     try {
       const base = `/proc/${name}`;
       const [stat, command, namespace] = await Promise.all([
-        fs.readFile(`${base}/stat`, 'utf8'), fs.readFile(`${base}/cmdline`), fs.readlink(`${base}/ns/pid`),
+        fs.readFile(`${base}/stat`, 'utf8'), fs.readFile(`${base}/cmdline`),
+        fs.readlink(`${base}/ns/pid`).catch(error => {
+          // Namespace links require ptrace access, even when stat/cmdline are
+          // readable. Retain such processes as possible same-namespace matches.
+          if (['EACCES', 'EPERM'].includes(error.code)) return null;
+          throw error;
+        }),
       ]);
       const fields = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/);
       return { pid: Number(name), ppid: Number(fields[1]), start: fields[19], namespace,
@@ -126,13 +132,14 @@ export function findSelfWaits(rows, rootPid) {
   }
   return rows.filter(row => {
     if (!owned.has(row.pid) || row.pid === rootPid) return false;
+    if (!row.namespace) return false; // Never cancel a shell with unknown scope.
     const pattern = pollingPattern(row.argv);
     if (!pattern || !pattern.test(row.argv.join(' '))) return false;
     const children = rows.filter(child => child.ppid === row.pid);
     if (children.some(child => !['sleep', 'pgrep'].includes(path.basename(child.argv[0] ?? '')))) return false;
     // pgrep excludes itself, and sees only its own PID namespace. A real
     // matching worker, even outside this subtree, makes cancellation unsafe.
-    const matches = rows.filter(other => other.namespace === row.namespace &&
+    const matches = rows.filter(other => (!other.namespace || other.namespace === row.namespace) &&
       path.basename(other.argv[0] ?? '') !== 'pgrep' && pattern.test(other.argv.join(' ')));
     return matches.length === 1 && matches[0].pid === row.pid;
   });
