@@ -20,8 +20,11 @@ class ProbeTests(unittest.TestCase):
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.reference = self.root / 'reference'
         (self.reference / 'dev/src').mkdir(parents=True)
+        control = self.root / 'control'
+        (control / 'venv/bin').mkdir(parents=True)
+        (control / 'venv/bin/python').symlink_to(sys.executable)
         for name, value in [('ROOT', self.root), ('REFERENCE', self.reference),
-                            ('ARTIFACTS', self.root / 'artifacts')]:
+                            ('ARTIFACTS', self.root / 'artifacts'), ('CONTROL', control)]:
             self.stack.enter_context(patch.object(common, name, value))
 
     def execute(self, recipe):

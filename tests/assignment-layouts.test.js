@@ -236,3 +236,46 @@ test("old short exports and empty comparisons need no migration", () => {
     assert.deepEqual(rows.map((row) => row.runs[0].cost), [1, 2, 3]);
   }
 });
+
+test("V9 aligns the inserted assembly stage and retains optional C without moving historical IDs", () => {
+  assert.equal(layout.inferLayoutId("v9sol-gpt-6.1-sol-high"), "v9");
+  assert.equal(layout.inferLayoutId("v8sol-gpt-6.1-sol-high"), "v5");
+  assert.equal(layout.descriptor("v9").requiredStageCount, 37);
+  assert.deepEqual([...layout.descriptor("v9").optionalStages], ["pa38"]);
+  for (let stage = 1; stage <= 38; stage++) {
+    const canonical = layout.canonicalPaNumber("v9", stage);
+    assert.equal(layout.nativePaNumber("v9", canonical), stage);
+  }
+  for (let stage = 1; stage <= 28; stage++) {
+    assert.equal(layout.sourcePaForTarget("v5", "v9", stage), stage);
+  }
+  for (let stage = 30; stage <= 36; stage++) {
+    assert.equal(layout.sourcePaForTarget("v5", "v9", stage), stage - 1);
+  }
+  for (const stage of [29, 37, 38]) {
+    for (const prior of ["v2", "v3", "v4", "v5"]) {
+      assert.equal(layout.sourcePaForTarget(prior, "v9", stage), null);
+    }
+  }
+  assert.equal(layout.preferredLayout([{ layout: "v5" }, { layout: { id: "v9" } }]), "v9");
+});
+
+test("mixed V9 comparisons preserve each run's cost across every display", () => {
+  const comparison = {
+    runs: [{ layout: "v5" }, { layout: "v9" }],
+    rows: Array.from({ length: 38 }, (_, i) => ({ pa: `pa${i + 1}`, runs: [
+      i < 35 ? { status: "complete", cost: i + 1, durationMs: 1 } : null,
+      { status: "complete", cost: i + 1, durationMs: 1 },
+    ] })),
+  };
+  for (const view of ["capabilities", "v2", "v3", "v4", "v5", "v9"]) {
+    const rows = layout.comparisonRows(comparison, view);
+    assert.equal(rows.reduce((n, row) => n + row.runs[0].cost, 0), 630, view);
+    assert.equal(rows.reduce((n, row) => n + row.runs[1].cost, 0), 741, view);
+    assert.equal(new Set(rows.flatMap(row => row.runs[1].sources.map(s => s.pa))).size, 38, view);
+  }
+  const rows = layout.comparisonRows(comparison, "v9");
+  assert.equal(rows.find(row => row.canonicalStages.includes(41)).runs[0].status, "not required");
+  assert.match(rows.at(-1).label, /PA38.*C frontend/);
+  assert.equal(rows.find(row => row.canonicalStages.includes(39)).runs[1].sources[0].pa, "pa35");
+});

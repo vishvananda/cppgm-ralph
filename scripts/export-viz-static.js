@@ -52,7 +52,7 @@ Options:
   --out <dir>           Output directory (default: ./ralph-viz-static)
   --run <spec>          Run to export; repeatable. Defaults to all published runs
   --runs <a,b,c>        Comma-separated run specs
-  --through <paN|N>     Last canonical PA for comparison data (default: pa39; pa40 includes V5 PA35)
+  --through <paN|N>     Last canonical PA (default: pa43 for V9, otherwise pa39; pa40 includes V5 PA35)
   --ralph-dir <dir>     Ralph state dir (default: ~/work/.ralph)
   --codex-dir <dir>     Codex sessions dir (default: ~/.codex/sessions)
   --claude-dir <dir>    Claude projects dir (default: ~/.claude/projects)
@@ -101,6 +101,7 @@ function parseArgs(argv) {
       options.runs.push(...next().split(",").map((value) => value.trim()).filter(Boolean));
     } else if (arg === "--through") {
       options.through = normalizePa(next());
+      options.throughExplicit = true;
     } else if (arg === "--ralph-dir") {
       options.ralphDir = expandHome(next());
     } else if (arg === "--codex-dir") {
@@ -694,8 +695,7 @@ export function annotateComparison(comparison, runMetas) {
     run.label = `${run.ordinal}-${baseLabel}`;
   }
   comparison.assignmentLayouts = ASSIGNMENT_LAYOUT.layouts;
-  comparison.displayLayout = comparison.runs.some((run) =>
-    ASSIGNMENT_LAYOUT.normalizeLayoutId(run.layout) === "v5") ? "v5" : "v3";
+  comparison.displayLayout = ASSIGNMENT_LAYOUT.preferredLayout(comparison.runs);
   const throughNumber = paNumber(comparison.through);
   const displayRows = ASSIGNMENT_LAYOUT.remapComparisonRows(
     comparison,
@@ -703,7 +703,7 @@ export function annotateComparison(comparison, runMetas) {
   ).slice(0, throughNumber ?? undefined);
   for (const [runIndex, run] of comparison.runs.entries()) {
     const layout = ASSIGNMENT_LAYOUT.descriptor(run.layout);
-    const courseEnd = ASSIGNMENT_LAYOUT.canonicalPaNumber(layout, layout.stageCount);
+    const courseEnd = ASSIGNMENT_LAYOUT.canonicalPaNumber(layout, layout.requiredStageCount ?? layout.stageCount);
     const nativeThrough = ASSIGNMENT_LAYOUT.nativePaNumber(layout,
       Math.min(throughNumber ?? courseEnd, courseEnd));
     const finalSummary = comparison.rows.find(row => row.pa === `pa${nativeThrough}`)?.runs?.[runIndex];
@@ -1238,6 +1238,12 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (!entries.length) {
     throw new Error("no runs resolved or retained");
+  }
+
+  if (!options.throughExplicit) {
+    const layouts = await Promise.all(entries.map(entry => entry.kind === "live"
+      ? inferAssignmentLayout(entry.run, options) : entry.meta.assignmentLayout));
+    if (layouts.some(layout => ASSIGNMENT_LAYOUT.normalizeLayoutId(layout) === "v9")) options.through = "pa43";
   }
 
   await cleanOutput(options);

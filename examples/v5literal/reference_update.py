@@ -36,25 +36,73 @@ def census(reference, revision):
         for name in names if name.startswith('dev/') and name.endswith(('.cpp', '.h'))}}
 
 
-def classify(old, new, rows, previous=None):
+def source_renames(reference, old_revision, revision):
+    result = {}
+    records = git(reference, 'diff', '--name-status', '-z', '-M',
+                  '--diff-filter=R', old_revision, revision, '--', 'dev').decode().split('\0')
+    at = 0
+    while at < len(records) and records[at]:
+        status, before, after = records[at:at + 3]
+        if not status.startswith('R'):
+            raise ValueError('unexpected rename record')
+        if before.endswith(('.cpp', '.h')) and after.endswith(('.cpp', '.h')):
+            result[before] = after
+        at += 3
+    return result
+
+
+def release_layout(reference, revision):
+    modern = subprocess.run(['git', '-C', str(reference), 'cat-file', '-e',
+                             revision + ':dev/cppgm.cpp'], capture_output=True).returncode == 0
+    return ({'id': 'v9', 'driver_tool': 'cppgm',
+             'correctness_stages': [*[f'pa{i}' for i in range(1, 35)], 'pa37', 'pa38'],
+             'bootstrap_stage': 'pa35', 'performance_stage': 'pa36',
+             'debug_stages': ['pa8', 'pa33', 'pa34'], 'optional_course_stages': ['pa38'],
+             'required_port_stages': ['pa38']}
+            if modern else {'id': 'v5', 'driver_tool': 'cppgm++',
+                'correctness_stages': [f'pa{i}' for i in range(1, 34)],
+                'bootstrap_stage': 'pa34', 'performance_stage': 'pa35',
+                'debug_stages': ['pa8', 'pa32', 'pa33']})
+
+
+def classify(old, new, rows, previous=None, renames=None):
     a, b = old['sources'], new['sources']
+    renames = renames or {}
+    if (len(set(renames.values())) != len(renames)
+            or any(source not in a or target not in b or source in b or target in a
+                   for source, target in renames.items())):
+        raise ValueError('renames must map removed source identities to distinct added identities')
     changed = sorted(p for p in a.keys() & b.keys() if a[p]['sha256'] != b[p]['sha256'])
     unchanged = sorted(p for p in a.keys() & b.keys() if a[p]['sha256'] == b[p]['sha256'])
     complete = {row['cpp_source'] for row in rows if row['status'] == 'complete'}
     previous = previous or {}
     pending_recovery = (set(previous.get('recover', [])) - complete) & b.keys()
-    recover = (complete & set(changed)) | pending_recovery
+    recover = (complete & set(changed)) | pending_recovery | {
+        target for source, target in renames.items() if source in complete or source in previous.get('recover', [])}
     baselines = previous.get('recovery_baselines', {})
+    origins = {target: source for source, target in renames.items()}
+    prior_pending = set(previous.get('recover', [])) - complete
+    recovery_baselines = {}
+    recovery_origins = {}
+    for source in sorted(recover):
+        origin = origins.get(source, source)
+        if origin in prior_pending:
+            recovery_baselines[source] = baselines.get(origin, previous.get('old_revision', old['revision']))
+            recovery_origins[source] = previous.get('recovery_origins', {}).get(origin, origin)
+        else:
+            recovery_baselines[source] = old['revision']
+            recovery_origins[source] = origin
     return {'old_revision': old['revision'], 'new_revision': new['revision'],
             'old_total': len(a), 'new_total': len(b), 'old_complete': len(complete),
             'added': sorted(b.keys() - a.keys()), 'removed': sorted(a.keys() - b.keys()),
             'changed': changed, 'unchanged': unchanged,
             'recover': sorted(recover),
             'previous_pending_recovery': sorted(pending_recovery),
-            'recovery_baselines': {
-                source: baselines.get(source, previous.get('old_revision', old['revision']))
-                if source in pending_recovery else old['revision']
-                for source in sorted(recover)},
+            'renamed': renames,
+            'recovery_origins': recovery_origins,
+            'rust_relocations': {a[source]['rust_path']: b[target]['rust_path']
+                                 for source, target in renames.items()},
+            'recovery_baselines': recovery_baselines,
             'preserve': sorted(complete & set(unchanged))}
 
 
@@ -110,6 +158,7 @@ def main():
     parser.add_argument('--tag', required=True)
     parser.add_argument('--assignment-revision', required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--plan-output', type=Path, help='write the complete dry-run recovery plan')
     args = parser.parse_args()
     control, reference = args.control.resolve(), args.reference.resolve()
     settings = json.loads((control / 'settings.json').read_text())
@@ -142,13 +191,18 @@ def main():
         rows = list(csv.DictReader(stream, delimiter='\t'))
     previous_file = root / 'port/reference-update.json'
     previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
-    report = classify(old, new, rows, previous)
+    report = classify(old, new, rows, previous, source_renames(reference, old['revision'], revision))
+    report['course_layout'] = release_layout(reference, revision)
     report.update(assignment_revision=args.assignment_revision, tag=args.tag,
                   previous_reference=settings['reference'], reference=str(reference),
                   candidate_before=git(root, 'rev-parse', 'HEAD').decode().strip())
     print(json.dumps({k: len(v) if isinstance(v, list) else v for k, v in report.items()}, indent=2))
+    if args.plan_output:
+        write_json(args.plan_output, report)
     if not args.apply:
         return
+    if report['course_layout']['id'] == 'v9':
+        raise RuntimeError('V9 plan prepared; install/review V9 clone routing and renamed Rust owners before applying the new protected pin')
     namespace = args.tag + '-' + revision[:12]
     backup = Path(settings['artifacts']).parent / ('reference-update-' + namespace)
     backup.mkdir(parents=True, exist_ok=False)

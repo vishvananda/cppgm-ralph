@@ -8,7 +8,7 @@ import resource
 import sys
 import uuid
 
-from clone_common import REFERENCE, candidate_path, digest, run
+from clone_common import DRIVER_TOOL, REFERENCE, candidate_path, digest, run
 
 
 def output_paths(tool, arguments):
@@ -19,9 +19,9 @@ def output_paths(tool, arguments):
                 paths.append(Path(arguments[index + 1]))
         elif argument.startswith(("--verify-dump=", "--dump-machine-ir=")):
             paths.append(Path(argument.split("=", 1)[1]))
-    if tool == "cppgm++" and "-o" not in arguments:
+    if tool == DRIVER_TOOL and "-o" not in arguments:
         sources = [Path(arg) for arg in arguments if not arg.startswith("-")
-                   and Path(arg).suffix in (".cpp", ".cc", ".cxx", ".t")]
+                   and Path(arg).suffix in (".cpp", ".cc", ".cxx", ".c", ".S", ".s", ".t")]
         if "-c" in arguments:
             paths.extend(Path(source.stem + ".o") for source in sources)
         elif sources and not any(arg.startswith(("-E", "--emit-", "-dump")) for arg in arguments):
@@ -58,7 +58,7 @@ def append_receipt(record):
 def is_stats_line(line):
     return line.startswith((b"lowir2native_stats ", b"lowiropt_stats ", b"pa32_opt_stats ",
                             b"preproc stats ", b"lowir stats: ", b"abimangle stats: ")) or (
-        line.startswith(b"cppgm++ ") and (b" stats " in line or b" stats:" in line))
+        line.startswith((b"cppgm++ ", b"cppgm ")) and (b" stats " in line or b" stats:" in line))
 
 
 def comparable_stderr(data):
@@ -90,7 +90,7 @@ def invocation_differences(expected, actual, expected_files, actual_files):
 
 
 def stack_exhausted(tool, result):
-    if tool != "cppgm++" or result[0] != 1 or result[1]:
+    if tool != DRIVER_TOOL or result[0] != 1 or result[1]:
         return False
     diagnostic = b"\n".join(line for line in result[2].splitlines() if not is_stats_line(line))
     return re.fullmatch(rb"ERROR: [^\n]+:[0-9]+:[0-9]+: constructs nested too deeply", diagnostic) is not None

@@ -13,6 +13,8 @@ import sys
 import tomllib
 
 from clone_common import (ARTIFACTS, CONTROL, REFERENCE, ROOT, SETTINGS, TOOLS,
+                          BOOTSTRAP_STAGE, CORRECTNESS_STAGES, DEBUG_STAGES, DRIVER_TOOL,
+                          IR_OPT_STAGE, BACKEND_OPT_STAGE, primary_tool, correctness_numbers,
                           candidate_path, clean_env, digest, file_digest, run, run_course, write_json)
 
 ACTIVE_STAGE = 1
@@ -71,9 +73,7 @@ def build_script_policy(frozen, cargo):
 
 def routes(stage):
     number = int(stage[2:])
-    primary = {1: "pptoken", 2: "posttoken", 3: "ppexpr", 4: "preproc",
-               8: "lowir", 9: "abimangle", 24: "lowir2native", 32: "lowiropt",
-               33: "lowir2native"}.get(number, "cppgm++")
+    primary = primary_tool(number)
     adapter = lambda tool: str(CONTROL / "bin" / tool)
     backend = adapter("lowir2native") if max(number, ACTIVE_STAGE) >= 24 else str(REFERENCE / "dev/lowir2native")
     return ["CXX=/usr/bin/g++", "CPPGM_HOST_CXX=/usr/bin/g++", "CPPGM_TEST_RUNNER=0",
@@ -81,9 +81,9 @@ def routes(stage):
             "CPPGM_TEST_APP=" + adapter(primary), "NATIVE_REFERENCE_APP=" + backend,
             "LOWIROPT_APP=" + adapter("lowiropt"),
             "LOWIR2NATIVE_APP=" + adapter("lowir2native"),
-            "CPPGM_DRIVER_APP=" + adapter("cppgm++"),
+            "CPPGM_DRIVER_APP=" + adapter(DRIVER_TOOL),
             "CPPGM_LOWIR_BEHAVIOR_APP=" + backend,
-            "CPPGM_CPPGM_APP=" + adapter("cppgm++"),
+            "CPPGM_CPPGM_APP=" + adapter(DRIVER_TOOL),
             "CPPGM_LOWIROPT_APP=" + adapter("lowiropt"),
             "CPPGM_LOWIR2NATIVE_APP=" + adapter("lowir2native")]
 
@@ -103,7 +103,7 @@ def execute_case(stage, case, self_check=False):
     if self_check:
         env["V5RUST_ORACLE_SELF_CHECK"] = "1"
     extra = []
-    if stage in ("pa32", "pa33") and case.startswith("tests/regression/"):
+    if stage in (f"pa{IR_OPT_STAGE}", f"pa{BACKEND_OPT_STAGE}") and case.startswith("tests/regression/"):
         parts = case.split("/")
         if parts[2] in ("o0", "o1", "o2", "o3"):
             extra.append(parts[2].upper() + "_TEST_ROOT=" + "/".join(parts[:3]))
@@ -116,7 +116,7 @@ def execute_case(stage, case, self_check=False):
         # This fixture's owner is in test-regression, but the inherited focused
         # CHECK_RUN table omits its route. Invoke that same owning checker.
         command = ["perl", "../scripts/check_lowir_addressed_scalar_slots.pl",
-                   str(CONTROL / "bin/lowiropt"), str(CONTROL / "bin/cppgm++"), case]
+                   str(CONTROL / "bin/lowiropt"), str(CONTROL / "bin" / DRIVER_TOOL), case]
         cwd = ROOT / stage
     code, out, err = run(command, cwd=cwd, env=env, timeout=240)
     (directory / "course.log").write_bytes(out + err)
@@ -138,7 +138,7 @@ def stage_cases(stage):
 
 
 def stage_check(stage, self_check=False, *, summarize=True):
-    if stage == "pa34":
+    if stage == BOOTSTRAP_STAGE:
         from clone_bootstrap import progress
         return progress()
     cases = stage_cases(stage)
@@ -172,7 +172,7 @@ def case_relocations(frozen):
                for case in cases}
     if not isinstance(relocations, dict):
         raise ValueError("case identity relocations must be a mapping")
-    pattern = r"clone/pa(?:[1-9]|[12][0-9]|3[0-3])/tests/[^\s]+\.t"
+    pattern = r"clone/(?:" + "|".join(map(re.escape, CORRECTNESS_STAGES)) + r")/tests/[^\s]+\.t"
     for old, new in relocations.items():
         if (not isinstance(old, str) or not isinstance(new, str)
                 or not re.fullmatch(pattern, old) or not re.fullmatch(pattern, new)
@@ -258,7 +258,7 @@ def ownership_complete():
 
 def completed_stages(limit):
     passed = True
-    for number in range(1, limit + 1):
+    for number in correctness_numbers(limit):
         passed = stage_check(f"pa{number}", summarize=False) and passed
         if number <= 33:
             passed = course(f"pa{number}") and passed
@@ -276,8 +276,8 @@ def main():
     parser.add_argument("case", nargs="?")
     parser.add_argument("--fresh", action="store_true", help="rerun a successful prior gate instead of reusing exact evidence")
     args = parser.parse_args()
-    if not re.fullmatch(r"pa(?:[1-9]|[12][0-9]|3[0-4])", args.stage):
-        parser.error("stage must be pa1 through pa34")
+    if args.stage not in {*CORRECTNESS_STAGES, BOOTSTRAP_STAGE}:
+        parser.error("stage is not a configured correctness or bootstrap stage")
     ACTIVE_STAGE = int(args.stage[2:])
     if args.mode == "preserve":
         return 0 if preserve(args.stage) else 1
@@ -296,7 +296,7 @@ def main():
     if args.mode == "course":
         return 0 if course(args.stage) else 1
     if args.mode == "release":
-        passed = all([course(stage, "test-debuginfo") for stage in ("pa8", "pa32", "pa33")])
+        passed = all([course(stage, "test-debuginfo") for stage in DEBUG_STAGES])
         return 0 if ownership_complete() and passed else 1
     limit = int(args.stage[2:]) - (1 if args.mode == "prior" else 0)
     if args.mode == "prior" and limit:

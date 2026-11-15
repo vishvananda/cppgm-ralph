@@ -145,7 +145,7 @@ def inputs(context):
 
 def evidence_files(limit):
     paths = []
-    for number in range(1, limit + 1):
+    for number in common.correctness_numbers(limit):
         stage = f'pa{number}'
         report = common.ARTIFACTS / 'results' / f'{stage}.json'
         data = json.loads(report.read_text())
@@ -317,8 +317,8 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--evidence', action='append', default=[], type=Path)
     args = parser.parse_args()
-    if not __import__('re').fullmatch(r'pa(?:[1-9]|[12][0-9]|3[0-3])', args.stage):
-        parser.error('stage must be pa1 through pa33')
+    if args.stage not in common.CORRECTNESS_STAGES:
+        parser.error('stage must be a configured correctness stage')
     if args.mode == 'checkpoint':
         checkpoint(args.stage, args.out, args.evidence)
     else:

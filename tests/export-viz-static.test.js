@@ -262,3 +262,38 @@ function comparison(runs, costs) {
     }],
   };
 }
+
+test('V9 completion uses required PA37 without requiring optional C', () => {
+  const done = { status: 'complete', turns: [1], cost: 1 };
+  const data = { through: 'pa43', runs: [{ spec: 'v9sol', layout: 'v9' }],
+    rows: [{ pa: 'pa35', runs: [done] }, { pa: 'pa37', runs: [done] }, { pa: 'pa38', runs: [null] }] };
+  annotateComparison(data, []);
+  assert.equal(data.displayLayout, 'v9');
+  assert.equal(data.runs[0].comparisonComplete, true);
+  assert.equal(data.runs[0].comparisonReachedPa34, true);
+});
+
+test('V9 exports default to the full canonical range including optional C evidence', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ralph-v9-export-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const shape = 'v9sol-gpt-6.1-sol-high', workDir = path.join(root, 'work'), ralphDir = path.join(root, '.ralph');
+  await fs.mkdir(path.join(ralphDir, shape, 'events'), { recursive: true });
+  await fs.mkdir(workDir, { recursive: true });
+  await fs.writeFile(path.join(workDir, 'v9sol.config.json'), JSON.stringify({ assignmentLayout: 'v9' }));
+  const records = [
+    { recordedAt: '2026-11-15T00:00:00Z', turnNumber: 1, eventType: 'ralph.phase-status',
+      event: { phaseStatus: { stage: 'pa38', phase: 'implement', allRequiredPassed: false } } },
+    { recordedAt: '2026-11-15T00:00:00Z', turnNumber: 1, eventType: 'ralph.prompt', event: { prompt: 'Implement pa38' } },
+    { recordedAt: '2026-11-15T00:01:00Z', turnNumber: 1, eventType: 'turn.completed',
+      event: { usage: { input_tokens: 100, output_tokens: 20 } } },
+  ];
+  await fs.writeFile(path.join(ralphDir, shape, 'events/run.jsonl'), records.map(JSON.stringify).join('\n') + '\n');
+  const outDir = path.join(root, 'out');
+  await exportViz(['--out', outDir, '--run', shape, '--ralph-dir', ralphDir, '--work-dir', workDir,
+    '--codex-dir', path.join(root, 'codex'), '--claude-dir', path.join(root, 'claude'), '--no-published-base']);
+  const manifest = JSON.parse(await fs.readFile(path.join(outDir, 'data/runs.json'), 'utf8'));
+  const comparison = JSON.parse(await fs.readFile(path.join(outDir, 'data', manifest.comparisons[0].path), 'utf8'));
+  assert.equal(comparison.through, 'pa43');
+  assert.equal(comparison.displayLayout, 'v9');
+  assert(comparison.rows.find(row => row.pa === 'pa38').runs[0].cost > 0);
+});

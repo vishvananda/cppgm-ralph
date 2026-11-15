@@ -110,13 +110,13 @@ def preflight():
 
 def milestone_checks():
     stages = json.loads((common.ROOT / 'port/milestones.json').read_text()).get('stages', [])
-    if len(set(stages)) != len(stages) or any(stage not in {f'pa{i}' for i in range(1, 34)} for stage in stages):
+    if len(set(stages)) != len(stages) or any(stage not in set(common.CORRECTNESS_STAGES) for stage in stages):
         raise RuntimeError('invalid course milestone inventory')
     for stage in sorted(stages, key=lambda x: int(x[2:])):
-        clone_check.ACTIVE_STAGE = 33
+        clone_check.ACTIVE_STAGE = max(common.correctness_numbers())
         if not clone_check.stage_check(stage) or not clone_check.course(stage):
             return False
-    print(f'Current recorded course milestones: {len(stages)} passed; all 33 remain mandatory at final acceptance')
+    print(f'Current recorded course milestones: {len(stages)} passed; all {len(common.CORRECTNESS_STAGES)} configured stages remain mandatory at final acceptance')
     return True
 
 
@@ -124,10 +124,10 @@ def final():
     from clone_quality import checks
     if not progress() or checks():
         return False
-    clone_check.ACTIVE_STAGE = 33
-    if clone_check.completed_stages(33):
+    clone_check.ACTIVE_STAGE = max(common.correctness_numbers())
+    if clone_check.completed_stages(max(common.correctness_numbers())):
         return False
-    return all(clone_check.course(stage, 'test-debuginfo') for stage in ('pa8', 'pa32', 'pa33'))
+    return all(clone_check.course(stage, 'test-debuginfo') for stage in common.DEBUG_STAGES)
 
 
 def record(command):

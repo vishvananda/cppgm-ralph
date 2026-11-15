@@ -5642,6 +5642,7 @@ function referenceBootstrapAction(command) {
 function buildReferenceBootstrapProgress(records) {
   const byTurn = new Map();
   let inventory = null;
+  let bootstrapStage = "pa34";
   let proof = {};
   let proofFailed = false;
   const starts = new Map();
@@ -5657,7 +5658,7 @@ function buildReferenceBootstrapProgress(records) {
     let status = null;
     let output = "";
     let check = null;
-    if (phase?.stage === "pa34") {
+    if (["pa34", "pa35"].includes(phase?.stage)) {
       check = phase.primaryCheck ?? phase.checks?.find(candidate => candidate.primary);
       action = referenceBootstrapAction(check?.command);
       status = check?.testStatus ?? phase.testStatus;
@@ -5670,6 +5671,7 @@ function buildReferenceBootstrapProgress(records) {
       output = commandOutputText(item.aggregated_output);
     }
     if (!action) continue;
+    bootstrapStage = phase?.stage ?? status?.targetStage ?? bootstrapStage;
     const targets = (status?.stages ?? []).flatMap(stage => stage.targets ?? []);
     if (action === "progress") {
       const total = status?.testsTotal;
@@ -5705,7 +5707,7 @@ function buildReferenceBootstrapProgress(records) {
     const previous = byTurn.get(turn);
     const proofPassed = Object.values(proof).filter(Boolean).length;
     proofFailed ||= Object.values(proof).some(value => value === false);
-    byTurn.set(turn, { stage: "pa34", turn, recordedAt: record.recordedAt,
+    byTurn.set(turn, { stage: bootstrapStage, turn, recordedAt: record.recordedAt,
       commandTarget: "reference build and bootstrap proof", unit: "build items",
       status: passed === total ? "pass" : proofFailed || inventory.passed < inventory.total ? "fail" : "running",
       progressNote: proofPassed === 2 ? "bootstrap proof passed"
@@ -8094,7 +8096,7 @@ function comparisonRunOrder(runs) {
 
 function comparisonLayoutOptions(selected) {
   return [["capabilities", "Grouped capabilities"], ["v2", "V2 PA order"],
-    ["v3", "V3 PA order"], ["v4", "V4 PA order"], ["v5", "V5 PA order"]]
+    ["v3", "V3 PA order"], ["v4", "V4 PA order"], ["v5", "V5 PA order"], ["v9", "V9 PA order"]]
     .map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("");
 }
 

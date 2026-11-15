@@ -1,0 +1,342 @@
+{
+  "baseDir": "/home/vishvananda/work",
+  "workdir": "/home/vishvananda/work/v9sol",
+  "useExistingWorkdir": true,
+  "name": "v9sol",
+  "assignmentLayout": "v9",
+  "provider": "codex",
+  "testCommand": "make test-report-through-paX",
+  "checks": {
+    "tests": {
+      "command": "make test-report-through-{{testStage}}",
+      "primary": true,
+      "required": true,
+      "kind": "test",
+      "excludeStages": [
+        "pa35",
+        "pa36"
+      ]
+    },
+    "priorThroughTests": {
+      "command": "n={{stageNumber}}; if [ \"$n\" -le 1 ]; then echo '===== ALL TESTS PASSED SUCCESSFULLY! (0/0) ====='; else make test-report-through-pa$((n - 1)); fi",
+      "required": true,
+      "kind": "test",
+      "excludeStages": [
+        "pa35",
+        "pa36"
+      ]
+    },
+    "stageTests": {
+      "command": "make test-{{testStage}}",
+      "primary": true,
+      "required": false,
+      "kind": "test",
+      "excludeStages": [
+        "pa35",
+        "pa36"
+      ]
+    },
+    "stageProgress": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}}",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ],
+      "excludeStages": [
+        "pa35",
+        "pa36"
+      ]
+    },
+    "stageProgressPreserved": {
+      "command": "ralph:current-stage-progress stageTests {{testStage}} mode=preserve",
+      "required": true,
+      "dependsOn": [
+        "priorThroughTests"
+      ],
+      "excludeStages": [
+        "pa35",
+        "pa36"
+      ]
+    },
+    "fileAudit": {
+      "command": "perl scripts/cppgm_file_audit.pl --stage {{testStage}} --paths dev",
+      "required": true
+    },
+    "pa35HostThrough34": {
+      "command": "make test-report-through-pa34",
+      "required": true,
+      "kind": "test",
+      "targetStage": "pa35",
+      "onlyStages": [
+        "pa35"
+      ]
+    },
+    "pa35SelfThroughPa5": {
+      "command": "make -C pa35 test-through-pa5 CXX=../dev/cppgm CPPGM_HOST_CXX=g++",
+      "required": true,
+      "dependsOn": [
+        "pa35HostThrough34"
+      ],
+      "kind": "generic",
+      "targetStage": "pa35",
+      "onlyStages": [
+        "pa35"
+      ]
+    },
+    "pa35PptokenInception": {
+      "command": "make -C pa35 compare-pptoken-inception CXX=../dev/cppgm CPPGM_HOST_CXX=g++",
+      "required": true,
+      "dependsOn": [
+        "pa35HostThrough34",
+        "pa35SelfThroughPa5"
+      ],
+      "kind": "generic",
+      "targetStage": "pa35",
+      "onlyStages": [
+        "pa35"
+      ]
+    },
+    "pa35Inception": {
+      "command": "make inception CXX=g++ CPPGM_HOST_CXX=g++",
+      "primary": true,
+      "required": true,
+      "dependsOn": [
+        "pa35HostThrough34",
+        "pa35SelfThroughPa5",
+        "pa35PptokenInception"
+      ],
+      "kind": "generic",
+      "targetStage": "pa35",
+      "onlyStages": [
+        "pa35"
+      ]
+    },
+    "pa36PriorThrough34": {
+      "command": "make test-report-through-pa34",
+      "kind": "test",
+      "required": true,
+      "targetStage": "pa34",
+      "onlyStages": [
+        "pa36"
+      ]
+    },
+    "pa36Smoke": {
+      "command": "make -C pa36 test-smoke",
+      "kind": "generic",
+      "required": true,
+      "targetStage": "pa36",
+      "onlyStages": [
+        "pa36"
+      ],
+      "dependsOn": [
+        "pa36PriorThrough34"
+      ]
+    },
+    "pa36Progress": {
+      "command": "make -C pa36 test-progress",
+      "kind": "test",
+      "primary": true,
+      "required": false,
+      "targetStage": "pa36",
+      "onlyStages": [
+        "pa36"
+      ]
+    },
+    "pa36StageProgress": {
+      "command": "ralph:current-stage-progress pa36Progress {{testStage}}",
+      "required": true,
+      "onlyStages": [
+        "pa36"
+      ],
+      "dependsOn": [
+        "pa36PriorThrough34",
+        "pa36Smoke"
+      ]
+    },
+    "pa36ProgressPreserved": {
+      "command": "ralph:current-stage-progress pa36Progress {{testStage}} mode=preserve",
+      "required": true,
+      "onlyStages": [
+        "pa36"
+      ],
+      "dependsOn": [
+        "pa36PriorThrough34",
+        "pa36Smoke"
+      ]
+    },
+    "pa36Inception": {
+      "command": "make inception CXX=g++ CPPGM_HOST_CXX=g++",
+      "kind": "generic",
+      "required": true,
+      "targetStage": "pa36",
+      "onlyStages": [
+        "pa36"
+      ],
+      "dependsOn": [
+        "pa36PriorThrough34"
+      ]
+    },
+    "pa36Final": {
+      "command": "make -C pa36 test",
+      "kind": "test",
+      "required": true,
+      "primary": true,
+      "targetStage": "pa36",
+      "onlyStages": [
+        "pa36"
+      ],
+      "dependsOn": [
+        "pa36PriorThrough34",
+        "pa36Inception"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "name": "implement",
+      "promptTemplate": "implement",
+      "goalTemplate": "implement-goal",
+      "promptTemplates": {
+        "pa35": "pa35-implement",
+        "pa36": "pa36-implement"
+      },
+      "goalTemplates": {
+        "pa35": "pa35-implement-goal",
+        "pa36": "pa36-implement-goal"
+      },
+      "checkpointOnRequiredChecks": true,
+      "checkpointPhase": "checkpointAudit",
+      "checkpointPhases": {
+        "pa36": "restructure"
+      },
+      "checkpointPhaseEvery": 3,
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "stageProgress",
+        "pa35HostThrough34",
+        "pa35SelfThroughPa5",
+        "pa35PptokenInception",
+        "pa35Inception",
+        "pa36PriorThrough34",
+        "pa36Smoke",
+        "pa36Progress",
+        "pa36StageProgress"
+      ]
+    },
+    {
+      "name": "checkpointAudit",
+      "promptTemplate": "checkpointAudit",
+      "goalTemplate": "checkpointAudit-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "priorThroughTests",
+        "stageTests",
+        "fileAudit",
+        "stageProgressPreserved",
+        "pa36PriorThrough34",
+        "pa36Smoke",
+        "pa36Progress",
+        "pa36ProgressPreserved"
+      ],
+      "promptTemplates": {
+        "pa36": "pa36-checkpointAudit"
+      },
+      "goalTemplates": {
+        "pa36": "pa36-checkpointAudit-goal"
+      }
+    },
+    {
+      "name": "restructure",
+      "promptTemplate": "pa36-restructure",
+      "goalTemplate": "pa36-restructure-goal",
+      "checkpointOnly": true,
+      "runWhenChecksPass": true,
+      "returnPhaseOnIncompletePrimary": "implement",
+      "checks": [
+        "fileAudit",
+        "pa36PriorThrough34",
+        "pa36Smoke",
+        "pa36Progress",
+        "pa36ProgressPreserved",
+        "pa36Inception"
+      ]
+    },
+    {
+      "name": "audit",
+      "promptTemplate": "audit",
+      "goalTemplate": "audit-goal",
+      "promptTemplates": {
+        "pa35": "pa35-audit",
+        "pa36": "pa36-audit"
+      },
+      "goalTemplates": {
+        "pa35": "pa35-audit-goal",
+        "pa36": "pa36-audit-goal"
+      },
+      "runWhenChecksPass": true,
+      "checks": [
+        "fileAudit",
+        "tests",
+        "pa35HostThrough34",
+        "pa35SelfThroughPa5",
+        "pa35PptokenInception",
+        "pa35Inception",
+        "pa36PriorThrough34",
+        "pa36Inception",
+        "pa36Final"
+      ]
+    }
+  ],
+  "extraStages": [
+    "pa35",
+    "pa36"
+  ],
+  "maxTurns": 500,
+  "stateBaseDir": "/home/vishvananda/work/.ralph",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "high",
+  "sandboxMode": "danger-full-access",
+  "approvalPolicy": "never",
+  "networkAccessEnabled": true,
+  "webSearchEnabled": true,
+  "sessionIsolation": {
+    "enabled": true,
+    "backend": "bwrap",
+    "readOnlyRoot": true,
+    "privateTmp": true,
+    "privateWriteDir": "/home/vishvananda/work/private/v9sol",
+    "privateWriteMaxBytes": 107374182400
+  },
+  "additionalDirectories": [],
+  "outputTailChars": 20000,
+  "loopGoalsEnabled": true,
+  "goalTokenBudget": null,
+  "freshThreadPerTurn": true,
+  "eventLogScope": "run",
+  "initialStage": "pa1",
+  "resourceLimits": {
+    "enabled": true,
+    "backend": "systemd-run",
+    "memoryMax": "64G",
+    "memorySwapMax": "0",
+    "oomGroup": false,
+    "cleanupTimeoutSec": 2
+  },
+  "stopAfterStage": "pa37",
+  "codexPath": "/usr/local/bin/codex",
+  "sourceRelease": {
+    "sourceRepository": "https://github.com/vishvananda/cppgm",
+    "sourceRevision": "bb09801053e48486beebe014071a71353ce9be0b",
+    "sourceTag": "v0.9.0",
+    "courseTag": "assignments-v9",
+    "assignmentsTag": "v0.9.0",
+    "requiredThrough": "pa37",
+    "optionalStages": [
+      "pa38"
+    ]
+  }
+}

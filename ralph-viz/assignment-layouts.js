@@ -28,6 +28,15 @@
       description: "V4's 34 stages followed by compiler optimization at pa35",
       stageCount: 35,
     }),
+    v9: Object.freeze({
+      id: "v9",
+      shortLabel: "V9",
+      label: "V9 assignment order",
+      description: "Integrated assembly at pa29; optimization at pa33/34, inception at pa35, performance at pa36, wasm at pa37; optional C at pa38",
+      stageCount: 38,
+      requiredStageCount: 37,
+      optionalStages: Object.freeze(["pa38"]),
+    }),
   });
 
   function normalizeLayoutId(value, fallback = "v2") {
@@ -43,9 +52,15 @@
     if (explicitLayout != null && String(explicitLayout).trim()) {
       return normalizeLayoutId(explicitLayout);
     }
-    return /^v5/i.test(String(runName ?? "")) ? "v5"
+    return /^v9(?!\d)/i.test(String(runName ?? "")) ? "v9"
+      : /^v[5-8](?!\d)/i.test(String(runName ?? "")) ? "v5"
       : /^v4/i.test(String(runName ?? "")) ? "v4"
       : /^v3/i.test(String(runName ?? "")) ? "v3" : "v2";
+  }
+
+  function preferredLayout(runs = []) {
+    const ids = runs.map(run => normalizeLayoutId(run.layout ?? run.assignmentLayout));
+    return ids.includes("v9") ? "v9" : ids.includes("v5") ? "v5" : "v3";
   }
 
   function descriptor(value, fallback = "v2") {
@@ -55,11 +70,18 @@
   function canonicalPaNumber(layout, nativePaNumber) {
     const number = Number.parseInt(nativePaNumber, 10);
     const id = normalizeLayoutId(layout);
+    if (id === "v9") {
+      if (!Number.isInteger(number) || number < 1 || number > 38) return null;
+      if (number === 29) return 41; // New landmarks append stable canonical IDs.
+      if (number === 37) return 42;
+      if (number === 38) return 43;
+      return canonicalPaNumber("v5", number >= 30 ? number - 1 : number);
+    }
     if (id === "v4" || id === "v5") {
       if (!Number.isInteger(number) || number < 1 || number > layouts[id].stageCount) return null;
       return number <= 3 ? number : number === 4 ? 5 : number + 5;
     }
-    if (number === 40) return null;
+    if (number >= 40) return null;
     if (!Number.isInteger(number) || normalizeLayoutId(layout) === "v3") {
       return number;
     }
@@ -75,6 +97,14 @@
   function nativePaNumber(layout, canonicalNumber) {
     const number = Number.parseInt(canonicalNumber, 10);
     const id = normalizeLayoutId(layout);
+    if (id === "v9") {
+      if (!Number.isInteger(number) || number < 1 || number > 43) return null;
+      if (number === 41) return 29;
+      if (number === 42) return 37;
+      if (number === 43) return 38;
+      const previous = nativePaNumber("v5", number);
+      return previous == null ? null : previous >= 29 ? previous + 1 : previous;
+    }
     if (id === "v4" || id === "v5") {
       if (!Number.isInteger(number) || number < 1 || number > (id === "v5" ? 40 : 39)) return null;
       // V3's standalone macro, recognition, namespace, and CY86 stages
@@ -82,7 +112,7 @@
       if (number === 4 || (number >= 6 && number <= 9)) return null;
       return number <= 3 ? number : number === 5 ? 4 : number - 5;
     }
-    if (number === 40) return null;
+    if (number >= 40) return null;
     if (!Number.isInteger(number) || normalizeLayoutId(layout) === "v3") {
       return number;
     }
@@ -148,7 +178,7 @@
     "Native backend", "Compile/link driver", "Exception metadata", "Object interoperability",
     "Host C++ ABI", "Hosted headers", "Heavy hosted headers", "Hosted runtime",
     "LowIR optimization", "Backend optimization", "Inception",
-    "Compiler optimization",
+    "Compiler optimization", "Integrated assembly", "WebAssembly", "C frontend (optional course assignment)",
   ];
 
   function milestone(canonicalStages, label = titles[canonicalStages[0] - 1]) {
@@ -165,13 +195,14 @@
     };
   }
 
-  function comparisonGroups(view, includeOptimization = false) {
+  function comparisonGroups(view, includeOptimization = false, includeV9 = false) {
     const optimization = includeOptimization ? [milestone([40], "PA35 · Compiler optimization (V5)")] : [];
     if (view === "v2" || view === "v3") {
       return [...Array.from({ length: 39 }, (_, index) => {
         const canonical = canonicalPaNumber(view, index + 1);
         return milestone([canonical], `PA${index + 1} · ${titles[canonical - 1]}`);
-      }), ...optimization];
+      }), ...(includeV9 ? [milestone([41])] : []), ...optimization,
+        ...(includeV9 ? [milestone([42]), milestone([43])] : [])];
     }
     const groups = [
       ...[1, 2, 3].map((pa) => milestone([pa])),
@@ -179,11 +210,18 @@
       milestone([6, 7, 8, 9], "Legacy-only work"),
       ...Array.from({ length: 30 }, (_, index) => milestone([index + 10])),
     ];
-    return view === "v4" || view === "v5" ? [...groups.map((group) => ({
+    if (includeV9) {
+      groups.splice(groups.findIndex(group => group.canonicalStages[0] === 34), 0, milestone([41]));
+    }
+    const additions = [...optimization, ...(includeV9 ? [milestone([42]), milestone([43])] : [])];
+    return view === "v4" || view === "v5" || view === "v9" ? [...groups.map((group) => ({
       ...group,
       label: group.legacy ? group.label
-        : `PA${nativePaNumber(view, group.canonicalStages.at(-1))} · ${group.label}`,
-    })), ...optimization] : [...groups, ...optimization];
+        : nativePaNumber(view, group.canonicalStages.at(-1)) == null ? group.label
+          : `PA${nativePaNumber(view, group.canonicalStages.at(-1))} · ${group.label}`,
+    })), ...additions.map(group => ({ ...group, label: view === "v9"
+      ? `PA${nativePaNumber(view, group.canonicalStages[0])} · ${titles[group.canonicalStages[0] - 1]}` : group.label }))]
+      : [...groups, ...additions];
   }
 
   function summaryStarted(summary) {
@@ -213,9 +251,10 @@
     // Export --through is always in canonical V3 numbering, never a count of
     // displayed groups (nor the native V2/V4/V5 assignment number).
     // Canonical PA40 is V5's additional compiler-optimization assignment.
-    const hasV5 = runs.some((run) => normalizeLayoutId(run.layout) === "v5");
-    const through = Math.min(40, paNumber(comparison?.through) ?? (hasV5 ? 40 : 39));
-    const groups = comparisonGroups(view, hasV5);
+    const hasV9 = runs.some((run) => normalizeLayoutId(run.layout) === "v9");
+    const hasV5 = hasV9 || runs.some((run) => normalizeLayoutId(run.layout) === "v5");
+    const through = Math.min(43, paNumber(comparison?.through) ?? (hasV9 ? 43 : hasV5 ? 40 : 39));
+    const groups = comparisonGroups(view, hasV5, hasV9);
     const included = groups.map((group) => group.canonicalStages.some((canonical) =>
       canonical <= through && runs.some((run) => byPa.has(nativePaNumber(run.layout, canonical)))));
     const lastIndex = included.lastIndexOf(true);
@@ -228,7 +267,7 @@
           .filter((number) => number != null))];
         return aggregateSources(stages.map((number) => {
           const canonical = canonicalPaNumber(sourceLayout, number);
-          const modern = sourceLayout === "v4" || sourceLayout === "v5";
+          const modern = sourceLayout === "v4" || sourceLayout === "v5" || sourceLayout === "v9";
           const specialTitle = modern && number === 8 ? "LowIR model, roundtrip and construction"
             : !modern && canonical === 13 ? "LowIR to CY86"
               : titles[canonical - 1];
@@ -265,6 +304,7 @@
     normalizeLayoutId,
     inferLayoutId,
     descriptor,
+    preferredLayout,
     canonicalPaNumber,
     nativePaNumber,
     sourcePaForTarget,

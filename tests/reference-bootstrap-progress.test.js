@@ -123,3 +123,14 @@ test("a successful fresh final proof certifies the complete build inventory", as
   assert.equal(progress.current.total, 238);
   assert.equal(progress.status, "pass");
 });
+
+test("V9 reference bootstrap retains its actual PA35 transport stage", async () => {
+  const b = await browser();
+  const record = phase("progress", 1, 236);
+  record.event.phaseStatus.stage = "pa35";
+  record.event.phaseStatus.testStatus.targetStage = "pa35";
+  record.event.phaseStatus.primaryCheck.testStatus.targetStage = "pa35";
+  const progress = b.buildAgentTestProgressState([record]).latest;
+  assert.equal(progress.stage, "pa35");
+  assert.equal(progress.current.total, 238);
+});

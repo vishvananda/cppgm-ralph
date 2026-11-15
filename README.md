@@ -251,16 +251,27 @@ last. It also snapshots the previously published catalogs under the bucket's
 `history/` prefix before replacing them. This keeps archived run pages
 available even though their source trajectories are no longer local.
 
-Set `"assignmentLayout": "v3"` or `"v4"` for the corresponding assignment
-order. Runs without this field default to V2, with `v3*` and `v4*` run names
-recognized as compatibility fallbacks. V4 has 34 stages: its inception PA34
-aligns with V3's PA39. Both comparison pages default to named capability
-groups, with V2/V3/V4 PA-order views available. V3's macro + preprocessor
-assignments combine against V4 PA4. Older recognition, namespace and CY86
-assignments form a shaded legacy-only group; their spending is retained even
-in V4 order. LowIR is explicitly an approximate match because its deliverable
-changed. Every native assignment contributes once: changing views does not
-change a full run's total cost or active/total agent time.
+Set `"assignmentLayout"` to `"v3"`, `"v4"`, `"v5"` or `"v9"` for the
+course's assignment order. V5 also covers the V6–V8 course. V9 inserts
+integrated assembly at PA29, moves optimization to PA33/34, inception to PA35
+and compiler performance to PA36, then adds PA37 wasm and optional PA38 C.
+Its layout recognizes all 38 stages; a student config can stop after required
+PA37. Explicit config takes precedence over run-name inference. Existing V2
+metadata and historical layouts retain their interpretation.
+
+Comparisons default to named capability groups, with native PA-order views.
+Older recognition, namespace and CY86 work stays in a legacy group. Stable
+canonical IDs preserve historical comparisons: PA40 is compiler performance;
+PA41/42/43 add assembly, wasm and C. V9 static exports default through PA43.
+LowIR remains an approximate match across old courses. Every native assignment
+contributes once to capability comparisons; changing views preserves its cost
+and active/total agent time. V9 completion uses PA37 without requiring PA38.
+
+The release-gated [V9 student scaffold](examples/v9sol/README.md) and
+[existing Rust port migration](examples/v9literal/README.md) are separate.
+Both check source/export tag provenance before changing anything, and neither
+starts a worker. The Rust port requires PA38 compatibility even though it is
+optional in the student course.
 
 Hover for native PA contributions, or select a chart point/the milestone
 details selector to inspect the original assignments. A combined group stays

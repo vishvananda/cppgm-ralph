@@ -224,3 +224,19 @@ test("run events learn the primary check and record its ladder summary as stage 
   assert.equal(progress[0].event.progress.passed, 102);
   assert.equal(progress[0].event.progress.total, 1418);
 });
+
+test("V9 bootstrap commands use PA35 and the renamed cppgm driver", () => {
+  const { executionCommand, registerStageCommand } = globalThis.RALPH_TEST_COMMAND_PROVENANCE;
+  registerStageCommand("make -C pa35 test", "pa35");
+  for (const command of ["make -C pa35 test-through-pa5 CXX=../dev/cppgm",
+    "make -C pa35 compare-cppgm-inception CXX=../dev/cppgm"]) {
+    const parsed = executionCommand(command);
+    assert.equal(parsed.kind, "inception");
+    assert.equal(parsed.stage, "pa35");
+  }
+  assert.equal(executionCommand("make -C pa35 test-through-pa5 CXX=g++"), null);
+  const progress = progressObservationFromSessionOutput("MATCH cppgm: identical\n", "now",
+    "make -C pa35 compare-cppgm-inception", 0);
+  assert.equal(progress.stage, "pa35");
+  assert.equal(progress.unitResults.inception, true);
+});

@@ -12,7 +12,25 @@ SETTINGS = json.loads((CONTROL / "settings.json").read_text()) if (CONTROL / "se
 ROOT = Path(SETTINGS.get("checkout", ".")).resolve()
 REFERENCE = Path(SETTINGS.get("reference", ".")).resolve()
 ARTIFACTS = Path(SETTINGS.get("artifacts", "/tmp/v5rust-checks"))
-TOOLS = ("pptoken", "posttoken", "ppexpr", "preproc", "cppgm++", "abimangle", "lowir", "lowiropt", "lowir2native")
+COURSE_LAYOUT = SETTINGS.get("course_layout", {})
+DRIVER_TOOL = COURSE_LAYOUT.get("driver_tool", "cppgm++")
+BOOTSTRAP_STAGE = COURSE_LAYOUT.get("bootstrap_stage", "pa34")
+CORRECTNESS_STAGES = tuple(COURSE_LAYOUT.get("correctness_stages", [f"pa{n}" for n in range(1, 34)]))
+DEBUG_STAGES = tuple(COURSE_LAYOUT.get("debug_stages", ["pa8", "pa32", "pa33"]))
+IR_OPT_STAGE = 33 if COURSE_LAYOUT.get("id") == "v9" else 32
+BACKEND_OPT_STAGE = IR_OPT_STAGE + 1
+TOOLS = ("pptoken", "posttoken", "ppexpr", "preproc", DRIVER_TOOL, "abimangle", "lowir", "lowiropt", "lowir2native")
+
+
+def primary_tool(number):
+    return {1: "pptoken", 2: "posttoken", 3: "ppexpr", 4: "preproc", 8: "lowir",
+            9: "abimangle", 24: "lowir2native", IR_OPT_STAGE: "lowiropt",
+            BACKEND_OPT_STAGE: "lowir2native"}.get(number, DRIVER_TOOL)
+
+
+def correctness_numbers(limit=None):
+    return [int(stage[2:]) for stage in CORRECTNESS_STAGES
+            if limit is None or int(stage[2:]) <= limit]
 
 
 def digest(data):

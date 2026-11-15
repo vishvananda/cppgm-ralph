@@ -60,12 +60,12 @@ const CODEX_SESSION_INDEX_TTL_MS = 2_000;
 const RUN_RESPONSE_TURN_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_USAGE_REFRESH_INTERVAL_MS = 15 * 1000;
 const RUN_USAGE_CACHE_VERSION = 30;
-const COMPARE_PA_COSTS_CACHE_VERSION = 3;
+const COMPARE_PA_COSTS_CACHE_VERSION = 4;
 const RUN_USAGE_CACHE_DIR = "usage-cache";
 const RUN_STRUCTURE_CACHE_VERSION = 2;
 const CODEX_SESSION_WINDOW_CACHE_VERSION = 21;
 const CODEX_SESSION_WINDOW_CACHE_DIR = "session-window-cache";
-const CODEX_SESSION_PROGRESS_CACHE_VERSION = 21;
+const CODEX_SESSION_PROGRESS_CACHE_VERSION = 22;
 const CODEX_SESSION_PROGRESS_CACHE_DIR = "session-progress-cache";
 const FILE_CHANGE_DIFF_MERGE_WINDOW_MS = 30 * 1000;
 const RALPH_DEFAULT_MODEL = "gpt-5.3-codex";
@@ -5474,12 +5474,12 @@ export function progressObservationFromSessionOutput(output, recordedAt, command
     }
     for (const unit of ["pptoken", "inception"]) {
       if (!commandInfo.units.includes(unit)) continue;
-      const tool = unit === "pptoken" ? "pptoken" : "cppgm\\+\\+";
+      const tool = unit === "pptoken" ? "pptoken" : "cppgm(?:\\+\\+)?";
       if (new RegExp(`^MATCH ${tool}:`, "m").test(output)) unitResults[unit] = true;
       else if (/^mismatch:/m.test(output)) unitResults[unit] = false;
     }
     if (!Object.keys(unitResults).length) return null;
-    return normalizeProgressObservation({ recordedAt, stage: "pa34", total: 7, unitResults,
+    return normalizeProgressObservation({ recordedAt, stage: /^MATCH cppgm(?::|$)/m.test(output) ? "pa35" : commandInfo.stage, total: 7, unitResults,
       passed: Object.values(unitResults).filter(Boolean).length,
       status: Object.values(unitResults).every(Boolean) ? "pass" : "fail" });
   }
@@ -7902,8 +7902,6 @@ async function readLiveComparison(rawIds, force = false) {
     try {
       const published = await readPublishedComparison(force);
       if (!ids.length) return mergePublishedAndLocalComparisons(published, []);
-      const through = `pa${Math.max(40,
-        Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0)}`;
       const metadata = await Promise.all(ids.map(async (id) => {
         const runRef = safeRunRef(id);
         const [stat, configured] = await Promise.all([
@@ -7911,6 +7909,10 @@ async function readLiveComparison(rawIds, force = false) {
         ]);
         return { runRef, stat, configured };
       }));
+      const hasV9 = metadata.some(item => item.configured.assignmentLayout === "v9") ||
+        published?.runs?.some(run => ASSIGNMENT_LAYOUT.normalizeLayoutId(run.layout) === "v9");
+      const through = `pa${Math.max(hasV9 ? 43 : 40,
+        Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0)}`;
       // Whole-source translation has no PA cost milestones. Do not attribute its
       // entire history to the transport stage or scan it as a PA comparison.
       const paIds = ids.filter((_, index) => metadata[index].configured.progressModel?.kind !== 'source-files');
@@ -7963,12 +7965,13 @@ async function readRunComparison(rawId, runRef, force = false) {
       const published = await readPublishedComparison(force);
       // A published baseline may predate PA35 (canonical PA40). Local work
       // must use the same full comparison range as the combined endpoint.
-      const through = `pa${Math.max(40,
+      const configured = await configuredRunMetadataForShape(runRef.shape);
+      const hasV9 = configured.assignmentLayout === "v9" ||
+        published?.runs?.some(run => ASSIGNMENT_LAYOUT.normalizeLayoutId(run.layout) === "v9");
+      const through = `pa${Math.max(hasV9 ? 43 : 40,
         Number.parseInt(String(published?.through ?? "").replace(/^pa/, ""), 10) || 0)}`;
-      const [local, stat, configured] = await Promise.all([
-        buildLocalRunComparison(rawId, through),
-        fs.stat(runRef.filePath),
-        configuredRunMetadataForShape(runRef.shape),
+      const [local, stat] = await Promise.all([
+        buildLocalRunComparison(rawId, through), fs.stat(runRef.filePath),
       ]);
       if (local?.runs?.[0]) {
         if (configured.model) {

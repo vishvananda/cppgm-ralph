@@ -9,13 +9,13 @@ import sys
 import time
 
 import clone_bootstrap as bootstrap
-from clone_common import (ARTIFACTS, CONTROL, REFERENCE, TOOLS, candidate_path,
+from clone_common import (BOOTSTRAP_STAGE, DRIVER_TOOL, ARTIFACTS, CONTROL, REFERENCE, TOOLS, candidate_path,
                           file_digest, run, write_json)
 
 
 def prepare():
     work = bootstrap.WORK
-    (work / "pa34").mkdir(parents=True, exist_ok=True)
+    (work / BOOTSTRAP_STAGE).mkdir(parents=True, exist_ok=True)
     for name in ("dev", "scripts", "shared"):
         target = work / name
         if target.exists() or target.is_symlink():
@@ -23,11 +23,11 @@ def prepare():
                 raise RuntimeError(f"unexpected bootstrap source path: {target}")
         else:
             target.symlink_to(REFERENCE / name, target_is_directory=True)
-    shutil.copyfile(REFERENCE / "pa34/Makefile", work / "pa34/Makefile")
+    shutil.copyfile(REFERENCE / BOOTSTRAP_STAGE / "Makefile", work / BOOTSTRAP_STAGE / "Makefile")
 
 
 def sources():
-    command = bootstrap.recipe(REFERENCE / "dev/cppgm++", "ralph-probe-inventory")
+    command = bootstrap.recipe(REFERENCE / "dev" / DRIVER_TOOL, "ralph-probe-inventory")
     command.append("--eval=ralph-probe-inventory: ; @printf 'shared %s\\n' $(INCEPTION_ALL_SHARED_SOURCES); printf 'entry %s\\n' $(CHECKPOINTS)")
     code, out, err = run(command, timeout=120)
     if code:
@@ -49,11 +49,11 @@ def sources():
 def compile_source(source, compiler, directory, label):
     # Both compilers write the same logical paths. These are isolated probe
     # outputs, never inputs to the PA34 generations or final proof.
-    probe = bootstrap.WORK / "obj/pa34/parity-probe"
+    probe = bootstrap.WORK / f"obj/{BOOTSTRAP_STAGE}/parity-probe"
     shutil.rmtree(probe, ignore_errors=True)
     command = bootstrap.recipe(compiler, "probe-self-object") + [
         "SOURCE=../" + source, "PROBE_CXX=" + str(compiler),
-        "PROBE_OBJ_ROOT=../obj/pa34/parity-probe",
+        f"PROBE_OBJ_ROOT=../obj/{BOOTSTRAP_STAGE}/parity-probe",
         "PROBE_TIMEOUT_SEC=120", "INCEPTION_OBJECT_BUILD_JOBS=1"]
     code, out, err = run(command, timeout=180)
     log = directory / (label + ".log")
@@ -61,7 +61,7 @@ def compile_source(source, compiler, directory, label):
     matches = re.findall(rb"^PROBE object: (.+)$", out, re.MULTILINE)
     object_hash = None
     if code == 0 and len(matches) == 1:
-        obj = (bootstrap.WORK / "pa34" / matches[0].decode()).resolve()
+        obj = (bootstrap.WORK / BOOTSTRAP_STAGE / matches[0].decode()).resolve()
         if not obj.is_relative_to(probe.resolve()):
             raise RuntimeError("probe object escaped its isolated output root")
         if obj.is_file():
@@ -79,10 +79,10 @@ def compare_source(source, directory):
     if file_digest(REFERENCE / source) != manifest["oracle_sources"][source]:
         raise RuntimeError("frozen oracle source changed")
     directory.mkdir(parents=True, exist_ok=True)
-    reference = compile_source(source, REFERENCE / "dev/cppgm++", directory, "reference")
+    reference = compile_source(source, REFERENCE / "dev" / DRIVER_TOOL, directory, "reference")
     if reference["exit"] != 0 or reference["object_sha256"] is None:
         return {"source": source, "status": "oracle-failed", "reference": reference}
-    candidate = compile_source(source, candidate_path("cppgm++"), directory, "candidate")
+    candidate = compile_source(source, candidate_path(DRIVER_TOOL), directory, "candidate")
     matched = (candidate["exit"] == 0 and candidate["object_sha256"] == reference["object_sha256"])
     return {"source": source, "status": "match" if matched else "mismatch",
             "reference": reference, "candidate": candidate}
@@ -103,8 +103,8 @@ def diagnose(selected=(), *, limit=4, start_after=None):
     directory.mkdir(parents=True)
     report = {"kind": "bootstrap-diagnostic", "acceptance_claim": False,
               "final_acceptance_required": True, "manifest_sha256": file_digest(CONTROL / "manifest.json"),
-              "reference_sha256": file_digest(REFERENCE / "dev/cppgm++"),
-              "candidate_sha256": file_digest(candidate_path("cppgm++")),
+              "reference_sha256": file_digest(REFERENCE / "dev" / DRIVER_TOOL),
+              "candidate_sha256": file_digest(candidate_path(DRIVER_TOOL)),
               "selected_total": len(inventory), "results": []}
     for source in inventory[:limit]:
         result = compare_source(source, directory / str(len(report["results"])))

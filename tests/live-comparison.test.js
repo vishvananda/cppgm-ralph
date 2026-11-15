@@ -7,10 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("combined and individual comparisons include PA35 beyond the published range", { timeout: 30000 }, async (t) => {
+for (const layout of ["v5", "v9"]) test(`${layout} combined and individual comparisons include later work beyond the published range`, { timeout: 30000 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-live-comparison-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const shapes = ["v5sol-gpt-6.1-sol-high", "v5rust-gpt-6.1-sol-high"];
+  const shapes = [`${layout}sol-gpt-6.1-sol-high`, `${layout}rust-gpt-6.1-sol-high`];
+  const lastStage = layout === "v9" ? "pa38" : "pa35";
+  const through = layout === "v9" ? "pa43" : "pa40";
   for (const [index, shape] of shapes.entries()) {
     const eventsDir = path.join(root, ".ralph", shape, "events");
     await fs.mkdir(eventsDir, { recursive: true });
@@ -27,16 +29,16 @@ test("combined and individual comparisons include PA35 beyond the published rang
         usage: { input_tokens: 1000 * (index + 1), cached_input_tokens: 500, output_tokens: 100 },
       }),
       record("2026-10-12T00:11:00Z", "ralph.phase-status", {
-        action: "turn-start", phaseStatus: { stage: "pa35", phase: "implement", allRequiredPassed: false },
+        action: "turn-start", phaseStatus: { stage: lastStage, phase: "implement", allRequiredPassed: false },
       }, 2),
-      record("2026-10-12T00:11:00Z", "ralph.prompt", { prompt: "Implement pa35" }, 2),
+      record("2026-10-12T00:11:00Z", "ralph.prompt", { prompt: `Implement ${lastStage}` }, 2),
       record("2026-10-12T00:12:00Z", "turn.completed", {
         usage: { input_tokens: 2000, cached_input_tokens: 500, output_tokens: 200 },
       }, 2),
     ];
     await fs.writeFile(path.join(eventsDir, "run.jsonl"), events.map(JSON.stringify).join("\n") + "\n");
     await fs.writeFile(path.join(root, `${shape.split("-")[0]}.config.json`), JSON.stringify({
-      name: shape.split("-")[0], model: "gpt-6.1-sol", reasoningEffort: "high", assignmentLayout: "v5",
+      name: shape.split("-")[0], model: "gpt-6.1-sol", reasoningEffort: "high", assignmentLayout: layout,
     }));
   }
   let publishedRequests = 0;
@@ -91,12 +93,12 @@ test("combined and individual comparisons include PA35 beyond the published rang
   assert.deepEqual(data.runs.map(run => run.label), [
     "baseline", `${shapes[1]} (local)`, `${shapes[0]} (local)`,
   ]);
-  assert.equal(data.runs[1].layout.id, "v5");
-  assert.equal(data.runs[2].layout.id, "v5");
+  assert.equal(data.runs[1].layout.id, layout);
+  assert.equal(data.runs[2].layout.id, layout);
   assert.deepEqual(data.localRunIndices, [1, 2]);
   assert.equal(data.rows[0].runs[0].cost, 7);
   assert(data.rows[0].runs[1].cost > data.rows[0].runs[2].cost);
-  assert.equal(data.through, "pa40");
+  assert.equal(data.through, through);
   const reversed = new URLSearchParams();
   for (const shape of [...shapes].reverse()) reversed.append("run", `${shape}/run`);
   const cached = await (await fetch(`${base}/api/comparison?${reversed}`)).json();
@@ -105,9 +107,9 @@ test("combined and individual comparisons include PA35 beyond the published rang
   const individualResponse = await fetch(`${base}/api/run-comparison/${encodeURIComponent(`${shapes[0]}/run`)}`);
   const individual = await individualResponse.json();
   assert.equal(individualResponse.status, 200, `${JSON.stringify(individual)} ${stderr}`);
-  assert.equal(individual.through, "pa40", "the published cutoff cannot hide local PA35 (canonical PA40)");
-  const singlePa35 = individual.rows.find(row => row.pa === "pa35").runs[individual.localRunIndex];
-  const combinedPa35 = data.rows.find(row => row.pa === "pa35").runs[2];
+  assert.equal(individual.through, through, "the published cutoff cannot hide local PA35 (canonical PA40)");
+  const singlePa35 = individual.rows.find(row => row.pa === lastStage).runs[individual.localRunIndex];
+  const combinedPa35 = data.rows.find(row => row.pa === lastStage).runs[2];
   assert(singlePa35.cost > 0, "include optimization work in the individual graph");
   assert.equal(singlePa35.cost, combinedPa35.cost);
   assert.equal(singlePa35.durationMs, combinedPa35.durationMs);
