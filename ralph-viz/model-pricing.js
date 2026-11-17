@@ -6,10 +6,13 @@
   // The run's short Claude Code alias resolves to Opus 5.5. Use its existing
   // card for live estimates; completed provider accounting still takes priority.
   const MODEL_ALIASES = Object.freeze({ opus: "claude-opus-5-5" });
+  // GPT-6.2 Sol retains GPT-6.1 Sol's API rates.
+  const solRates = Object.freeze({ input: 2.00, cachedInput: 0.10, output: 10.00 });
   const rates = Object.freeze({
     // Standard short-context API-equivalent estimate (USD per 1M tokens).
-    // gpt-6.1-sol rates supplied by the user (2026-09-29).
-    "gpt-6.1-sol": Object.freeze({ input: 2.00, cachedInput: 0.10, output: 10.00 }),
+    "gpt-6.2-astra": Object.freeze({ input: 8.00, cachedInput: 0.40, output: 40.00 }),
+    "gpt-6.2-sol": solRates,
+    "gpt-6.1-sol": solRates,
     // https://developers.openai.com/api/docs/pricing (2026-09-23)
     "gpt-6-astra": Object.freeze({ input: 10.00, cachedInput: 1.00, output: 50.00 }),
     "gpt-6-sol": Object.freeze({ input: 2.00, cachedInput: 0.20, output: 10.00 }),

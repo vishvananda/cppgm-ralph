@@ -20,6 +20,19 @@ test("new Sol, Luna, and Opus rates use the standard short-context cards", () =>
   assert.equal(pricing.estimateCost(usage, "claude-opus-5-5"), 4.1);
 });
 
+test("GPT-6.2 rates price uncached input, cached input and output", () => {
+  const usage = { input_tokens: 2_000_000, cached_input_tokens: 1_000_000, output_tokens: 1_000_000 };
+  assert.equal(pricing.estimateCost(usage, "gpt-6.2-astra"), 48.4);
+  assert.equal(pricing.estimateCost(usage, "gpt-6-astra"), 61);
+  const oldSol = pricing.attributeUsage(usage, "gpt-6.1-sol");
+  const newSol = pricing.attributeUsage(usage, "gpt-6.2-sol");
+  assert.deepEqual(pricing.costBreakdown(pricing.addUsage(oldSol, newSol))
+    .map(({ model, cost_usd }) => [model, cost_usd]), [
+    ["gpt-6.1-sol", 12.1],
+    ["gpt-6.2-sol", 12.1],
+  ]);
+});
+
 test("the Opus CLI alias preserves provider cost and estimates live usage", () => {
   const usage = { input_tokens: 1000, cached_input_tokens: 500, output_tokens: 100 };
   assert.equal(pricing.isAnthropicModel("opus"), true);
