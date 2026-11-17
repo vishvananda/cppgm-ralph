@@ -330,14 +330,14 @@
   "codexPath": "/usr/local/bin/codex",
   "sourceRelease": {
     "sourceRepository": "https://github.com/vishvananda/cppgm",
-    "sourceRevision": "c9b05c4c0f7bb1294c717551c61145940b21125e",
-    "sourceTag": "v0.9.1",
+    "sourceRevision": "0785eb82196d630572f71a1967b3aa589dce33d3",
+    "sourceTag": "v0.9.6",
     "courseTag": "assignments-v9",
     "assignmentsTag": null,
     "requiredThrough": "pa37",
     "optionalStages": [
       "pa38"
     ],
-    "assignmentsRevision": "57072c63636274eed3088da8ae3ac1164478117a"
+    "assignmentsRevision": "ddc1427a8daf7016dcffb7e28c8a60aaa3a0a5db"
   }
 }

@@ -1,8 +1,8 @@
 # V9 Sol release-gated scaffold
 
-Prepared for cppgm **v0.9.1**, source
-`c9b05c4c0f7bb1294c717551c61145940b21125e`, and exported assignments
-`57072c63636274eed3088da8ae3ac1164478117a`. Its reference manifest names
+Prepared for cppgm **v0.9.6**, source
+`0785eb82196d630572f71a1967b3aa589dce33d3`, and exported assignments
+`ddc1427a8daf7016dcffb7e28c8a60aaa3a0a5db`. Its reference manifest names
 that exact source. The immutable release tag must match; the release must
 be a descendant of the `assignments-v9` course base. An explicit exported
 commit is accepted when no matching assignments version tag exists; its
@@ -27,9 +27,9 @@ separate source/export checkouts, then prepare a reviewable migration:
 ```sh
 python3 scripts/prepare-v9sol.py --source ~/cppgm-extended \
   --assignments ~/cppgm-assignments-release \
-  --version v0.9.1 \
-  --source-revision c9b05c4c0f7bb1294c717551c61145940b21125e \
-  --assignments-revision 57072c63636274eed3088da8ae3ac1164478117a \
+  --version v0.9.6 \
+  --source-revision 0785eb82196d630572f71a1967b3aa589dce33d3 \
+  --assignments-revision ddc1427a8daf7016dcffb7e28c8a60aaa3a0a5db \
   --output /mnt/vizier/v9sol-prepared
 ```
 
