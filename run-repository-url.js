@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 const ARCHIVED_REPOSITORIES = new Map([
   "trusted", "opus", "mini", "fable", "luna", "v3opus", "v3codex",
   "v3multi", "v3relay", "v4codex", "v4deep", "v4luna", "v4strands",
-  "v4unreal", "v5sol-batched", "v5scratch", "v6sol", "v6opus",
+  "v4unreal", "v5sol", "v5sol-backend", "v5sol-batched", "v5scratch", "v5rust", "v6sol", "v6opus",
 ].map(name => [name, `https://github.com/vishvananda/cppgm-run-${name}`]));
 
 export function repositoryRunPrefix(shape) {
