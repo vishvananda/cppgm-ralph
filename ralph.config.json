@@ -13,6 +13,7 @@
   "outputTailChars": 20000,
   "codexPath": "codex",
   "loopGoalsEnabled": true,
+  "compilerRecoveryOnSafetyStop": true,
   "goalTokenBudget": null,
   "useExistingWorkdir": false
 }

@@ -1,7 +1,15 @@
 import './ralph-viz/turn-lifecycle.js';
 
+export function isCodexSafetyStop(error) {
+  const info = error?.codexErrorInfo ?? error?.codex_error_info;
+  const message = typeof error === 'string' ? error : String(error?.message ?? '');
+  return info === 'cyberPolicy' || info === 'cyber_policy' ||
+    /^This content was flagged for possible cybersecurity risk\./i.test(message.trim());
+}
+
 // These are provider failures, not compiler/tool diagnostics or model blockers.
 export function isCodexProviderInterruption(error) {
+  if (isCodexSafetyStop(error)) return false;
   const message = typeof error === 'string' ? error : error?.message ?? '';
   const info = error?.codexErrorInfo ?? error?.codex_error_info;
   return globalThis.RALPH_TURN_LIFECYCLE.isCodexTransientProviderMessage(message) ||

@@ -115,6 +115,15 @@ cached login as described in the [official authentication documentation](https:/
 Failed attempts retain their phase for
 resumption but stop the viz's live clock; elapsed attempt time is preserved,
 excluding downtime before a retry.
+The default compiler configuration and the `v9literal` and `v9sol` presets
+enable `compilerRecoveryOnSafetyStop`.
+If Codex stops a turn for cyber safety, Ralph records the failed attempt and
+starts one fresh Codex thread for the same Ralph turn. The recovery prompt and
+goal restrict work to the original compiler assignment and direct the agent
+to choose a different compiler approach and leave cybersecurity work aside.
+A second safety stop on that turn ends the run. Other configurations can
+enable this behavior for their compiler assignments with
+`"compilerRecoveryOnSafetyStop": true`.
 For native Codex loop goals, a final message or `turn.completed` event is not
 goal completion. Ralph keeps the same app-server, process namespace and cgroup
 alive across native continuations, so background commands and their session

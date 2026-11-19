@@ -60,8 +60,9 @@ test("goal outputs support direct JSON and Code Mode text blocks, with thread va
   assert.equal(codexSessionTaskCompletion([event(1000,"task_complete",{error:{codex_error_info:"usage_limit_exceeded"}})],options).status,"usage_limit");
 });
 
-for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "capacity-retry", "capacity-restart", "blocked", "missing", "verify-error", "exhausted", "restart", "auth-restart", "reopened", "interactive-request"]) {
+for (const scenario of ["active-exit", "native-continuation", "native-isolation", "native-private-write", "transport-retry", "capacity-retry", "capacity-restart", "blocked", "missing", "verify-error", "exhausted", "restart", "auth-restart", "reopened", "interactive-request", "compiler-recovery", "compiler-recovery-stopped"]) {
   test(`native Codex goal subprocess: ${scenario}`, async (t) => {
+    const compilerRecovery = scenario.startsWith("compiler-recovery");
     const privateWrite = scenario === "native-private-write";
     const isolated = scenario === "native-isolation" || privateWrite;
     if (isolated && (!process.env.XDG_RUNTIME_DIR || spawnSync("bwrap",["--version"]).status !== 0)) {
@@ -88,7 +89,8 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     await fs.writeFile(provider, fakeCodexSource(providerSettings),{mode:0o755});
     const config=path.join(root,"config.json");
     await fs.writeFile(config,JSON.stringify({name:"goal-test",provider:"codex",model:"fake",reasoningEffort:"high",
-      workdir,useExistingWorkdir:true,stateBaseDir,codexPath:provider,loopGoalsEnabled:true,freshThreadPerTurn:true,
+      workdir,useExistingWorkdir:true,stateBaseDir,codexPath:provider,loopGoalsEnabled:true,freshThreadPerTurn:!compilerRecovery,
+      compilerRecoveryOnSafetyStop:compilerRecovery,
       eventLogScope:"run",maxTurns:2,initialStage:"pa1",additionalDirectories:privateWrite?[]:[root],
       resourceLimits:isolated?{enabled:true,memoryMax:"512M",cleanupTimeoutSec:0.2}:false,
       sessionIsolation:privateWrite?{enabled:true,privateWriteDir:privateRoot}:isolated,
@@ -98,7 +100,7 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
       env:{...process.env,RALPH_CONFIG:config,CODEX_HOME:codexDir,RALPH_RESOURCE_LIMITS:isolated?"1":"0",RALPH_SESSION_ISOLATION:isolated?"1":"0",RALPH_CODEX_INCOMPLETE_TASK_RETRY_MAX:"2",RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1",
         ...(scenario==='capacity-restart'?{RALPH_PROVIDER_TRANSIENT_RETRY_MAX:'1'}:{})}};
     const run=spawnSync(process.execPath,[path.resolve("ralph.js")],runOptions);
-    const succeeds=["active-exit","native-continuation","native-isolation","native-private-write","transport-retry","capacity-retry"].includes(scenario);
+    const succeeds=["active-exit","native-continuation","native-isolation","native-private-write","transport-retry","capacity-retry","compiler-recovery"].includes(scenario);
     assert.equal(run.status,succeeds?0:1,run.stdout+"\n"+run.stderr);
     if (privateWrite) {
       assert.equal(await fs.readFile(path.join(privateRoot,"tmp","check-scratch"),"utf8"),"check");
@@ -107,10 +109,10 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     const traces=(await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
     const invocations=traces.filter(r=>r.kind==="exec");
     if (privateWrite) assert.match(invocations[0].input, /Storage: checkout and scratch share .*Ralph state is read-only\./s);
-    assert.equal(invocations.length,["active-exit","transport-retry","capacity-retry","capacity-restart"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
-    assert.equal(traces.filter(r=>r.method==="thread/start").length,1,"incomplete work resumes even with freshThreadPerTurn");
-    assert.equal(traces.filter(r=>r.method==="thread/goal/set" && r.params.objective != null).length,1,"never reset or forcibly complete the model's goal");
-    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,["auth-restart","capacity-retry","capacity-restart"].includes(scenario)?2:1);
+    assert.equal(invocations.length,compilerRecovery||["active-exit","transport-retry","capacity-retry","capacity-restart"].includes(scenario)?2:["exhausted","restart"].includes(scenario)?3:1);
+    assert.equal(traces.filter(r=>r.method==="thread/start").length,compilerRecovery?2:1);
+    assert.equal(traces.filter(r=>r.method==="thread/goal/set" && r.params.objective != null).length,compilerRecovery?2:1);
+    assert.equal(traces.filter(r=>r.method==="thread/goal/set").length,compilerRecovery||["auth-restart","capacity-retry","capacity-restart"].includes(scenario)?2:1);
     if(scenario==="capacity-retry") {
       assert.equal(invocations[1].goal.status,'active');
       assert.equal(invocations[1].goal.tokensUsed,423);
@@ -131,6 +133,18 @@ for (const scenario of ["active-exit", "native-continuation", "native-isolation"
     const events=(await fs.readFile(path.join(stateDir,"events","run.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
     assert.ok(events.filter(r=>r.eventType==="ralph.prompt").every(r=>r.turnNumber===1));
     assert.equal(events.some(r=>r.eventType==="ralph.goal"&&r.event.action==="complete"),succeeds);
+    if (compilerRecovery) {
+      const [stopped, recovery] = invocations;
+      assert.notEqual(recovery.threadId, stopped.threadId);
+      assert.match(recovery.input, /^A previous attempt ended at a safety stop\./);
+      assert.match(recovery.input, /avoid all cybersecurity-related work/);
+      assert.doesNotMatch(recovery.input, /Clean up `audit`|request timed out/);
+      assert.ok(recovery.goal.objective.endsWith(stopped.goal.objective));
+      const failed = events.filter(r => r.eventType === "ralph.turn-failed");
+      assert.deepEqual(failed.map(r => r.threadId), succeeds ? [stopped.threadId] : [stopped.threadId, recovery.threadId]);
+      assert.ok(failed.every(r => r.event.error.kind === "codex_safety_stop"));
+      assert.equal(events.filter(r => r.event?.reason === "compiler_safety_recovery").length, 1);
+    }
     if (scenario.startsWith("native-")) {
       assert.equal(events.filter(r=>r.eventType==='ralph.turn-failed').length,0);
       assert.equal(events.filter(r=>r.eventType==='turn.completed').length,1);
@@ -234,18 +248,18 @@ const fs=require('node:fs'),path=require('node:path'),readline=require('node:rea
 const {execFileSync,spawn}=require('node:child_process');
 const {scenario,workdir,codexDir,trace,goalFile,stateDir,checkCounter}=${JSON.stringify(settings)};
 const native=scenario.startsWith('native-');
-const threadId=${JSON.stringify(threadId)};
+let threadId=${JSON.stringify(threadId)};
 const emit=x=>console.log(JSON.stringify(x));
 const history=()=>fs.existsSync(trace)?fs.readFileSync(trace,'utf8').trim().split('\\n').map(JSON.parse):[];
 const log=x=>fs.appendFileSync(trace,JSON.stringify(x)+'\\n');
 const getGoal=()=>fs.existsSync(goalFile)?JSON.parse(fs.readFileSync(goalFile,'utf8')):null;
 const saveGoal=g=>fs.writeFileSync(goalFile,JSON.stringify(g));
-const session=path.join(codexDir,'sessions','rollout-'+threadId+'.jsonl');
-const record=(type,data={})=>fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'event_msg',payload:{type,...data}})+'\\n');
-const response=payload=>fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload})+'\\n');
+const session=()=>path.join(codexDir,'sessions','rollout-'+threadId+'.jsonl');
+const record=(type,data={})=>fs.appendFileSync(session(),JSON.stringify({timestamp:new Date().toISOString(),type:'event_msg',payload:{type,...data}})+'\\n');
+const response=payload=>fs.appendFileSync(session(),JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload})+'\\n');
 const notify=(method,params)=>emit({method,params:{threadId,...params}});
 const end=(text,turnId)=>{
- fs.appendFileSync(session,JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})+'\\n');
+ fs.appendFileSync(session(),JSON.stringify({timestamp:new Date().toISOString(),type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})+'\\n');
  record('task_complete',{turn_id:turnId,last_agent_message:text});
  notify('turn/completed',{turn:{id:turnId,status:'completed',error:null}});
 };
@@ -267,6 +281,10 @@ async function runTurn(r) {
  }
  if(scenario==='transport-retry'&&!attempt) {
   notify('error',{willRetry:false,error:{message:'request timed out'}});return;
+ }
+ if(scenario==='compiler-recovery-stopped'||(scenario==='compiler-recovery'&&!attempt)) {
+  saveGoal({...getGoal(),status:'blocked'});
+  notify('error',{willRetry:false,error:{message:'request timed out',codexErrorInfo:'cyberPolicy'}});return;
  }
  if((scenario==='capacity-retry'&&!attempt)||(scenario==='capacity-restart'&&attempt<2)) {
   saveGoal({...getGoal(),status:'blocked',tokensUsed:423,timeUsedSeconds:17,updatedAt:Date.now()/1000});
@@ -308,8 +326,12 @@ async function runTurn(r) {
  if(process.argv.includes('app-server')) {
   for await(const line of readline.createInterface({input:process.stdin})) {
    const r=JSON.parse(line);log(r);if(r.id==null)continue;
+   if(r.params?.threadId)threadId=r.params.threadId;
    let result={};
-   if(r.method==='thread/start')result={thread:{id:threadId}};
+   if(r.method==='thread/start') {
+    if(history().filter(x=>x.method==='thread/start').length>1)threadId='22222222-2222-4222-8222-222222222222';
+    result={thread:{id:threadId}};
+   }
    if(r.method==='thread/resume')result={thread:{id:threadId,status:{type:'idle'}}};
    if(r.method==='turn/start') {await runTurn(r);continue;}
    if(r.method==='thread/goal/clear')saveGoal(null);

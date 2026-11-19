@@ -228,6 +228,7 @@
   "loopGoalsEnabled": true,
   "goalTokenBudget": null,
   "freshThreadPerTurn": true,
+  "compilerRecoveryOnSafetyStop": true,
   "eventLogScope": "run",
   "resourceLimits": {
     "enabled": true,

@@ -4,9 +4,17 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { isCodexProviderInterruption, isCodexSafetyStop } from "../codex-provider-recovery.js";
 import "../ralph-viz/turn-lifecycle.js";
 
 const lifecycle = globalThis.RALPH_TURN_LIFECYCLE;
+
+test("Codex safety stops are distinct from retryable provider failures", () => {
+  assert.equal(isCodexSafetyStop({ codexErrorInfo: "cyberPolicy" }), true);
+  assert.equal(isCodexSafetyStop("This content was flagged for possible cybersecurity risk."), true);
+  assert.equal(isCodexSafetyStop("Compiler test mentions cybersecurity risk."), false);
+  assert.equal(isCodexProviderInterruption({ codex_error_info: "cyber_policy", message: "request timed out" }), false);
+});
 
 test("reconnect notices and terminal transport failures are classified narrowly", () => {
   for (const message of ["Reconnecting... 2/5 (request timed out)", "Reconnecting… 5/5 (connection reset)"]) {
@@ -24,7 +32,7 @@ test("reconnect notices and terminal transport failures are classified narrowly"
   }
 });
 
-for (const scenario of ["reconnect-success", "terminal-retry", "eof-retry", "process-retry", "exhausted", "auth"]) {
+for (const scenario of ["reconnect-success", "terminal-retry", "eof-retry", "process-retry", "exhausted", "auth", "safety", "compiler-recovery"]) {
   test(`Codex subprocess recovery: ${scenario}`, async (t) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-codex-recovery-"));
     t.after(() => fs.rm(root, {recursive:true,force:true}));
@@ -49,13 +57,24 @@ const fs = require('node:fs');
 const trace = ${JSON.stringify(trace)};
 const scenario = ${JSON.stringify(scenario)};
 (async () => {
-  for await (const chunk of process.stdin) {}
+  let prompt = '';
+  for await (const chunk of process.stdin) prompt += chunk;
   const count = fs.existsSync(trace) ? fs.readFileSync(trace,'utf8').trim().split('\\n').length : 0;
-  fs.appendFileSync(trace, JSON.stringify({args:process.argv.slice(2)})+'\\n');
+  fs.appendFileSync(trace, JSON.stringify({args:process.argv.slice(2),prompt})+'\\n');
   const emit = event => console.log(JSON.stringify(event));
-  emit({type:'thread.started',thread_id:'11111111-1111-4111-8111-111111111111'});
+  const threadId = scenario==='compiler-recovery' && count
+    ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111';
+  emit({type:'thread.started',thread_id:threadId});
   emit({type:'turn.started'});
   if (scenario==='auth') { emit({type:'error',message:'401 Unauthorized: invalid API key'}); return; }
+  if (scenario==='safety') {
+    emit({type:'turn.failed',error:{message:'request timed out',codex_error_info:'cyber_policy'}});
+    return;
+  }
+  if (scenario==='compiler-recovery' && !count) {
+    emit({type:'error',message:'request timed out',codex_error_info:'cyber_policy'});
+    return;
+  }
   if ((scenario==='terminal-retry' && !count) || scenario==='exhausted') {
     emit({type:'turn.failed',error:{message:'request timed out'}}); return;
   }
@@ -74,6 +93,7 @@ const scenario = ${JSON.stringify(scenario)};
       name:"recovery", provider:"codex", model:"gpt-6-astra", reasoningEffort:"high",
       workdir, useExistingWorkdir:true, stateBaseDir, codexPath:provider,
       loopGoalsEnabled:false, freshThreadPerTurn:false, eventLogScope:"run", maxTurns:2,
+      compilerRecoveryOnSafetyStop:scenario==="compiler-recovery",
       initialStage:"pa1", resourceLimits:false, sessionIsolation:false,
       checks:{verify:{command:"echo '===== ALL TESTS PASSED SUCCESSFULLY! (1/1) ====='",required:true}},
       phases:[{name:"audit",runWhenChecksPass:true,checks:["verify"]}],
@@ -85,14 +105,27 @@ const scenario = ${JSON.stringify(scenario)};
         RALPH_PROVIDER_TRANSIENT_RETRY_MAX:"2", RALPH_PROVIDER_TRANSIENT_RETRY_INITIAL_MS:"1",
         RALPH_PROVIDER_TRANSIENT_RETRY_MAX_WAIT_MS:"1"},
     });
-    const failure = scenario==='exhausted' || scenario==='auth';
+    const failure = scenario==='exhausted' || scenario==='auth' || scenario==='safety';
     assert.equal(run.status, failure ? 1 : 0, `${run.stdout}\n${run.stderr}`);
-    const invocations = (await fs.readFile(trace,"utf8")).trim().split("\n");
-    assert.equal(invocations.length, scenario==='exhausted' ? 3 : scenario.endsWith('retry') ? 2 : 1);
+    const invocations = (await fs.readFile(trace,"utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(invocations.length, scenario==='exhausted' ? 3 : scenario.endsWith('retry') || scenario==='compiler-recovery' ? 2 : 1);
     const events = (await fs.readFile(path.join(stateDir,"events","run.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
     const failed = events.filter(event=>event.eventType==='ralph.turn-failed');
     assert.equal(failed.length, scenario==='exhausted' ? 3 : scenario==='reconnect-success' ? 0 : 1);
     const state = JSON.parse(await fs.readFile(path.join(stateDir,"state.json"),"utf8"));
+    if (scenario === "safety") {
+      assert.match(run.stderr, /Codex safety policy stopped turn 1/);
+      assert.equal(state.activeTurn.errorKind, "codex_safety_stop");
+      assert.equal(failed[0].event.error.kind, "codex_safety_stop");
+    }
+    if (scenario === "compiler-recovery") {
+      assert.equal(failed[0].event.error.kind, "codex_safety_stop");
+      assert.doesNotMatch(invocations[0].prompt, /original compiler assignment/);
+      assert.doesNotMatch(invocations[1].prompt, /request timed out/);
+      assert.match(invocations[1].prompt, /Work only within the original compiler assignment/);
+      assert.ok(!invocations[1].args.includes("resume"));
+      assert.notEqual(state.threadId, failed[0].threadId);
+    }
     if (failure) {
       assert.equal(state.activeTurn.status,"failed");
       assert.ok(Date.parse(state.activeTurn.endedAt)>=Date.parse(state.activeTurn.startedAt));

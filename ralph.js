@@ -54,7 +54,7 @@ import {
 } from "./codex-goal-completion.js";
 import { readResumableCodexGoal } from "./codex-goal-resume.js";
 import { interruptedCodexAuthentication, isCodexAuthenticationError } from "./codex-auth-recovery.js";
-import { isCodexProviderInterruption, normalizeCodexProviderInterruption } from "./codex-provider-recovery.js";
+import { isCodexProviderInterruption, isCodexSafetyStop, normalizeCodexProviderInterruption } from "./codex-provider-recovery.js";
 import { runCodexGoalHost } from "./codex-goal-host.js";
 import { createClaudeResponseWatchdog } from "./claude-response-watchdog.js";
 import { UnrealAgentEventConverter } from "./unreal-agent-events.js";
@@ -120,6 +120,11 @@ const PROVIDER_TRANSIENT_RETRY_BACKOFF_FACTOR = Number(
 );
 // How many turns in a row may be lost to OOM kills before the loop gives up.
 const OOM_RECOVERY_MAX = Number(process.env.RALPH_OOM_RECOVERY_MAX ?? 3);
+const COMPILER_RECOVERY_SCOPE =
+  "A previous attempt ended at a safety stop. Work only within the original compiler assignment. " +
+  "Choose a different approach using local source review, ordinary compiler changes, and language conformance or performance checks. " +
+  "Review any existing worktree changes before using them. Leave the stopped action aside and avoid all cybersecurity-related work. " +
+  "If the assignment cannot proceed within this scope, report the blocker and stop.";
 // A provider can terminate itself with an over-broad kill command. Retry the
 // interrupted Ralph turn, but cap attempts so a persistent crash cannot loop.
 const SIGTERM_RECOVERY_MAX = Number(process.env.RALPH_SIGTERM_RECOVERY_MAX ?? 3);
@@ -197,6 +202,7 @@ const DEFAULT_CONFIG = {
   loopGoalsEnabled: true,
   goalTokenBudget: null,
   freshThreadPerTurn: false,
+  compilerRecoveryOnSafetyStop: false,
   eventLogScope: "thread",
   autoCommitOnPassingChecks: false,
   testTimeoutRetries: 0,
@@ -436,6 +442,7 @@ async function main() {
   let reuseLastChecksForNextTurn = reuseLastChecksRequested;
   let pendingRecoveryNote = null;
   let consecutiveOomRecoveries = 0;
+  let compilerSafetyRecovery = null;
   // Prevent a stop from writing a second check record for an accepted turn.
   let checkedTurnNumber = null;
   turnLoop:
@@ -468,10 +475,12 @@ async function main() {
       backend = null;
       continueThreadId = null;
     }
-    const phaseStatus = reuseLastChecksForNextTurn
+    // Start the scoped handoff with the original checks. The stopped attempt
+    // may have left edits that should be reviewed before running them.
+    const phaseStatus = compilerSafetyRecovery?.phaseStatus ?? (reuseLastChecksForNextTurn
       ? await reuseLatestPhaseChecksFromEventLog({ state, phase, threadId: activeThreadId,
         resumeTurnNumber: authenticationFailure ? state.activeTurn?.turnNumber : null })
-      : await runPhaseChecks(state, phase, phaseCheckReuse);
+      : await runPhaseChecks(state, phase, phaseCheckReuse));
     reuseLastChecksForNextTurn = false;
     phaseCheckReuse = null;
     const testStatus = phaseStatus.testStatus;
@@ -512,13 +521,13 @@ async function main() {
       );
     }
     let gitStatus = await getGitStatus(CONFIG.workdir);
-    if (phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
+    if (!compilerSafetyRecovery && phaseStatus.allRequiredPassed && !gitStatus.clean && CONFIG.autoCommitOnPassingChecks) {
       gitStatus = await autoCommitPassingChanges({ phase, phaseStatus, gitStatus });
     }
     const activeStageForTurn = getStateActiveStageAfterTest(testStatus);
     const activeSubsetForTurn = getStateActiveSubsetAfterTest(testStatus, state);
     const computedCleanupOnlyTurn = phaseStatus.allRequiredPassed && !gitStatus.clean;
-    const resumedTurnContext = continueThreadId
+    const resumedTurnContext = continueThreadId || compilerSafetyRecovery
       ? getMatchingActiveTurnContext(state, {
         turnNumber: turnNumber + 1,
         phase,
@@ -529,15 +538,15 @@ async function main() {
     const cleanupOnlyTurn = resumedTurnContext?.cleanupOnly ?? computedCleanupOnlyTurn;
     if (resumedTurnContext && resumedTurnContext.cleanupOnly !== computedCleanupOnlyTurn) {
       log(
-        `--continue: preserving original turn ${turnNumber + 1} start classification ` +
+        `${compilerSafetyRecovery ? "Compiler recovery" : "--continue"}: preserving original turn ${turnNumber + 1} start classification ` +
           `(cleanupOnly=${resumedTurnContext.cleanupOnly ? "true" : "false"}, ` +
           `startedClean=${resumedTurnContext.startedClean ? "true" : "false"}) ` +
           `despite current worktree cleanupOnly=${computedCleanupOnlyTurn ? "true" : "false"}.`,
       );
     }
-    // Passing checks cannot finish an interrupted model handoff. An explicit
-    // continuation (including credential recovery) must return to the worker.
-    const shouldRunRequiredPhaseTurn = (phaseStatus.allRequiredPassed && Boolean(resumedTurnContext)) ||
+    // Passing checks cannot finish an interrupted model handoff. Return to
+    // the worker for both resumed turns and scoped compiler recovery.
+    const shouldRunRequiredPhaseTurn = (phaseStatus.allRequiredPassed && Boolean(resumedTurnContext || compilerSafetyRecovery)) ||
       shouldRunPhaseTurn({ phase, phaseStatus, gitStatus, state });
     log(`Phase check status: ${formatPhaseCheckResults(phaseStatus)}`);
     log(`Primary test status: ${formatTestStatusSummary(testStatus)}`);
@@ -849,7 +858,8 @@ async function main() {
     }
 
     PROMPT_PARTIALS = await loadPromptPartials();
-    const freshThreadForTurn = CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId;
+    const freshThreadForTurn = Boolean(compilerSafetyRecovery) ||
+      (CONFIG.freshThreadPerTurn && !configuredThreadId && !continueThreadId);
     if (freshThreadForTurn) {
       if (activeThreadId) {
         log(`Starting a fresh ${providerLabel} thread for this turn; previous thread was ${activeThreadId}`);
@@ -883,7 +893,8 @@ async function main() {
         phaseStatus,
         turnNumber: turnNumber + 1,
         agentProfile,
-        preserveExistingGoal: Boolean(resumedTurnContext),
+        preserveExistingGoal: Boolean(continueThreadId && resumedTurnContext),
+        compilerSafetyRecovery,
       });
       activeThreadId = preparedGoal.threadId;
       if (activeThreadId) {
@@ -940,6 +951,9 @@ async function main() {
 
     const loopGoal = loopGoalEventRecord?.event?.goal ?? null;
     let turnPrompt = attachPortableGoalPrompt(prompt, loopGoal, agentProfile);
+    if (compilerSafetyRecovery) {
+      turnPrompt = `${COMPILER_RECOVERY_SCOPE}\n\n${turnPrompt}`;
+    }
     if (pendingRecoveryNote) {
       turnPrompt = `${pendingRecoveryNote}\n\n${turnPrompt}`;
       pendingRecoveryNote = null;
@@ -957,6 +971,7 @@ async function main() {
         startedAt: new Date().toISOString(),
         endedAt: null,
         error: null,
+        errorKind: null,
       };
       await saveState({ ...state, updatedAt: state.activeTurn.startedAt });
       try {
@@ -1000,11 +1015,15 @@ async function main() {
         const failedAt = new Date().toISOString();
         const failedThreadId = error?.threadId ?? thread?.id ?? activeThreadId ?? null;
         state.threadId = failedThreadId;
-        const authenticationError = agentProfile.provider === "codex" && isCodexAuthenticationError(error);
+        const safetyStop = agentProfile.provider === "codex" && isCodexSafetyStop(error);
+        const authenticationError = agentProfile.provider === "codex" && !safetyStop && isCodexAuthenticationError(error);
         const failureMessage = authenticationError
           ? `Codex authentication failed: ${formatErrorMessage(error)}`
           : formatErrorMessage(error);
-        state.activeTurn = { ...state.activeTurn, status: "failed", endedAt: failedAt, error: failureMessage };
+        const errorKind = safetyStop ? "codex_safety_stop" : null;
+        state.activeTurn = {
+          ...state.activeTurn, status: "failed", endedAt: failedAt, error: failureMessage, errorKind,
+        };
         if (agentProfile.provider === "codex" && requiresCodexGoalCompletion(loopGoal, "codex") &&
             isCodexProviderInterruption(error)) {
           state.codexGoalInterruption = normalizeCodexProviderInterruption({
@@ -1019,9 +1038,32 @@ async function main() {
           threadId: failedThreadId,
           turnNumber: turnNumber + 1,
           eventType: "ralph.turn-failed",
-          event: { type: "ralph.turn-failed", sender: "ralph", startedAt: state.activeTurn.startedAt, error: { message: failureMessage } },
+          event: {
+            type: "ralph.turn-failed",
+            sender: "ralph",
+            startedAt: state.activeTurn.startedAt,
+            error: { message: failureMessage, ...(errorKind ? { kind: errorKind } : {}) },
+          },
         });
         await saveState({ ...state, updatedAt: failedAt });
+        if (safetyStop) {
+          if (!CONFIG.compilerRecoveryOnSafetyStop || compilerSafetyRecovery || shutdownInProgress) {
+            throw new Error(`Codex safety policy stopped turn ${turnNumber + 1}: ${failureMessage}`);
+          }
+          const message = "Starting a fresh Codex thread restricted to the compiler assignment.";
+          log(`Codex safety policy stopped turn ${turnNumber + 1}. ${message}`);
+          await appendRalphEventRecord(buildRalphAgentRecoveryEventRecord({
+            provider: agentProfile.provider,
+            threadId: failedThreadId,
+            turnNumber: turnNumber + 1,
+            attempt: 1,
+            reason: "compiler_safety_recovery",
+            message,
+          }));
+          compilerSafetyRecovery = { phaseStatus, objective: loopGoal?.objective ?? null };
+          continueThreadId = null;
+          continue turnLoop;
+        }
         if (authenticationError) {
           // Codex can mark a native goal blocked on a terminal credential error.
           // Undo only that timestamp-matched infrastructure transition; exit
@@ -1256,6 +1298,7 @@ async function main() {
       }
     }
     consecutiveOomRecoveries = 0;
+    compilerSafetyRecovery = null;
     activeThreadId = thread.id ?? turn.threadId ?? activeThreadId;
     activeThreadProfile = agentProfile;
     // --continue only applies to the first provider turn.
@@ -4023,23 +4066,12 @@ async function prepareLoopGoalForTurn({
   phaseStatus,
   agentProfile,
   preserveExistingGoal = false,
+  compilerSafetyRecovery = null,
 }) {
-  if (agentProfile.provider !== "codex") {
-    return preparePortableLoopGoalForTurn({
-      threadId,
-      testStatus,
-      gitStatus,
-      turnNumber,
-      phase,
-      phaseStatus,
-      agentProfile,
-    });
-  }
-
   // An interrupted Ralph turn still owns its original objective and usage.
   // Keep this outside the new-goal fallback: a failed read must never reset an
   // existing native goal or silently replace it with a portable prompt goal.
-  if (preserveExistingGoal) {
+  if (agentProfile.provider === "codex" && preserveExistingGoal) {
     if (!threadId) throw new Error("Cannot preserve a Codex goal without its thread id");
     return withCodexAppServer(async (client) => {
       const savedState = await loadState();
@@ -4053,6 +4085,15 @@ async function prepareLoopGoalForTurn({
       log(`Preserving existing Codex loop goal: ${previewText(goal.objective)}`);
       return { threadId, goal, startedThread: false, preserved: true };
     });
+  }
+
+  const phaseObjective = compilerSafetyRecovery?.objective ??
+    buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus });
+  const objective = compilerSafetyRecovery
+    ? truncateGoalObjective(`${COMPILER_RECOVERY_SCOPE}\n\n${phaseObjective}`)
+    : phaseObjective;
+  if (agentProfile.provider !== "codex") {
+    return preparePortableLoopGoalForTurn({ threadId, turnNumber, agentProfile, objective });
   }
 
   try {
@@ -4076,7 +4117,7 @@ async function prepareLoopGoalForTurn({
 
       const params = {
         threadId: activeThreadId,
-        objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
+        objective,
         status: "active",
       };
       if (CONFIG.goalTokenBudget != null) {
@@ -4092,15 +4133,7 @@ async function prepareLoopGoalForTurn({
     });
   } catch (error) {
     log(`Failed to set Codex loop goal; using portable prompt goal: ${formatErrorMessage(error)}`);
-    return preparePortableLoopGoalForTurn({
-      threadId,
-      testStatus,
-      gitStatus,
-      turnNumber,
-      phase,
-      phaseStatus,
-      agentProfile,
-    });
+    return preparePortableLoopGoalForTurn({ threadId, turnNumber, agentProfile, objective });
   }
 }
 
@@ -4145,15 +4178,7 @@ async function completeLoopGoalIfPresent(
   await completePortableLoopGoalIfPresent(threadId, testStatus, turnNumber);
 }
 
-async function preparePortableLoopGoalForTurn({
-  threadId,
-  testStatus,
-  gitStatus,
-  turnNumber,
-  phase,
-  phaseStatus,
-  agentProfile,
-}) {
+async function preparePortableLoopGoalForTurn({ threadId, turnNumber, agentProfile, objective }) {
   // These providers mint their own conversation/session ids on the first turn,
   // so leave the thread id unset until the provider reports it.
   const activeThreadId =
@@ -4167,7 +4192,7 @@ async function preparePortableLoopGoalForTurn({
     id: `ralph-goal-${turnNumber}`,
     provider: "ralph-portable",
     threadId: activeThreadId,
-    objective: buildLoopGoalObjective({ testStatus, gitStatus, turnNumber, phase, phaseStatus }),
+    objective,
     status: "active",
     createdAt: now,
     updatedAt: now,
@@ -7557,7 +7582,6 @@ async function collectStreamedTurn(events, options = {}) {
   let finalResponse = "";
   let usage = null;
   let turnFailure = null;
-  let streamError = null;
   let pendingReconnect = null;
   const prompt = typeof options.prompt === "string" ? options.prompt : "";
   let threadId = options.threadId ?? null;
@@ -7611,20 +7635,19 @@ async function collectStreamedTurn(events, options = {}) {
       turnFailure = event.error;
       break;
     } else if (event.type === "error") {
-      if (provider === "codex" && TURN_LIFECYCLE.isCodexReconnectNotice(event)) {
+      if (provider === "codex" && TURN_LIFECYCLE.isCodexReconnectNotice(event) && !isCodexSafetyStop(event)) {
         pendingReconnect = event.message;
         continue;
       }
-      streamError = event.message;
+      turnFailure = event;
       break;
     }
   }
 
   if (turnFailure) {
-    throw buildStreamedTurnError(turnFailure.message, { threadId, turnNumber });
-  }
-  if (streamError) {
-    throw buildStreamedTurnError(streamError, { threadId, turnNumber });
+    throw buildStreamedTurnError(turnFailure.message, {
+      threadId, turnNumber, codexErrorInfo: turnFailure.codexErrorInfo ?? turnFailure.codex_error_info,
+    });
   }
   if (pendingReconnect) {
     throw buildStreamedTurnError(`Codex stream disconnected before completion: ${pendingReconnect}`, { threadId, turnNumber });
@@ -7635,10 +7658,11 @@ async function collectStreamedTurn(events, options = {}) {
   return { items, finalResponse, usage, threadId };
 }
 
-function buildStreamedTurnError(message, { threadId = null, turnNumber = null } = {}) {
+function buildStreamedTurnError(message, { threadId = null, turnNumber = null, codexErrorInfo } = {}) {
   const error = new Error(message);
   error.threadId = threadId;
   error.turnNumber = turnNumber;
+  if (codexErrorInfo != null) error.codexErrorInfo = codexErrorInfo;
   return error;
 }
 
@@ -7918,6 +7942,10 @@ async function loadConfig() {
     freshThreadPerTurn: parseBoolean(
       process.env.RALPH_FRESH_THREAD_PER_TURN ?? fileConfig.freshThreadPerTurn,
       DEFAULT_CONFIG.freshThreadPerTurn,
+    ),
+    compilerRecoveryOnSafetyStop: parseBoolean(
+      fileConfig.compilerRecoveryOnSafetyStop,
+      DEFAULT_CONFIG.compilerRecoveryOnSafetyStop,
     ),
     eventLogScope: normalizeEventLogScope(
       process.env.RALPH_EVENT_LOG_SCOPE ?? fileConfig.eventLogScope ?? DEFAULT_CONFIG.eventLogScope,
@@ -8945,6 +8973,7 @@ function normalizeActiveTurnState(value) {
     startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
     endedAt: typeof value.endedAt === "string" ? value.endedAt : null,
     error: typeof value.error === "string" ? value.error : null,
+    errorKind: value.errorKind === "codex_safety_stop" ? value.errorKind : null,
   };
 }
 

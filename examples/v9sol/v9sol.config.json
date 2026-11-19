@@ -316,6 +316,7 @@
   "loopGoalsEnabled": true,
   "goalTokenBudget": null,
   "freshThreadPerTurn": true,
+  "compilerRecoveryOnSafetyStop": true,
   "eventLogScope": "run",
   "initialStage": "pa1",
   "resourceLimits": {
